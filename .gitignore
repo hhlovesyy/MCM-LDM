@@ -32,6 +32,10 @@ env/
 # 比如你创建了一个 outputs/ 文件夹来存放生成的图片，你可能不想提交它
 outputs/
 datasets/
+checkpoints/
+deps/
+results/
+experiments/
 
 # 操作系统生成的文件
 .DS_Store
