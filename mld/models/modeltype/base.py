@@ -75,10 +75,10 @@ class BaseModel(LightningModule):
         if not self.trainer.sanity_checking:
             self.log_dict(dico, sync_dist=True, rank_zero_only=True)
 
-    def training_epoch_end(self, outputs):
+    def on_training_epoch_end(self, outputs=None):
         return self.allsplit_epoch_end("train", outputs)
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self, outputs=None):
         # # ToDo
         # # re-write vislization checkpoint?
         # # visualize validation
