@@ -94,7 +94,7 @@ class StyleClassifierTransformer(pl.LightningModule):
 
     def _common_step_latent(self, batch, batch_idx, stage: str): # Renamed to avoid confusion
         original_motion = batch["motion"]    # 原始的、可能未归一化的动作数据
-        style_labels = batch["scene_labels"]
+        style_labels = batch["style_labels"]
         lengths = batch["length"]
         current_batch_size = original_motion.size(0)
 

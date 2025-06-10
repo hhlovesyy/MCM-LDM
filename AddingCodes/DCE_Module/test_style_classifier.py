@@ -17,13 +17,13 @@ from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar, Learni
 # 以及主项目的 instantiate_from_config
 # (假设 train_cstyle_on_latent.py 和 style_classifier_model.py 在同一目录或PYTHONPATH可达)
 from train_style_classifier import StyleClassifierLatentDataModule # 我们的DataModule
-from mld.data.utils import mld_collate_scene                   # collate_fn
+from mld.data.utils import mld_collate_style          # collate_fn
 from mld.config import instantiate_from_config                 # 用于加载VAE
 
 def parse_cli_args():
     parser = ArgumentParser()
     # 默认配置文件现在应该是用于潜变量Cstyle训练的那个
-    parser.add_argument("--config", type=str, default="style_classifier_latent_config.yaml",
+    parser.add_argument("--config", type=str, default="AddingCodes/DCE_Module/style_classifier_config.yaml",
                         help="Path to the configuration file used for Cstyle_latent training.")
     parser.add_argument("--checkpoint_path", type=str, required=True,
                         help="Path to the trained Cstyle_latent model checkpoint (.ckpt).")
@@ -105,31 +105,31 @@ def main(cfg: DictConfig, checkpoint_path: str, cli_args: object):
         print(f"CRITICAL: Could not load WordVectorizer: {e}")
         sys.exit(1)
 
-    # 使用 StyleClassifierLatentDataModule
+    # 实例化我们修改后的DataModule
     datamodule = StyleClassifierLatentDataModule(
-        cfg_for_humanml_dm=datamodule_init_cfg,
-        vae_model_instance=vae_model_instance,
-        mean_for_vae_input=mean_for_vae_input_np,
-        std_for_vae_input=std_for_vae_input_np,
-        # 其他参数来自当前测试的配置文件 (cfg，即 style_classifier_latent_config.yaml)
-        batch_size=cfg.data.batch_size, # 使用更新后的batch_size (可能被命令行覆盖)
-        num_workers=cfg.data.num_workers,
-        data_root=cfg.data.data_root,
-        motion_dir_name=cfg.data.motion_dir_name,
-        text_dir_name=cfg.data.text_dir_name,
-        scene_label_filename=cfg.data.scene_label_filename,
-        num_scene_classes=cfg.model.params.num_styles, # Cstyle的类别数
-        split_train_filename=cfg.data.split_train_filename, # test时通常不需要
-        split_val_filename=cfg.data.split_val_filename,     # test时通常不需要
-        split_test_filename=cfg.data.get("split_test_filename", None), # **必须提供测试集文件**
-        max_motion_length=cfg.data.max_motion_length,
-        min_motion_length=cfg.data.min_motion_length,
-        max_text_len=cfg.data.max_text_len,
+        cfg_for_humanml_dm=datamodule_init_cfg, # 传递主项目的配置结构
+        vae_model_instance=vae_model_instance,   # 传递冻结的VAE
+        mean_for_vae_input=mean_for_vae_input_np, # 传递VAE输入的均值
+        std_for_vae_input=std_for_vae_input_np,   # 传递VAE输入的标准差
+        # 以下是 HumanML3DSceneDataModule 的其他参数，从当前cfg读取
+        batch_size=cfg.data.batch_size, # 64
+        num_workers=cfg.data.num_workers, # 4
+        data_root=cfg.data.data_root,  # '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/100StyleDataset'
+        motion_dir_name=cfg.data.motion_dir_name, # 'new_joint_vecs'，这是263维的feature作为输入
+        text_dir_name=cfg.data.text_dir_name, # 'texts'
+        style_label_filepath=cfg.data.style_label_filename, # 'Style_name_dict.txt'
+        num_style_classes=cfg.model.params.num_styles, # 100
+        split_train_filename=cfg.data.split_train_filename, # 'train.txt'
+        split_val_filename=cfg.data.split_val_filename, # 'val.txt'
+        split_test_filename=cfg.data.get("split_test_filename", None),
+        max_motion_length=cfg.data.max_motion_length, # 200
+        min_motion_length=cfg.data.min_motion_length,  # 10
+        max_text_len=cfg.data.max_text_len, # 虽然Cstyle不直接用文本，但DataModule可能需要
         unit_length=cfg.data.unit_length,
-        mean=mean_for_vae_input_np, 
-        std=std_for_vae_input_np,   
-        w_vectorizer=w_vectorizer,    
-        collate_fn=mld_collate_scene
+        mean=mean_for_vae_input_np, # 父类HumanML3DSceneDataModule的hparams.mean
+        std=std_for_vae_input_np,   # 父类HumanML3DSceneDataModule的hparams.std
+        w_vectorizer=w_vectorizer,    # 父类HumanML3DSceneDataModule的hparams.w_vectorizer
+        collate_fn=mld_collate_style
     )
     print("DataModule initialized for testing.")
     

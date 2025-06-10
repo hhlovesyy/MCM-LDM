@@ -1,0 +1,145 @@
+# dce_training_config.yaml
+
+experiment:
+  name: "DCE_Training_Experiment_v1"
+  seed_value: 42
+  accelerator: "gpu"
+  devices: [0]
+
+# --- Data Loading Parameters (passed to HumanML3DSceneDataModule) ---
+data:
+  data_root: "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/100StyleDataset/" # YOUR_PATH
+  batch_size: 32 # Adjust as needed
+  num_workers: 4
+  # Parameters for HumanML3DSceneDataModule constructor
+  motion_dir_name: "new_joint_vecs"
+  text_dir_name: "texts"
+  style_label_filepath: "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/100StyleDataset/Style_name_dict.txt"
+  split_train_filename: "train.txt"
+  split_val_filename: "val.txt"
+  split_test_filename: "test.txt"   # For optional testing after training
+  max_motion_length: 200 
+  min_motion_length: 10
+  max_text_len: 20
+  unit_length: 4
+  # Paths for mean, std, and word vectorizer (MUST BE PROVIDED)
+  # 注意！！ 这个mean和std需要是HumanML3D的，因为我们冻结了VAE的参数，这一点还请务必注意
+  mean_path: "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Mean.npy" # YOUR_PATH
+  std_path: "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Std.npy"   # YOUR_PATH
+  word_vectorizer_path: "deps/t2m/glove/" # YOUR_PATH or .pkl
+
+# --- Paths to Pretrained Models and Main MLD Configs ---
+dependencies:
+  cstyle_checkpoint_path: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/style_classifier_checkpoints/style_classifier_training_experiment_v1/checkpoints/style-classifier-epoch=54-val_acc=0.95.ckpt" # YOUR_PATH (from StyleClassifier training)
+  vae_checkpoint_path: "/root/autodl-tmp/MyRepository/MCM-LDM/checkpoints/vae_checkpoint/vae7.ckpt" # YOUR_PATH (MCM-LDM's VAE checkpoint)
+  main_mld_config_path: "/root/autodl-tmp/MyRepository/MCM-LDM/configs/config_train_denoiser.yaml" # Path to a main MLD config
+  base_mld_config_path: "/root/autodl-tmp/MyRepository/MCM-LDM/configs/base.yaml" # Path to a base MLD config
+
+# --- DCE Module Configuration ---
+# This section defines the DCETrainingModule's parameters
+dce_module:
+  # Definition of the DCE network itself (passed to DisentangledContentExtractor)
+  dce_definition:
+    target: dce_model.DisentangledContentExtractor # Class path for DCE
+    params:
+      input_dim: 256          # VAE latent dim per token
+      num_input_tokens: 7     # Number of VAE latent tokens
+      d_model: 256            # DCE internal Transformer dim
+      nhead: 4
+      num_encoder_layers: 3
+      dim_feedforward: 1024
+      dropout: 0.1
+      output_dim: 256         # Should match input_dim
+
+  # Configuration for loading Cstyle (StyleClassifierTransformer)
+  # This is needed by DCETrainingModule to know Cstyle's original hparams if load_from_checkpoint doesn't get them all
+  # However, StyleClassifierTransformer.load_from_checkpoint should load its own hparams.
+  # We mainly need num_styles from it for data module.
+  cstyle_params:
+    target: style_classifier_model.StyleClassifierTransformer # Class path for Cstyle
+    params: # These are Cstyle's hparams, can be minimal if checkpoint loads them
+      input_feats: 263
+      num_styles: 100
+      d_model: 256 # Example, actual will be loaded from cstyle_checkpoint_path
+      # ... other Cstyle hparams if needed for instantiation before loading checkpoint
+      # ... but load_from_checkpoint should handle this.
+
+  # Configuration for loading VAE (MotionVAE from MLD)
+  # This structure should match how MLD's `instantiate_from_config` expects VAE config
+  vae_params:
+    # target: mld.models.architectures.mld_vae.MldVae # YOUR VAE CLASS PATH from MLD project
+    # params:
+    #   # Parameters that your MotionVAE class constructor needs
+    #   # e.g., from your MCM-LDM's VAE config section (like cfg.model.motion_vae in mld.py)
+    #   latent_dim: [7, 256] # Example: [num_tokens, dim_per_token]
+    #   ff_size: 1024
+    #   num_layers: 4
+    #   num_heads: 4
+    #   dropout: 0.1
+    #   activation: "gelu"
+    #   nfeats: 263 # This is important for VAE
+    #   # ... any other params your VAE class takes
+    #   # Ensure these params match the VAE loaded from vae_checkpoint_path
+    #   ablation:
+    #     SKIP_CONNECT: True
+    #     PE_TYPE: mld
+    #     DIFF_PE_TYPE: mld
+    target: mld.models.architectures.mld_vae.MldVae
+    params:
+      arch: 'encoder_decoder'
+      ff_size: 1024
+      num_layers: 9
+      num_heads: 4
+      dropout: 0.1
+      normalize_before: false
+      activation: 'gelu'
+      position_embedding: 'learned'
+      latent_dim: [7, 256]
+      nfeats: 263
+      ablation: 
+        SKIP_CONNECT: True
+        PE_TYPE: mld
+        DIFF_PE_TYPE: mld
+
+# --- Optimizer Settings (for DCE parameters) ---
+optimizer:
+  learning_rate: 0.0001
+
+# --- Loss Weights ---
+loss_weights:
+  lambda_style: 0.2
+  lambda_content: 0.8 # Adjust these weights as needed
+  lambda_grl: 1.0      # GRL lambda (can be annealed in the model)
+
+# --- Trainer Settings (PyTorch Lightning Trainer) ---
+trainer:
+  max_epochs: 50 # Adjust as needed
+  # strategy: null
+  log_every_n_steps: 20
+  check_val_every_n_epoch: 1
+  precision: 32 # "16-mixed", 32, "bf16-mixed"
+  run_test_after_train: True # Whether to run test set after training
+
+# --- Logger Settings ---
+logger:
+  tensorboard: True
+  wandb:
+    enable: False
+    project: "DCE_Training_Project"
+    entity: null # Your WandB entity
+    offline: False
+
+# --- Checkpoint Settings ---
+checkpoint:
+  dirpath: "experiments/dce_checkpoints" # Subdirectory for DCE model checkpoints
+  filename: "dce-{epoch:02d}-{val_total_loss:.3f}" # Checkpoint filename pattern
+  monitor: "val_total_loss"    # Metric to monitor for saving best models
+  mode: "min"                  # "min" for loss, "max" for accuracy
+  save_top_k: 2
+  save_last: True
+  every_n_epochs: 1
+
+ABLATION:                               
+    SKIP_CONNECT: True
+    PE_TYPE: mld
+    DIFF_PE_TYPE: mld

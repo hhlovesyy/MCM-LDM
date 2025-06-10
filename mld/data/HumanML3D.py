@@ -203,7 +203,7 @@ class Style100DataModule(BASEDataModule):
                     "split_file": actual_split_file_path,
                     "motion_dir": pjoin(self.hparams.data_root, self.hparams.motion_dir_name),
                     "text_dir": pjoin(self.hparams.data_root, self.hparams.text_dir_name),
-                    "scene_label_filepath": pjoin(self.hparams.data_root, self.hparams.style_label_filepath),
+                    "style_label_filepath": pjoin(self.hparams.data_root, self.hparams.style_label_filepath),
                     "num_style_classes": self.hparams.num_style_classes,
                     # Processing parameters
                     "max_motion_length": self.hparams.max_motion_length,

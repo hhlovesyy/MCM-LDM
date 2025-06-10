@@ -61,20 +61,59 @@ class WordVectorizer(object):
     def __len__(self):
         return len(self.word2vec)
 
+    # 修复了 __getitem__ 方法，添加了对 '/' 分隔符的处理，如果因为某种原因没有词性（比如Spicy处理的问题），则添加默认的词性
     def __getitem__(self, item):
-        word, pos = item.split('/')
+        # print(f"--- WV_INPUT --- ITEM_START --- '{item}' (type: {type(item)}) --- ITEM_END ---")
+
+        if not isinstance(item, str):
+            print(f"    WV_ERROR: Item is not a string! Got: {type(item)}, value: '{item}'")
+            raise TypeError(f"WordVectorizer expected a string item, but got {type(item)} with value '{item}'")
+
+        word_raw = ""
+        pos = ""
+
+        if '/' not in item:
+            # --- 紧急修复：给孤立的词添加默认词性 ---
+            # print(f"    WV_WARNING: Item '{item}' does not contain '/' separator. Assigning default POS 'OTHER'.")
+            word_raw = item  # 整个 item 被当作单词部分
+            pos = 'OTHER'    # 分配默认词性 'OTHER'
+            # -----------------------------------------
+        else:
+            try:
+                # 仍然建议使用 split('/', 1) 来确保只分割一次
+                parts = item.split('/', 1)
+                if len(parts) == 2:
+                    word_raw, pos = parts
+                    if not pos.strip(): # 如果分割后 pos 是空字符串 (例如 item 是 "word/")
+                        print(f"    WV_WARNING: Item '{item}' resulted in empty POS after split. Defaulting POS to 'OTHER'.")
+                        pos = 'OTHER'
+                else: # len(parts) == 1, 理论上 'if '/' not in item:' 已经处理了，但作为保险
+                    print(f"    WV_WARNING: Item '{item}' after split resulted in unexpected parts: {parts}. Treating as isolated word.")
+                    word_raw = item
+                    pos = 'OTHER'
+
+            except Exception as e: # 捕获其他可能的分割问题
+                print(f"    WV_CRITICAL_ERROR: Unexpected error during item.split('/', 1) for item: '{item}'. Exception: {e}. Defaulting.")
+                word_raw = item # 尝试将整个item作为单词
+                pos = 'OTHER'   # 分配默认词性
+
+        word = word_raw.replace('#SLASH#', '/') # 还原 #SLASH#
+
+        # --- 原有的 VIP 词处理逻辑 (保持不变) ---
         if word in self.word2vec:
             word_vec = self.word2vec[word]
-            vip_pos = None
-            for key, values in VIP_dict.items():
-                if word in values:
-                    vip_pos = key
+            vip_pos_override = None
+            for key_vip, values_vip in VIP_dict.items(): # 确保 VIP_dict 可访问
+                if word in values_vip:
+                    vip_pos_override = key_vip
                     break
-            if vip_pos is not None:
-                pos_vec = self._get_pos_ohot(vip_pos)
+            if vip_pos_override is not None:
+                final_pos_for_ohot = vip_pos_override
             else:
-                pos_vec = self._get_pos_ohot(pos)
+                final_pos_for_ohot = pos # 使用从 item 中得到的 (可能已设为'OTHER'的) pos
         else:
             word_vec = self.word2vec['unk']
-            pos_vec = self._get_pos_ohot('OTHER')
+            final_pos_for_ohot = 'OTHER' # 未知词的词性也设为 'OTHER'
+        
+        pos_vec = self._get_pos_ohot(final_pos_for_ohot) # 确保 _get_pos_ohot 能处理 'OTHER'
         return word_vec, pos_vec
