@@ -1,0 +1,107 @@
+# style_classifier_config.yaml
+
+experiment:
+  name: "style_classifier_training_experiment_v1" # 训练实验名称
+  seed_value: 42
+  accelerator: "gpu"
+  devices: [0]     # 使用的GPU ID列表，例如 [0] 或 [0, 1]
+
+# --- Data ---
+# 你需要根据你的实际情况调整下面的数据集配置路径和参数
+# 这里的配置项是为了让训练脚本能够通过OmegaConf加载并传递给你的数据模块
+dataset_name: "100Style" # 假设你的数据模块能识别这个名字
+data_root: "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/100StyleDataset" # 数据集根目录
+batch_size: 64
+num_workers: 4
+collate_fn_name: "mld_collate_style" # 你的collate_fn名称
+
+
+# --- Paths to Pretrained Models and Main MLD Configs ---
+dependencies:
+  cstyle_checkpoint_path: "/root/autodl-tmp/MCM-LDM/experiments/style_classifier_checkpoints/StyleClassifier_Training/checkpoints/style-classifier-epoch=99-val_acc=0.98.ckpt" # YOUR_PATH (from StyleClassifier training)
+  vae_checkpoint_path: "/root/autodl-tmp/MyRepository/MCM-LDM/checkpoints/vae_checkpoint/vae7.ckpt" # YOUR_PATH (MCM-LDM's VAE checkpoint)
+  main_mld_config_path: "/root/autodl-tmp/MyRepository/MCM-LDM/configs/config_train_denoiser.yaml" # Path to a main MLD config
+  base_mld_config_path: "/root/autodl-tmp/MyRepository/MCM-LDM/configs/base.yaml" # Path to a base MLD config
+
+# --- Model: StyleClassifierTransformer Hyperparameters ---
+model:
+  target: style_classifier_model.StyleClassifierTransformer # 仍然是这个类
+  params:
+    input_feats: 256         # **重要：改为VAE潜变量的特征维度**
+    num_input_tokens: 7      # **重要：改为VAE潜变量的序列长度**
+    num_styles: 100
+    d_model: 256             # Cstyle内部Transformer的维度 (可调)
+    nhead: 4
+    num_encoder_layers: 2
+    dim_feedforward: 512
+    dropout: 0.1
+    learning_rate: 0.0001
+
+# --- VAE Dependency (for Cstyle_Latent training) ---
+# Cstyle_Latent的训练需要一个固定的、预训练的VAE编码器
+vae_dependency:
+  # 配置用于加载 MLD 的 VAE 模型结构
+  config: # 这部分结构应该匹配MCM-LDM中定义VAE的方式
+    target: mld.models.architectures.mld_vae.MldVae # **你的VAE类路径**
+    params:
+      latent_dim: [7, 256]
+      ff_size: 1024
+      num_layers: 9 # 或者你MCM-LDM VAE的实际层数
+      num_heads: 4
+      dropout: 0.1
+      activation: "gelu"
+      nfeats: 263 # VAE的输入特征数
+      ablation:
+        SKIP_CONNECT: True
+        PE_TYPE: mld
+        DIFF_PE_TYPE: mld
+  checkpoint_path: "/root/autodl-tmp/MyRepository/MCM-LDM/checkpoints/vae_checkpoint/vae7.ckpt" 
+
+# --- Trainer Settings (PyTorch Lightning Trainer) ---
+trainer:
+  max_epochs: 100
+  # strategy: null # 如果是单GPU，可以为null或不设置；多GPU可以是 "ddp"
+  log_every_n_steps: 20
+  check_val_every_n_epoch: 1 # 每多少个epoch验证一次
+  # precision: 16 # 如果需要混合精度训练 (16 or 32)
+
+# --- Logger Settings ---
+logger:
+  tensorboard: True
+  wandb:
+    enable: False
+    project: "DCE_Training_Project"
+    entity: null # Your WandB entity
+    offline: False
+
+# --- Checkpoint Settings ---
+checkpoint:
+  dirpath: "experiments/style_classifier_checkpoints" # 模型保存路径
+  filename: "style-classifier-{epoch:02d}-{val_acc:.2f}"
+  monitor: "val_acc"    # 监控的指标
+  mode: "max"           # "min" or "max"
+  save_top_k: 3         # 保存最好的k个模型
+  save_last: True       # 是否总是保存最后一个epoch的模型
+  every_n_epochs: 5    # 每多少个epoch强制保存一次（独立于save_top_k）
+
+data:
+    mean_path: "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Mean.npy"
+    std_path: "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Std.npy" # 必须注意的是，VAE使用的是预训练好的VAE，因此style_classifier必须要以HumanML3D的均值和方差来做归一化
+    word_vectorizer_path: "deps/t2m/glove/"
+    motion_dir_name: "new_joint_vecs" 
+    text_dir_name: "texts"          
+    style_label_filename: "Style_name_dict.txt" 
+    split_train_filename: "train.txt" 
+    split_val_filename: "val.txt"     
+    split_test_filename: "test.txt"   
+    # 其他 Style100DataModule 需要的参数
+    max_motion_length: 200 
+    min_motion_length: 10  
+    max_text_len: 20       
+    unit_length: 4         
+    num_workers: 4
+    dataset_name: "100Style" 
+    data_root: "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/100StyleDataset" # 数据集根目录
+    batch_size: 64
+    collate_fn_name: "mld_collate_style" # 你的collate_fn名称
+  

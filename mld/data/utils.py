@@ -174,6 +174,26 @@ def mld_collate(batch):
     }
     return adapted_batch
 
+# 新增100Style数据集的mld_collate函数
+def mld_collate_style(batch):
+    notnone_batches = [b for b in batch if b is not None]
+    notnone_batches.sort(key=lambda x: x[3], reverse=True)
+    # batch.sort(key=lambda x: x[3], reverse=True)
+    adapted_batch = {
+        "motion":
+        collate_tensors([torch.tensor(b[4]).float() for b in notnone_batches]),
+        "text": [b[2] for b in notnone_batches],
+        "length": [b[5] for b in notnone_batches],
+        "word_embs":
+        collate_tensors([torch.tensor(b[0]).float() for b in notnone_batches]),
+        "pos_ohot":
+        collate_tensors([torch.tensor(b[1]).float() for b in notnone_batches]),
+        "text_len":
+        collate_tensors([torch.tensor(b[3]) for b in notnone_batches]),
+        "tokens": [b[6] for b in notnone_batches],
+        "style_labels": torch.tensor([b[7] for b in notnone_batches], dtype=torch.long)
+    }
+    return adapted_batch
 
 def a2m_collate(batch):
 

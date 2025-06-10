@@ -1,0 +1,429 @@
+# # ####################################
+# # # The following are general settings
+# # ####################################
+
+# # # Experiment name, more details in Section 'Experiment Name Explanation'
+# # #use 1029_mclip_removestylemlp_transadaln for mld.py
+# # NAME: TrainDenoiser_05291703
+# # # Debug mode. Set to True will enter the debug mode, then the program will
+# # # 1. use a tiny dataset for trianing and evaluation
+# # # 2. validate more intensively
+# # # 3. will not use `wandb logger`
+# # DEBUG: False
+# # # Devices. Optional: “cpu”, “gpu”
+# # ACCELERATOR: 'gpu'
+# # # Index of GPUs eg. [0] or [0,1,2,3]
+# # DEVICE: [1]
+
+# # #####################################
+# # # The following are training settings
+# # #####################################
+# # TRAIN:
+# #   # Model stage. Optional: "vae", "diffusion"
+# #   STAGE: diffusion
+# #   # Training dataset name
+# #   # DATASETS: ['humanml3d']
+# #   DATASETS: ['humanml3d_scene'] # HumanML3D Scene dataset,2025.5.29, 换成 humanml3d_scene
+# #   # Number of dataloader workers
+# #   NUM_WORKERS: 1
+# #   # Size of batches
+# #   BATCH_SIZE: 128
+# #   # Total epochs for training
+# #   END_EPOCH: 10
+
+# #   RESUME: '' # Resume training from this path
+# #   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
+# #   OPTIM:
+# #     TYPE: AdamW # Optimizer type
+# #     LR: 1e-4 # Learning rate
+# #   # Ablation study configurations.
+# #   ABLATION:
+# #     SKIP_CONNECT: True
+# #     PE_TYPE: mld
+# #     DIFF_PE_TYPE: mld
+
+# # #####################################
+# # # The following are validation settings
+# # #####################################
+# # EVAL:
+# #   # DATASETS: ['humanml3d'] # Evaluating datasets
+# #   DATASETS: ['humanml3d_scene'] # Evaluating datasets,2025.5.29, 换成 humanml3d_scene
+# #   BATCH_SIZE: 32 # Evaluating Batch size
+# #   SPLIT: test
+
+# # #####################################
+# # # The following are testing settings
+# # #####################################
+# # TEST:
+# #   CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
+# #   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
+# #   # DATASETS: ['humanml3d'] # training datasets
+# #   DATASETS: ['humanml3d_scene'] # training datasets,2025.5.29, 换成 humanml3d_scene
+# #   SPLIT: test
+# #   BATCH_SIZE: 128 # training Batch size
+# #   MEAN: False
+# #   NUM_SAMPLES: 1
+# #   FACT: 1
+
+# # #####################################
+# # # The following are basic datasets settings
+# # #####################################
+# # DATASET:
+# #   JOINT_TYPE: 'humanml3d' # join type
+
+# # #####################################
+# # # The following are metric settings
+# # #####################################
+# # METRIC:
+# #   TYPE: ['TemosMetric', 'TM2TMetrics']
+
+# # #####################################
+# # # The following are training losses settings
+# # #####################################
+# # LOSS:
+# #   TYPE: mld # Losses type
+# #   LAMBDA_LATENT: 1.0e-5 # Lambda for latent Losses
+# #   LAMBDA_KL: 1.0e-4 # Lambda for kl Losses
+# #   LAMBDA_REC: 1.0 # Lambda for reconstruction Losses
+# #   LAMBDA_GEN: 1.0 # Lambda for text-motion generation losses
+# #   LAMBDA_CROSS: 1.0 # Lambda for reconstruction Losses
+# #   LAMBDA_CYCLE: 0.0 # Lambda for cycle Losses
+# #   LAMBDA_PRIOR: 0.0
+# #   DIST_SYNC_ON_STEP: False # Sync Losses on step when distributed trained
+
+# # #####################################
+# # # The following are basic model settings
+# # #####################################
+# # model:
+# #   vae: true # whether vae model
+# #   model_type: mld # model type
+# #   condition: 'text'
+# #   latent_dim: [7, 256] # latent dimension
+# #   ff_size: 1024 #
+# #   num_layers: 9 # number of layers
+# #   num_head: 4 # number of head layers
+# #   droupout: 0.1 # dropout rate
+# #   activation: gelu # activation type
+# #   guidance_scale: 5 #7.5 5
+# #   guidance_uncondp: 0.25 # 0.1 0.25
+
+# # #####################################
+# # # The following are loggers settings
+# # #####################################
+# # LOGGER:
+# #   SACE_CHECKPOINT_EPOCH: 2
+# #   LOG_EVERY_STEPS: 1
+# #   VAL_EVERY_STEPS: 100
+# #   TENSORBOARD: True
+# #   WANDB:
+# #     PROJECT: null
+# #     OFFLINE: False
+# #     RESUME_ID: null
+
+####################################
+# The following are general settings
+####################################
+NAME: SceMoDiff_All_Demo # 给你的finetune实验起一个新名字
+DEBUG: False
+ACCELERATOR: 'gpu'
+DEVICE: [0] # 你之前在代码里写了 [0]，这里保持一致
+
+####################################
+# The following are training settings
+####################################
+TRAIN:
+  STAGE: diffusion
+  DATASETS: ['humanml3d_scene'] # 已经修改
+  NUM_WORKERS: 1 # 根据你的机器配置，可以适当调大，例如 4 或 8
+  BATCH_SIZE: 128 # 如果显存不足，可以减小，例如 32 或 64
+  END_EPOCH: 400 # 对于finetuning，epoch数可能需要更多，但要结合早停。10个epoch太少了。先设一个较大的值，让早停来决定。
+  
+  RESUME: '' # 如果是从头finetune，这里为空
+  PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # VAE权重路径
+  PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # <--- 指向你原始的、在HumanML3D上预训练好的Denoiser/MLD模型权重
+
+  OPTIM:
+    TYPE: AdamW
+    LR: 2e-5  # <--- 为finetuning调整学习率，例如从 1e-4 降到 5e-5 或 2e-5
+  
+  ABLATION:
+    SKIP_CONNECT: True
+    PE_TYPE: mld
+    DIFF_PE_TYPE: mld
+
+  # --- 新增 Finetuning 配置 ---
+  FINETUNE_STRATEGY: "scene_embedder_and_denoiser_adaln" 
+  # 可选值:
+  #   "none"                             
+  #   "scene_embedder_only"              
+  #   "scene_embedder_and_denoiser_adaln"
+  #   "scene_embedder_and_denoiser_attention" 
+  #   "scene_embedder_and_full_denoiser" 
+  FREEZE_VAE: True # 在diffusion finetuning时，通常冻结VAE
+
+#####################################
+# The following are validation settings
+#####################################
+EVAL:
+  DATASETS: ['humanml3d_scene'] # 已经修改
+  BATCH_SIZE: 32 
+  SPLIT: val # <--- 验证集通常用 'val' split
+
+#####################################
+# The following are testing settings
+#####################################
+TEST:
+  # CHECKPOINTS: 'path/to/your/finetuned_scene_model.ckpt' # 测试时用finetune好的模型
+  DATASETS: ['humanml3d_scene'] # 已经修改
+  SPLIT: test
+  BATCH_SIZE: 32 # 测试时batch size可以小一些
+  MEAN: False
+  NUM_SAMPLES: 1
+  FACT: 1
+  MM_NUM_SAMPLES: 30 # 如果进行MM评估，需要这个 (之前在MM_MODE里用到的)
+
+#####################################
+# The following are basic datasets settings
+#####################################
+DATASET:
+  JOINT_TYPE: 'humanml3d'
+  
+  # --- 新增 HUMANML3D_SCENE 数据集特定配置 ---
+  HUMANML3D_SCENE:
+    ROOT: "/root/autodl-tmp/MCM-LDM/datasets/humanml3d_scene" # 你的场景数据集根目录
+    MOTION_DIR_NAME: "new_joint_vecs"
+    TEXT_DIR_NAME: "texts" # 指向你预处理后（带POS标签）的文本文件夹
+    SCENE_LABEL_FILENAME: "scene_mappings.txt" # 包含 motion_id 和 scene_id 的文件
+    NUM_SCENE_CLASSES: 100 # 你场景类别的数量
+    SPLIT_TRAIN_FILENAME: "train.txt" 
+    SPLIT_VAL_FILENAME: "val.txt"
+    SPLIT_TEST_FILENAME: "test.txt" # 可选，如果测试用
+    UNIT_LEN: 4 # 动作单元长度
+    # 如果你的场景数据集使用与原始HumanML3D不同的Mean/Std，也在这里配置
+    # MEAN_PATH: "Mean_scene.npy" # 相对于ROOT的路径
+    # STD_PATH: "Std_scene.npy"   # 相对于ROOT的路径
+    # W_VECTORIZER_PATH: "path/to/your/w_vectorizer.pkl" # 如果需要特定路径
+
+  # 如果原始HumanML3D的配置仍然被其他地方（如get_mean_std）引用，保留它
+  HUMANML3D:
+    ROOT: "/root/autodl-tmp/MCM-LDM/datasets/humanml3d_scene" # 例如，如果mean/std/w_vectorizer从这里加载
+    # MEAN_PATH: "Mean.npy" # 相对于 HUMANML3D.ROOT
+    # STD_PATH: "Std.npy"
+    # W_VECTORIZER_PATH: "data/humanml3d_w_vectorizer.pkl" # 示例
+    UNIT_LEN: 4
+
+  SAMPLER: # 全局采样器设置
+    MAX_LEN: 196
+    MIN_LEN: 20
+    MAX_TEXT_LEN: 20 
+
+#####################################
+# The following are metric settings
+#####################################
+METRIC:
+  TYPE: ['TemosMetric', 'TM2TMetrics'] # 根据你的评估需求调整
+
+#####################################
+# The following are training losses settings
+#####################################
+LOSS:
+  # ... (这部分通常不需要大改，除非你要调整损失权重) ...
+  TYPE: mld 
+  LAMBDA_LATENT: 1.0e-5 
+  LAMBDA_KL: 1.0e-4 
+  LAMBDA_REC: 1.0 
+  LAMBDA_GEN: 1.0 
+  LAMBDA_CROSS: 1.0 
+  LAMBDA_CYCLE: 0.0 
+  LAMBDA_PRIOR: 0.0
+  DIST_SYNC_ON_STEP: False
+
+#####################################
+# The following are basic model settings
+#####################################
+model:
+  vae: true 
+  useDCE: False
+  model_type: mld 
+  condition: 'text_scene' # <--- 或许可以加一个标识表明现在条件包含场景
+  latent_dim: [7, 256] 
+  ff_size: 1024 
+  num_layers: 9 
+  num_head: 4 
+  droupout: 0.1 
+  activation: gelu 
+  guidance_scale: 5 
+  guidance_uncondp: 0.25
+
+  # --- 新增场景嵌入维度配置 ---
+  SCENE_EMBED_DIM: 512 # 与我们模型中定义的一致
+
+#####################################
+# The following are loggers settings
+#####################################
+LOGGER:
+  SACE_CHECKPOINT_EPOCH: 40 # 可以更频繁地保存，例如每10或20个epoch
+  LOG_EVERY_STEPS: 1
+  VAL_EVERY_STEPS: 100 # 在每个epoch内验证的频率，可以根据你的epoch时长调整
+  TENSORBOARD: True
+  WANDB:
+    PROJECT: "mld_scene_finetune" # 给wandb项目起个新名字
+    OFFLINE: False
+    RESUME_ID: null
+
+
+# # 以下为测试scene embedding的配置
+# ####################################
+# # The following are general settings
+# ####################################
+# NAME: FinetuneSceneDenoiser_HonkaiSR # [确认] 实验名称，保持或根据你的命名习惯修改。
+# DEBUG: False                              # [确认] Finetune时通常为False。
+# ACCELERATOR: 'gpu'                        # [确认] 保持 'gpu'。
+# DEVICE: [0]                               # [确认] 使用的GPU索引，例如 [0] 或 [0,1]。
+
+# #####################################
+# # The following are training settings
+# #####################################
+# TRAIN:
+#   STAGE: diffusion                        # [确认] 对于finetune扩散模型，保持 'diffusion'。
+#   DATASETS: ['humanml3d_scene']           # [确认] 确保这是你在 `get_datasets` 中注册的场景数据集的名称。
+#   NUM_WORKERS: 1                          # [建议] 根据你的CPU核心数和IO能力适当增加，例如 4, 8, 或 16，以加速数据加载。
+#   BATCH_SIZE: 128                         # [建议/根据显存调整] 128可能对某些GPU较大，如果遇到OOM，减小到 64, 32, 或 16。
+#   END_EPOCH: 200                          # [建议] 保持较高值，并强烈建议在 train.py 中加入 EarlyStopping 回调。
+
+#   RESUME: ''                              # [确认] 如果是全新的finetune（不从之前的finetune ckpt恢复），保持为空。
+#   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # [关键/确认] VAE权重路径。确保这个VAE与你的数据和模型兼容。
+#   PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # [关键/确认] **非常重要**。这必须是指向你原始的、在HumanML3D上完整训练好的MLD模型（包含Denoiser、TextEncoder等所有预训练组件，除了旧的StyleExtractor）的 `.ckpt` 文件。文件名可能类似 `mld_humanml3d_final.ckpt` 或类似。
+
+#   OPTIM:
+#     TYPE: AdamW                           # [确认] AdamW 通常是不错的选择。
+#     LR: 5e-5                              # [建议/调整] 5e-5 是一个好的起点。你可能需要实验 1e-5, 2e-5, 或 1e-4。考虑配合学习率调度器。
+  
+#   ABLATION:                               # [确认] 这些通常是模型结构相关的，如果原始模型使用这些，保持即可。
+#     SKIP_CONNECT: True
+#     PE_TYPE: mld
+#     DIFF_PE_TYPE: mld
+
+#   # --- 新增 Finetuning 配置 ---
+#   FINETUNE_STRATEGY: "scene_embedder_and_denoiser_adaln" 
+#   # [关键/选择] 根据你的finetune策略选择:
+#   #   "scene_embedder_only":               只训练新的场景嵌入层。
+#   #   "scene_embedder_and_denoiser_adaln": 训练场景嵌入层和Denoiser中与条件交互的AdaLN层。
+#   #   "scene_embedder_and_denoiser_attention": 训练场景嵌入层和Denoiser中的相关Attention层。 (需确认层名)
+#   #   "scene_embedder_and_full_denoiser":  训练场景嵌入层和整个Denoiser。
+#   #   "none":                              (如果只想评估预训练模型在新数据上的表现，不进行任何训练)
+#   #  确保 mld.py 中的 configure_optimizers 会读取并实现这个策略。
+
+#   FREEZE_VAE: True                        # [确认] 在diffusion finetuning时，通常冻结VAE。确保 mld.py 会读取此配置。
+
+# #####################################
+# # The following are validation settings
+# #####################################
+# EVAL:
+#   DATASETS: ['humanml3d_scene']           # [确认] 验证数据集名称。
+#   BATCH_SIZE: 32                          # [确认] 验证时batch size可以小一些。
+#   SPLIT: val                              # [确认] 使用 'val' split。
+
+# #####################################
+# # The following are testing settings
+# #####################################
+# TEST:
+#   CHECKPOINTS: '/root/autodl-tmp/MCM-LDM/experiments/mld/FinetuneSceneDenoiser_HonkaiSR/'                         # [待填] 测试时，这里应填写你finetune后保存的最佳模型的路径。例如: 'experiments/FinetuneSceneDenoiser_GenshinImpact/checkpoints/epoch=X-step=Y.ckpt'
+#   DATASETS: ['humanml3d_scene']           # [确认] 测试数据集名称。
+#   SPLIT: test                             # [确认] 使用 'test' split。
+#   BATCH_SIZE: 32                          # [确认] 测试时batch size。
+#   # MEAN, NUM_SAMPLES, FACT, MM_NUM_SAMPLES: 根据你的测试脚本和评估需求确认这些参数。
+#   MEAN: False
+#   NUM_SAMPLES: 1
+#   FACT: 1
+#   MM_NUM_SAMPLES: 30 
+
+# #####################################
+# # The following are basic datasets settings
+# #####################################
+# DATASET:
+#   JOINT_TYPE: 'humanml3d'                 # [确认] 如果你的骨骼表示与humanml3d一致。
+  
+#   # --- HUMANML3D_SCENE 数据集特定配置 ---
+#   HUMANML3D_SCENE:                        # [关键/填写所有路径和参数]
+#     ROOT: "/root/autodl-tmp/MCM-LDM/datasets/humanml3d_scene" # [路径确认] 你的场景数据集根目录。
+#     MOTION_DIR_NAME: "new_joint_vecs"     # [路径确认] 动作 .npy 文件所在子目录名。
+#     TEXT_DIR_NAME: "texts"                # [路径确认] 文本 .txt 文件所在子目录名。
+#     SCENE_LABEL_FILENAME: "Scene_name_dict.txt" # [路径确认/文件名确认] 包含 (motion_id, scene_id) 映射的文件名，位于 ROOT 目录下。
+#     NUM_SCENE_CLASSES: 100                # [关键/数字确认] **必须**，你的场景类别的总数量。例如，如果场景标签从0到99，则为100。
+#     SPLIT_TRAIN_FILENAME: "train.txt"     # [路径确认/文件名确认] 训练集划分文件名，位于 ROOT 目录下。
+#     SPLIT_VAL_FILENAME: "val.txt"         # [路径确认/文件名确认] 验证集划分文件名，位于 ROOT 目录下。
+#     SPLIT_TEST_FILENAME: "test.txt"       # [路径确认/文件名确认] 测试集划分文件名，位于 ROOT 目录下 (如果测试也用此数据集)。
+#     UNIT_LEN: 4                           # [确认] 动作单元长度，通常与预训练模型保持一致。
+    
+#     # 如果你的场景数据集使用与原始HumanML3D不同的Mean/Std，在这里配置。否则，它们会从全局或HumanML3D原始配置中获取。
+#     # MEAN_PATH: "Mean_scene.npy"         # [可选/路径确认] 相对于 HUMANML3D_SCENE.ROOT 的路径。
+#     # STD_PATH: "Std_scene.npy"           # [可选/路径确认] 相对于 HUMANML3D_SCENE.ROOT 的路径。
+#     # W_VECTORIZER_PATH: "path/to/your/scene_w_vectorizer.pkl" # [可选/路径确认] 如果场景数据的文本需要不同的vectorizer。
+
+#   # 如果全局的 mean/std/w_vectorizer 来自原始 HumanML3D 数据集，保留这部分并确保路径正确。
+#   HUMANML3D:
+#     ROOT: "/root/autodl-tmp/MCM-LDM/datasets/humanml3d" # [路径确认] 如果 HumanML3DSceneDataset 的 mean/std/w_vectorizer 从这里加载。
+#     # MEAN_PATH: "Mean.npy" 
+#     # STD_PATH: "Std.npy"
+#     # W_VECTORIZER_PATH: "data/humanml3d_w_vectorizer.pkl" 
+#     UNIT_LEN: 4
+
+#   SAMPLER:                                # [确认] 采样器参数，影响数据加载。
+#     MAX_LEN: 196                          # 最大动作长度 (padding后的长度)。
+#     MIN_LEN: 20                           # 最小有效动作长度。
+#     MAX_TEXT_LEN: 20                      # 文本最大token数 (不含sos/eos)。
+
+# #####################################
+# # The following are metric settings
+# #####################################
+# METRIC:
+#   TYPE: ['TemosMetric', 'TM2TMetrics']    # [确认/调整] 根据你的评估需求选择。
+
+# #####################################
+# # The following are training losses settings
+# #####################################
+# LOSS:                                     # [确认] 通常finetune时损失函数和权重保持不变，除非有特定原因要调整。
+#   TYPE: mld 
+#   LAMBDA_LATENT: 1.0e-5 
+#   LAMBDA_KL: 1.0e-4 
+#   LAMBDA_REC: 1.0 
+#   LAMBDA_GEN: 1.0 
+#   LAMBDA_CROSS: 1.0 
+#   LAMBDA_CYCLE: 0.0 
+#   LAMBDA_PRIOR: 0.0
+#   DIST_SYNC_ON_STEP: False
+
+# #####################################
+# # The following are basic model settings
+# #####################################
+# model:
+#   vae: true                               # [确认] 保持true。
+#   model_type: mld                         # [确认] 保持mld。
+#   condition: 'text_scene'                 # [信息性] 只是一个标识，实际模型行为由代码决定。
+#   latent_dim: [7, 256]                    # [确认] VAE输出的latent维度，应与预训练VAE一致。
+#   ff_size: 1024                           # [确认] Denoiser内部前馈网络大小。
+#   num_layers: 9                           # [确认] Denoiser层数。
+#   num_head: 4                             # [确认] Denoiser注意力头数。
+#   droupout: 0.1                           # [确认] Dropout率。
+#   activation: gelu                        # [确认] 激活函数。
+#   guidance_scale: 5                       # [确认/调整] CFG尺度。
+#   guidance_uncondp: 0.25                  # [确认/调整] 无条件训练的概率 (针对文本和轨迹，场景可能有单独的)。
+
+#   # --- 新增场景嵌入维度配置 ---
+#   SCENE_EMBED_DIM: 512                    # [关键/数字确认] **必须**。场景嵌入层的输出维度。这个值需要与 mld.py 中 nn.Embedding 的输出维度以及 mld_denoiser.py 中 self.emb_proj_st 的输入维度匹配。
+#   # NUM_SCENE_CLASSES: 已移至 DATASET.HUMANML3D_SCENE.NUM_SCENE_CLASSES，因为这是数据属性。
+#   # MLD.py __init__ 中会从 cfg.DATASET.HUMANML3D_SCENE.NUM_SCENE_CLASSES 读取。
+
+# #####################################
+# # The following are loggers settings
+# #####################################
+# LOGGER:
+#   SACE_CHECKPOINT_EPOCH: 10               # [建议/调整] 模型保存频率。
+#   LOG_EVERY_STEPS: 1                      # [确认] 日志记录频率。
+#   VAL_EVERY_STEPS: 100                    # [建议/调整] 在每个epoch内进行验证的频率。如果epoch短，可以设大一些，甚至等于一个epoch的steps。
+#   TENSORBOARD: True                       # [确认] 是否使用TensorBoard。
+#   WANDB:
+#     PROJECT: "mld_scene_finetune"         # [确认/修改] WandB项目名称。
+#     OFFLINE: False                        # [确认] 是否离线运行WandB。
+#     RESUME_ID: null                       # [确认] 如果是从WandB的某个run恢复，填写其ID。
