@@ -2,7 +2,7 @@ from os.path import join as pjoin
 
 import numpy as np
 from .humanml.utils.word_vectorizer import WordVectorizer
-from .HumanML3D import HumanML3DDataModule
+from .HumanML3D import HumanML3DDataModule, HumanML3DSceneDataModule
 from .utils import *
 
 
@@ -17,7 +17,8 @@ def get_mean_std(phase, cfg, dataset_name):
     #     std = np.load(pjoin(opt.data_root, 'Std.npy'))
 
     # todo: use different mean and val for phases
-    name = "t2m" if dataset_name == "humanml3d" else dataset_name
+    # 2025.5.29 添加数据集相关的代码，get_data函数新增数据集：humanml3d_scene的处理
+    name = "t2m" if dataset_name == "humanml3d" or dataset_name == 'humanml3d_scene' else dataset_name
     assert name in ["t2m", "kit"]
     # if phase in ["train", "val", "test"]:
     if phase in ["val"]:
@@ -35,6 +36,11 @@ def get_mean_std(phase, cfg, dataset_name):
         data_root = eval(f"cfg.DATASET.{dataset_name.upper()}.ROOT")
         mean = np.load(pjoin(data_root, "Mean.npy"))
         std = np.load(pjoin(data_root, "Std.npy"))
+    # note: 2025.6.3, 加载数据集的Mean和Std需要使用HumanML3D的，不要用我们数据集的
+    # note: 2025.6.4 暂时硬编码进去了，后面再说
+    if dataset_name.lower() in ["humanml3d_scene"]:
+        mean = np.load('/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Mean.npy')
+        std = np.load('/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Std.npy')
 
     return mean, std
 
@@ -42,6 +48,9 @@ def get_mean_std(phase, cfg, dataset_name):
 def get_WordVectorizer(cfg, phase, dataset_name):
     if phase not in ["text_only"]:
         if dataset_name.lower() in ["humanml3d", "kit"]:
+            return WordVectorizer(cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
+        # 2025.05.29 添加数据集相关的代码，get_data函数新增数据集：humanml3d_scene的处理
+        elif dataset_name.lower() in ["humanml3d_scene"]:
             return WordVectorizer(cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
         else:
             raise ValueError("Only support WordVectorizer for HumanML3D")
@@ -54,6 +63,10 @@ def get_collate_fn(name, phase="train"):
         return mld_collate
     elif name.lower() in ["humanact12", 'uestc']:
         return a2m_collate
+    # 2025.5.29 添加数据集相关的代码，get_data函数新增数据集：humanml3d_scene的处理
+    elif name.lower() in ["humanml3d_scene"]:
+        return mld_collate_scene
+
     # else:
     #     return all_collate
     # if phase == "test":
@@ -64,8 +77,11 @@ def get_collate_fn(name, phase="train"):
 # map config name to module&path
 dataset_module_map = {
     "humanml3d": HumanML3DDataModule,
+    # 2025.5.29 添加数据集相关的代码，get_data函数新增数据集：humanml3d_scene的处理
+    "humanml3d_scene": HumanML3DSceneDataModule,
 }
-motion_subdir = {"humanml3d": "new_joint_vecs", "kit": "new_joint_vecs"}
+# 2025.5.29 添加数据集相关的代码
+motion_subdir = {"humanml3d": "new_joint_vecs", "kit": "new_joint_vecs", "humanml3d_scene": "new_joint_vecs"}
 
 
 def get_datasets(cfg, logger=None, phase="train"):
@@ -104,6 +120,48 @@ def get_datasets(cfg, logger=None, phase="train"):
                     f"cfg.DATASET.{dataset_name.upper()}.UNIT_LEN"),
             )
             datasets.append(dataset)
+        # 2025.5.29 添加数据集相关的代码，get_data函数新增数据集：humanml3d_scene的处理
+        elif dataset_name.lower() in ["humanml3d_scene"]:
+            data_root = eval(f"cfg.DATASET.{dataset_name.upper()}.ROOT")
+            # get mean and std corresponding to dataset
+            mean, std = get_mean_std(phase, cfg, dataset_name)
+            mean_eval, std_eval = get_mean_std("val", cfg, dataset_name)
+
+            print(cfg.DATASET)
+            # get WordVectorizer
+            wordVectorizer = get_WordVectorizer(cfg, phase, dataset_name)
+            # get collect_fn
+            collate_fn = get_collate_fn(dataset_name, phase)
+            # get dataset module
+            dataset = dataset_module_map[dataset_name.lower()](
+                cfg=cfg,
+                batch_size=cfg.TRAIN.BATCH_SIZE, # 128
+                num_workers=cfg.TRAIN.NUM_WORKERS, # 1
+                debug=cfg.DEBUG,
+                collate_fn=collate_fn,
+                mean=mean,
+                std=std,
+                mean_eval=mean_eval,
+                std_eval=std_eval,
+                w_vectorizer=wordVectorizer,
+                data_root=data_root,
+                motion_dir_name = motion_subdir[dataset_name],
+                text_dir_name="texts",
+                style_text_dir="texts",
+                scene_label_filepath= "Scene_name_dict.txt",
+                motion_dir=motion_subdir[dataset_name],
+                max_motion_length=cfg.DATASET.SAMPLER.MAX_LEN,
+                min_motion_length=cfg.DATASET.SAMPLER.MIN_LEN, # 40
+                max_text_len=cfg.DATASET.SAMPLER.MAX_TEXT_LEN, # 20
+                scene_label_filename= "Scene_name_dict.txt",
+                num_scene_classes = 100,
+                split_train_filename="train.txt",
+                split_val_filename="val.txt",
+                unit_length=eval(
+                    f"cfg.DATASET.{dataset_name.upper()}.UNIT_LEN"),
+            )
+            datasets.append(dataset)
+            
         elif dataset_name.lower() in ["humanact12", 'uestc']:
             # get collect_fn
             collate_fn = get_collate_fn(dataset_name, phase)

@@ -39,7 +39,7 @@ class TextEncoderBiGRUCo(nn.Module):
         hidden = self.hidden.repeat(1, num_samples, 1)
 
         cap_lens = cap_lens.data.tolist()
-        emb = pack_padded_sequence(input_embs, cap_lens, batch_first=True)
+        emb = pack_padded_sequence(input_embs, cap_lens, batch_first=True, enforce_sorted=False) # todo：防止报错，但不确定其他地方有没有明显问题
 
         gru_seq, gru_last = self.gru(emb, hidden)
 

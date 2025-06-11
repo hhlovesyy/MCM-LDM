@@ -9,7 +9,7 @@ TRAIN:
   END_EPOCH: 2000 # End epoch
   RESUME: '' # Experiment path to be resumed training
   PRETRAINED_VAE: ''
-  PRETRAINED: '' # Pretrained model path
+  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/checkpoints/denoiser_checkpoint/denoiser.ckpt' # Pretrained model path
 
   OPTIM:
     OPTIM.TYPE: 'AdamW' # Optimizer type
@@ -70,6 +70,11 @@ DATASET:
     MIN_LEN: 40
     MAX_TEXT_LEN: 20
   HUMANML3D:
+    PICK_ONE_TEXT: true
+    FRAME_RATE: 20.0
+    UNIT_LEN: 4
+  # 2025.5.29, 添加 humanml3d_scene，但是这个数据很可能是错误的，需要后续修正
+  HUMANML3D_SCENE:
     PICK_ONE_TEXT: true
     FRAME_RATE: 20.0
     UNIT_LEN: 4

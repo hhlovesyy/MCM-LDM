@@ -1,0 +1,158 @@
+####################################
+# The following are general settings
+####################################
+
+# Experiment name, more details in Section 'Experiment Name Explanation'
+#use 1029_mclip_removestylemlp_transadaln for mld.py
+# NAME: NewSceMoDiffAll_Sce_ShieldedLeft_cfg4_ # MODIFIED: Example name for scene-based model
+NAME: SceMoDiff_All_LowCeiling
+# Debug mode. Set to True will enter the debug mode, then the program will
+# 1. use a tiny dataset for trianing and evaluation
+# 2. validate more intensively
+# 3. will not use `wandb logger`
+DEBUG: False
+# Devices. Optional: “cpu”, “gpu”
+ACCELERATOR: 'gpu'
+# Index of GPUs eg. [0] or [0,1,2,3]
+DEVICE: [0] # MODIFIED: Changed from [1] to [0] as an example, adjust to your setup
+
+#####################################
+# The following are training settings
+#####################################
+TRAIN:
+  # Model stage. Optional: "vae", "diffusion"
+  STAGE: diffusion
+  # Training dataset name
+  # DATASETS: ['humanml3d_scene'] # MODIFIED: Use your new scene dataset name
+  DATASETS : ['humanml3d']
+  # Number of dataloader workers
+  NUM_WORKERS: 1 # Consider increasing if I/O is a bottleneck, e.g., 4 or 8
+  # Size of batches
+  BATCH_SIZE: 64 # MODIFIED: Adjusted from 128, depends on your GPU memory with scene embedding
+  # Total epochs for training
+  END_EPOCH: 2000 # Or a smaller number for initial tests, e.g., 500
+
+  RESUME: '' # Resume training from this path
+  PRETRAINED_VAE: '/root/autodl-tmp/MyRepository/MCM-LDM/checkpoints/vae_checkpoint/vae7.ckpt' # MODIFIED: Ensure this VAE is compatible or retrained if necessary.
+                                                                    # If your VAE was trained on HumanML3D without scene, it might still work
+                                                                    # as it encodes motion content.
+  OPTIM:
+    TYPE: AdamW # Optimizer type
+    LR: 1e-3 # Learning rate
+  # Ablation study configurations.
+  ABLATION:
+    SKIP_CONNECT: True
+    PE_TYPE: mld
+    DIFF_PE_TYPE: mld
+
+#####################################
+# The following are validation settings
+#####################################
+USE_DCE: False
+EVAL:
+  # DATASETS: ['humanml3d_scene'] # MODIFIED: Use your new scene dataset name
+  DATASETS : ['humanml3d']
+  BATCH_SIZE: 32 # Evaluating Batch size
+  SPLIT: val # MODIFIED: Typically 'val' for validation during training, 'test' for final testing
+
+#####################################
+# The following are testing settings
+#####################################
+TEST:
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/SceMoDiff_All_Demo/checkpoints/epoch=279.ckpt' # MODIFIED: Path to your scene-aware model checkpoint
+  # DATASETS: ['humanml3d_scene'] # MODIFIED: Use your new scene dataset name
+  DATASETS : ['humanml3d'] # MODIFIED: Use your new scene dataset name
+  SPLIT: test
+  BATCH_SIZE: 32 # MODIFIED: Adjusted from 128 for consistency, can be higher if memory allows for testing
+  MEAN: False
+  NUM_SAMPLES: 1 # For deterministic metrics, 1 is fine. For diversity, can be >1.
+  FACT: 1
+
+#####################################
+# The following are basic datasets settings
+#####################################
+DATASET:
+  JOINT_TYPE: 'humanml3d' # join type, should be consistent with your data processing
+  HUMANML3D_SCENE: # NEW: Specific config for your scene dataset
+    # Base HumanML3D dataset path (if your scene dataset builds upon it)
+    # DATA_ROOT: "./dataset/HumanML3D/" # Example path
+    # Other relevant paths for your scene dataset if different
+    # TEXT_DIR: "./dataset/HumanML3D/texts_scene/" # Example if texts are different
+    # MOTION_DIR: "./dataset/HumanML3D/new_joint_vecs_scene/" # Example if motions are different
+    NUM_SCENE_CLASSES: 100 # NEW: Number of unique scene categories
+    SCENE_EMBED_DIM: 512 # NEW: Dimension of the scene embedding, matches MLD model __init__
+    ROOT: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene'
+  HUMANML3D: # NEW: Specific config for your scene dataset
+    # Base HumanML3D dataset path (if your scene dataset builds upon it)
+    # DATA_ROOT: "./dataset/HumanML3D/" # Example path
+    # Other relevant paths for your scene dataset if different
+    # TEXT_DIR: "./dataset/HumanML3D/texts_scene/" # Example if texts are different
+    # MOTION_DIR: "./dataset/HumanML3D/new_joint_vecs_scene/" # Example if motions are different
+    NUM_SCENE_CLASSES: 100 # NEW: Number of unique scene categories
+    SCENE_EMBED_DIM: 512 # NEW: Dimension of the scene embedding, matches MLD model __init__
+    ROOT: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d'
+    SPLIT_ROOT: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d'
+  
+
+#####################################
+# The following are metric settings
+#####################################
+METRIC:
+  TYPE: ['TemosMetric', 'TM2TMetrics'] # Ensure these metrics are still relevant/compatible.
+                                      # If you have scene-specific metrics, add them.
+
+#####################################
+# The following are training losses settings
+#####################################
+LOSS:
+  TYPE: mld # Losses type
+  LAMBDA_LATENT: 1.0e-5 # Lambda for latent Losses
+  LAMBDA_KL: 1.0e-4 # Lambda for kl Losses
+  LAMBDA_REC: 1.0 # Lambda for reconstruction Losses
+  LAMBDA_GEN: 1.0 # Lambda for text-motion generation losses (denoiser loss)
+  LAMBDA_CROSS: 1.0 # Lambda for reconstruction Losses (if applicable)
+  LAMBDA_CYCLE: 0.0 # Lambda for cycle Losses
+  LAMBDA_PRIOR: 0.0
+  DIST_SYNC_ON_STEP: False # Sync Losses on step when distributed trained
+
+#####################################
+# The following are basic model settings
+#####################################
+model:
+  vae: true # whether vae model
+  useDCE: False
+  model_type: mld # model type
+  condition: 'text_scene' # MODIFIED: Reflects that condition now includes scene (and potentially text for content)
+  latent_dim: [7, 256] # latent dimension
+  ff_size: 1024 #
+  num_layers: 9 # number of layers (for Denoiser DiT blocks)
+  num_head: 4 # number of head layers
+  droupout: 0.1 # dropout rate
+  activation: gelu # activation type
+  guidance_scale: 5 # For inference/sampling
+  guidance_uncondp: 0.25 # For training (probability of unconditional dropout for CFG)
+  # SCENE_EMBED_DIM: 512 # NEW: Can be defined here, model __init__ will use it.
+                       # If defined here, MLD.__init__ should read from cfg.model.SCENE_EMBED_DIM
+
+#####################################
+# The following are loggers settings
+#####################################
+LOGGER:
+  SACE_CHECKPOINT_EPOCH: 10 # MODIFIED: Save more frequently during initial tests, e.g., every 10 or 50 epochs
+  LOG_EVERY_STEPS: 1
+  VAL_EVERY_STEPS: 100 # How often to run validation
+  TENSORBOARD: True
+  WANDB:
+    PROJECT: 'mld_scene_stylization' # MODIFIED: New project name for wandb
+    OFFLINE: False
+    RESUME_ID: null
+
+#####################################
+# NEW: Settings for the demo.py script
+#####################################
+DEMO:
+  content_motion_dir: "demo/content_motion/" # NEW: Path to your content .npy files
+  # style_motion_dir: "demo/style_motion/" # REMOVED: No longer needed for style files
+  scale: 2.5 # NEW: Guidance scale for demo inference
+  # List of integer scene labels you want to test in the demo
+  SCENE_LABELS_TO_TEST: [71] # NEW: Example scene labels
