@@ -31,12 +31,13 @@ env/
 
 # 存放本地实验结果或数据的文件夹 (自定义)
 # 比如你创建了一个 outputs/ 文件夹来存放生成的图片，你可能不想提交它
-outputs/
-datasets/
-checkpoints/
-deps/
-results/
-experiments/
+# 希望 .gitignore 只忽略项目根目录下的 datasets 文件夹及其所有内容，而保留所有子目录中的 datasets 文件夹,注意git的模式匹配规则，可以问gemini
+/outputs/  
+/datasets/
+/checkpoints/
+/deps/
+/results/
+/experiments/
 
 # 非本分支的文件
 AddingCodes/
