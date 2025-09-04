@@ -4,7 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-NAME: testBaseline
+NAME: testBaseline0904
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively

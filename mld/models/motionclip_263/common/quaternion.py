@@ -10,7 +10,7 @@ import numpy as np
 
 _EPS4 = np.finfo(float).eps * 4.0
 
-_FLOAT_EPS = np.finfo(np.float).eps
+_FLOAT_EPS = np.finfo(float).eps # fix numpy error:module 'numpy' has no attribute 'float'. Did you mean: 'cfloat'?,一个由版本问题造成的bug
 
 # PyTorch-backed implementations
 def qinv(q):

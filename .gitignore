@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # Python 虚拟环境
 # 这条规则非常重要，可以防止你把整个虚拟环境提交上去
@@ -36,6 +37,9 @@ checkpoints/
 deps/
 results/
 experiments/
+
+# 非本分支的文件
+AddingCodes/
 
 # 操作系统生成的文件
 .DS_Store
