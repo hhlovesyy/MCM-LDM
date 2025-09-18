@@ -123,7 +123,7 @@
 ####################################
 # The following are general settings
 ####################################
-NAME: SceMoDiff_All_Demo # 给你的finetune实验起一个新名字
+NAME: SceMoDiff_All_Demo_20250918 # 给你的finetune实验起一个新名字
 DEBUG: False
 ACCELERATOR: 'gpu'
 DEVICE: [0] # 你之前在代码里写了 [0]，这里保持一致
