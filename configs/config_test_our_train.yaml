@@ -59,7 +59,7 @@ EVAL:
 # The following are testing settings
 #####################################
 TEST:
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/SceMoDiff_All_Demo_20250918/checkpoints/epoch=399.ckpt' # MODIFIED: Path to your scene-aware model checkpoint
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/SceMoDiff_All_Demo_20250922/checkpoints/epoch=399.ckpt' # MODIFIED: Path to your scene-aware model checkpoint
   # DATASETS: ['humanml3d_scene'] # MODIFIED: Use your new scene dataset name
   DATASETS : ['humanml3d'] # MODIFIED: Use your new scene dataset name
   SPLIT: test
