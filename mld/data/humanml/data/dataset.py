@@ -1480,6 +1480,8 @@ class Text2MotionDatasetV2(data.Dataset):
         tiny=False,
         debug=False,
         progress_bar=True,
+        max_filter_length=200, # [新增] 增加默认值以保持向后兼容
+        min_filter_length=24,  # [新增]
         **kwargs,
     ):
         self.w_vectorizer = w_vectorizer
@@ -1521,8 +1523,8 @@ class Text2MotionDatasetV2(data.Dataset):
                 break
             try:
                 motion = np.load(pjoin(motion_dir, name + ".npy"))
-                if (len(motion)) < self.min_motion_length or (len(motion) >=
-                                                              200):
+                # [修改] 使用可配置的、灵活的过滤逻辑
+                if not (min_filter_length <= len(motion) < max_filter_length):
                     bad_count += 1
                     continue
                 text_data = []

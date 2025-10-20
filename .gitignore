@@ -45,3 +45,11 @@ AddingCodes/
 # 操作系统生成的文件
 .DS_Store
 Thumbs.db
+
+# 忽略所有 PyTorch 模型权重文件，在任何目录层级
+# 排除 style_translator_dataset.pt
+*.pt
+
+# 忽略所有顶层以 'checkpoints/' 结尾的目录
+# 排除 translator_checkpoints/ 等所有检查点目录
+*/checkpoints/

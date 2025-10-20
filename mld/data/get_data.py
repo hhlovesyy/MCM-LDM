@@ -69,6 +69,29 @@ motion_subdir = {"humanml3d": "new_joint_vecs", "kit": "new_joint_vecs"}
 
 
 def get_datasets(cfg, logger=None, phase="train"):
+
+    # --- 我们新增的逻辑分支 ---
+    # 只有在训练阶段，并且配置中明确指定了 'mixed' 类型时，才走新逻辑
+    if cfg.DATASET.get('TYPE', 'single') == 'mixed' and phase == 'train':
+        from .mixed_datamodule import MixedDataModule # 仅在需要时导入
+        
+        # 使用 logger (如果提供了)，否则打印到控制台
+        log_func = logger.info if logger else print
+        log_func("Initializing MixedDataModule for mixed training.")
+        
+        # 实例化我们新的 DataModule
+        mixed_datamodule = MixedDataModule(cfg)
+        
+        # [关键] 更新全局配置。因为 MixedDataModule 在 setup 后才知道 nfeats，
+        # 我们需要在 trainer.fit() 调用它之后，确保主程序也能拿到这个值。
+        # 更好的做法是在 MixedDataModule 初始化时就确定它。
+        # 为了安全，我们在这里先预估一个值，并在 MixedDataModule 中确认。
+        # (在我们的实现中，MixedDataModule.setup() 之后 nfeats 才被赋值)
+        # 暂时先不在这里修改 cfg，转而在 train.py 中获取
+        
+        return [mixed_datamodule]
+    # --- 新增逻辑结束 ---
+    
     # get dataset names form cfg
     dataset_names = eval(f"cfg.{phase.upper()}.DATASETS")
     datasets = []
