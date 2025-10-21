@@ -172,6 +172,10 @@ def mld_collate(batch):
         collate_tensors([torch.tensor(b[3]) for b in notnone_batches]),
         "tokens": [b[6] for b in notnone_batches],
     }
+    # --- [强力调试 START] ---
+    final_motion_tensor = adapted_batch["motion"]
+    # print(f"[COLLATE_DEBUG] Final batch 'motion' tensor shape: {final_motion_tensor.shape}")
+    # --- [强力调试 END] ---
     return adapted_batch
 
 
