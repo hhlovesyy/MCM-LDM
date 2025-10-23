@@ -113,6 +113,34 @@ def parse_args(phase="train"):
             default=1,
             help="input scale",
         )
+
+        # --- [请在这里添加以下新参数] ---
+        # group.add_argument(
+        #     "--checkpoint",
+        #     type=str,
+        #     required=True, # 设为必需，因为demo必须有模型
+        #     help="Path to the model checkpoint file (.ckpt)",
+        # )
+        # group.add_argument(
+        #     "--content_motion",
+        #     type=str,
+        #     required=True, # 设为必需
+        #     help="Path to the content motion .npy file",
+        # )
+        # group.add_argument(
+        #     "--style_motion",
+        #     type=str,
+        #     required=False, # 非必需
+        #     help="Path to the style motion .npy file",
+        # )
+        # group.add_argument(
+        #     "--style_text",
+        #     type=str,
+        #     required=False, # 非必需
+        #     help="A string describing the desired style",
+        # )
+        # --- [添加结束] ---
+
         group.add_argument(
             "--content_motion_dir",
             type=str,
@@ -244,6 +272,13 @@ def parse_args(phase="train"):
         cfg.TEST.FOLDER = params.out_dir if params.dir else cfg.TEST.FOLDER
         cfg.DEMO.REPLICATION = params.replication
         cfg.DEMO.OUTALL = params.allinone
+
+        # --- [请在这里添加以下新的赋值语句] ---
+        # cfg.DEMO.CHECKPOINT = params.checkpoint
+        # cfg.DEMO.CONTENT_MOTION = params.content_motion
+        # cfg.DEMO.STYLE_MOTION = params.style_motion
+        # cfg.DEMO.STYLE_TEXT = params.style_text
+        # --- [添加结束] ---
 
     if phase == "render":
         if params.npy:

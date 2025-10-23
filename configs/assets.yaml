@@ -10,6 +10,10 @@ DATASET:
   HUMANML3D:
     ROOT: 'datasets/humanml3d' # HumanML3D directory
     SPLIT_ROOT: 'datasets/humanml3d' # HumanML3D splits directory
+  # [NEW] 100Style 数据集路径
+  STYLE100:
+    ROOT: 'datasets/100StyleDataset'
+    SPLIT_ROOT: 'datasets/100StyleDataset'
 
 
 model:

@@ -134,6 +134,7 @@ class BaseModel(LightningModule):
         return {"optimizer": self.optimizer}
 
     def configure_metrics(self):
+        self.debug = True
         for metric in self.metrics_dict:
             if metric == "TemosMetric":
                 self.TemosMetric = ComputeMetrics(

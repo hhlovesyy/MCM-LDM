@@ -74,41 +74,36 @@ def get_datasets(cfg, logger=None, phase="train"):
     为混合训练任务增加了专门的处理逻辑。
     """
     
-    # --- [重构后] 清晰的逻辑分支 ---
-    # 检查是否应该使用我们新的 MixedDataModule
-    use_mixed_datamodule = (
-        cfg.DATASET.get('TYPE', 'single') == 'mixed' and 
-        phase == 'train'
-    )
-
-    if use_mixed_datamodule:
-        from .mixed_datamodule import MixedDataModule # 仅在需要时导入
+    log_func = logger.info if logger else print
+    
+    # --- [核心修复] ---
+    # 只要 config 中指定了 TYPE: 'mixed'，我们就应该使用 MixedDataModule，
+    # 无论是在训练 (train) 还是在演示/测试 (test) 阶段。
+    if cfg.DATASET.get('TYPE', 'single') == 'mixed':
+        from .mixed_datamodule import MixedDataModule
         
-        log_func = logger.info if logger else print
-        log_func("Initializing MixedDataModule for mixed training.")
+        log_func(f"Configuration specifies 'mixed' type. Initializing MixedDataModule for phase: '{phase}'.")
         
-        # 1. 实例化我们新的 DataModule
+        # 实例化我们新的 DataModule
         datamodule = MixedDataModule(cfg)
         
-        # 2. [核心修复] 手动调用 setup 来提前获取 nfeats
-        # PyTorch Lightning 保证 setup 可以被多次安全调用
-        log_func("Running manual setup on MixedDataModule to fetch metadata (nfeats)...")
-        datamodule.setup(stage='fit') 
+        # [关键] 手动调用 setup 来提前获取 nfeats 和 norms
+        # Demo 阶段也需要这个步骤
+        log_func("Running manual setup on MixedDataModule to fetch metadata...")
+        datamodule.setup(stage=phase) # 使用当前的 phase
         
-        # 3. 更新全局配置，这是构建模型的关键
+        # 更新全局配置
         if datamodule.nfeats is None:
-            raise ValueError("MixedDataModule.nfeats was not set after setup(). Check the dataset loading logic.")
+            raise ValueError("MixedDataModule.nfeats was not set after setup().")
         cfg.DATASET.NFEATS = datamodule.nfeats
         cfg.DATASET.NJOINTS = datamodule.njoints
         
-        log_func(f"Configuration updated: NFEATS={cfg.DATASET.NFEATS}, NJOINTS={cfg.DATASET.NJOINTS}")
+        log_func(f"Configuration updated: NFEATS={cfg.DATASET.NFEATS}")
         
-        # 4. 返回包含单个 DataModule 的列表，保持接口一致
         return [datamodule]
     
     # --- 如果不使用 MixedDataModule，则执行原始逻辑 ---
-    log_func = logger.info if logger else print
-    log_func("Initializing with standard single-dataset datamodules.")
+    log_func(f"Initializing with standard single-dataset datamodules for phase: '{phase}'.")
     
     dataset_names = eval(f"cfg.{phase.upper()}.DATASETS")
     datasets = []

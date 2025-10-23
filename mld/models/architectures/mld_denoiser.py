@@ -16,50 +16,42 @@ from mld.models.operator.position_encoding import build_position_encoding
 from mld.utils.temos_utils import lengths_to_mask
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 
-# --- [新增] 第2步：定义我们的 CrossAttention 手术工具 ---
-# 将这个类直接放在文件顶部，或者放在一个单独的文件中然后导入
-# 为了简单，我们直接放在这里。
+# We need a proper Cross-Attention module. 
+# We can create a simple wrapper around nn.MultiheadAttention for clarity and correct input handling.
 class CrossAttention(nn.Module):
-    """一个标准的多头交叉注意力模块"""
-    def __init__(self, query_dim, context_dim=None, n_heads=8, d_head=64, dropout=0.):
+    def __init__(self, dim, num_heads, qkv_bias=False, attn_drop=0., proj_drop=0.):
         super().__init__()
-        inner_dim = d_head * n_heads
-        context_dim = context_dim if context_dim is not None else query_dim
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
 
-        self.n_heads = n_heads
-        self.scale = d_head ** -0.5
+        self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.k_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.v_proj = nn.Linear(dim, dim, bias=qkv_bias)
 
-        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
-        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
 
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, query_dim),
-            nn.Dropout(dropout)
-        )
+    def forward(self, x, context):
+        # x: (Batch, Seq_len_q, Dim)
+        # context: (Batch, Seq_len_kv, Dim)
+        B_x, N_x, C = x.shape
+        B_c, N_c, C = context.shape
+        
+        # Project q from x, and k,v from context
+        q = self.q_proj(x).reshape(B_x, N_x, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        k = self.k_proj(context).reshape(B_c, N_c, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        v = self.v_proj(context).reshape(B_c, N_c, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
-    def forward(self, query, context=None, mask=None):
-        context = context if context is not None else query
-        
-        q, k, v = self.to_q(query), self.to_k(context), self.to_v(context)
-        
-        q, k, v = map(
-            lambda t: t.view(t.shape[0], -1, self.n_heads, t.shape[-1] // self.n_heads).permute(0, 2, 1, 3),
-            (q, k, v)
-        )  
-        
-        attention_scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale  # 想不起来的话这两句可以问一下AI
-        
-        if mask is not None:
-            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
-            
-        attention_probs = F.softmax(attention_scores, dim=-1)
-        
-        output = torch.matmul(attention_probs, v)
-        
-        # 强制 PyTorch 重新分配内存，并将非连续存储的张量数据按其当前的逻辑顺序复制到一块新的、连续的内存区域中。
-        output = output.permute(0, 2, 1, 3).contiguous().view(output.shape[0], -1, q.shape[-1] * self.n_heads)
-        return self.to_out(output)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B_x, N_x, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 # trans encoder
 class TransEncoder(nn.Module):
@@ -141,18 +133,6 @@ class DiTBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
-
-        # 新增cross attention
-        # --- [新增] Cross-Attention 层及其 LayerNorm ---
-        self.norm_cross = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.cross_attn = CrossAttention(
-            query_dim=hidden_size, 
-            n_heads=num_heads, 
-            d_head=hidden_size // num_heads, # 确保 d_head 正确
-            context_dim=hidden_size # 假设文本特征已被投影到 hidden_size
-        )
-        # -----------------------------------------------
-
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -166,29 +146,45 @@ class DiTBlock(nn.Module):
             nn.Linear(hidden_size, 3 * hidden_size, bias=True)
         )
 
-    # --- [修改] forward 方法以接受 text_context ---
-    def forward(self, x, c, t, text_context=None):
-         # 1. Self-Attention Block (adaLN-Zero for motion style)
-        #    c 是来自 MotionCLIP 的风格条件
-        #    如果 c 是 None，modulate 也能正常工作（shift=0, scale=0）
+        # NEW: Add Cross-Attention and its corresponding LayerNorm
+        self.norm_cross_attn = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6) # NEW:
+        self.cross_attn = CrossAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs) # NEW:
 
-        # 以下是原来的
-        # shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
-        # shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1)
-        # x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        # x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        # return x
+        # NEW: Add a separate modulation pathway for the new text condition
+        self.adaLN_modulation_text = nn.Sequential( # NEW:
+            nn.SiLU(), # NEW:
+            nn.Linear(hidden_size, 3 * hidden_size, bias=True) # NEW:
+        ) # NEW:
+
+    # def forward(self, x, c, t): # x:torch.Size([32, 13, 256]) c：torch.Size([32, 256]) t：torch.Size([32, 256])
+    #     shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
+    #     shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1)
+    #     x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+    #     x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+    #     return x  # torch.Size([32, 13, 256])
+        
+    # NEW: Update forward signature to accept the optional text feature
+    def forward(self, x, c, t, style_text_feature=None): # x: (B, T, D), c: (B, D), t: (B, D), style_text_feature: (B, D) or None
+        # --- Original Self-Attention Path (UNTOUCHED) ---
         shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-
-        # --- [新增] Cross-Attention Block for text style ---
-        if text_context is not None:
-            x = x + self.cross_attn(query=self.norm_cross(x), context=text_context)
-        # ----------------------------------------------------
         
-        # 3. Feed-Forward Block (adaLN-Zero for trajectory)
+        # --- NEW: Cross-Attention Path for Text (ACTIVATES ONLY IF TEXT IS PROVIDED) ---
+        if style_text_feature is not None: # NEW:
+            # Generate modulation parameters from the text feature
+            shift_text, scale_text, gate_text = self.adaLN_modulation_text(style_text_feature).chunk(3, dim=1) # NEW:
+            # Apply Cross-Attention
+            # Query is the motion sequence 'x'
+            # Context (Key/Value) is the single text feature vector, unsqueezed to be a sequence of length 1
+            x = x + gate_text.unsqueeze(1) * self.cross_attn( # NEW:
+                modulate(self.norm_cross_attn(x), shift_text, scale_text), # NEW:
+                style_text_feature.unsqueeze(1) # NEW:
+            ) # NEW:
+
+        # --- Original MLP Path (UNTOUCHED) ---
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        
         return x
 
 class MldDenoiser(nn.Module):
@@ -214,6 +210,7 @@ class MldDenoiser(nn.Module):
                  text_encoded_dim: int = 256,
                  motion_encoded_dim: int = 512,
                  nclasses: int = 10,
+                 text_style_dim: int = 512,
                  **kwargs) -> None:
 
         super().__init__()
@@ -227,11 +224,7 @@ class MldDenoiser(nn.Module):
         self.motion_encoded_dim = motion_encoded_dim
 
 
-        # --- [新增] 从 kwargs 中获取新配置，并设置默认值 ---
-        # 这样做的好处是，如果旧的 YAML 文件没有这些配置，代码也能正常运行
-        self.use_text_condition = kwargs.get('use_text_condition', False)
-        clip_feature_dim = kwargs.get('clip_feature_dim', 512)
-        # --------------------------------------------------
+
 
 
         # emb proj
@@ -248,11 +241,12 @@ class MldDenoiser(nn.Module):
         self.emb_proj_st = nn.Sequential(
             nn.ReLU(), nn.Linear(motion_encoded_dim, self.latent_dim))
 
+        # NEW: Add a projection layer for the text style feature
+        self.text_style_proj = nn.Sequential( # NEW:
+            nn.ReLU(), # NEW:
+            nn.Linear(text_style_dim, self.latent_dim) # NEW:
+        ) # NEW:
 
-        # --- [新增] 文本投影层 ---
-        if self.use_text_condition:
-            self.text_context_proj = nn.Linear(clip_feature_dim, self.latent_dim)
-        # ---------------------------
 
 
         self.query_pos = build_position_encoding(
@@ -286,125 +280,67 @@ class MldDenoiser(nn.Module):
 
 
     def forward(self,
-                sample,
-                timestep,
-                encoder_hidden_states,
-                lengths=None,
-                style_text_feature=None,
+                sample, # torch.Size([32, 7, 256])， 牢记32是batch_size
+                timestep, # torch.Size([32])
+                encoder_hidden_states,  # [cond_emb, motion_emb, trans_cond]
+                lengths=None,  # len() 32
+                style_text_feature=None, # NEW: Add the optional parameter
                 **kwargs):
 
-        # --- [核心修复] ---
-        # 1. 统一内部处理维度为 (SeqLen, Batch, Dim)
-        #    原始的 sample 形状是 (B, D, L) 或 (B, L, D)，我们需要确定
-        #    根据后续操作，模型期望 sample 是 (L, B, D)
-        #    VAE 的输出通常是 (B, D, L) 的 latent。我们需要把它变成 (L, B, D)
-        #    所以正确的操作应该是 permute(2, 0, 1)
-        #
-        #    让我们假设 VAE 输出就是 (B, D, L)
-        sample = sample.permute(2, 0, 1)  # (B, D, L) -> (L, B, D)
-        
-        # --------------------
+        sample = sample.permute(1, 0, 2)  # torch.Size([7, 32, 256])
 
         # time_embedding
-        timesteps = timestep.expand(sample.shape[1]).clone()
-        time_emb = self.time_proj(timesteps).to(dtype=sample.dtype)
-        time_emb = self.time_embedding(time_emb).unsqueeze(0) # [1, bs, latent_dim]
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timesteps = timestep.expand(sample.shape[1]).clone() # torch.Size([32]), 这句是在做什么？
+        time_emb = self.time_proj(timesteps) # torch.Size([32, 256])
+        time_emb = time_emb.to(dtype=sample.dtype)
+        # [bs, latent_dim] => [1, bs, latent_dim]
+        time_emb = self.time_embedding(time_emb).unsqueeze(0)  # torch.Size([1, 32, 256])
 
-        # --- 双模态路由逻辑 ---
-        text_context = None
-        # [修改] 文本特征也需要是 (Batch, Seq, Dim) 的格式给 CrossAttention
-        if self.use_text_condition and style_text_feature is not None:
-            # style_text_feature from CLIP is (B, D_clip)
-            projected_text = self.text_context_proj(style_text_feature) # (B, latent_dim)
-            text_context = projected_text.unsqueeze(1) # (B, 1, latent_dim)
+        # three conditions
+        style_emb = encoder_hidden_states[1].permute(1, 0, 2)  # torch.Size([1, 32, 512])
+        content_emb = encoder_hidden_states[0].permute(1, 0, 2)  # torch.Size([7, 32, 256])
+        trans_cond = encoder_hidden_states[-1]  # torch.Size([32, 28, 3])
+        
+        # content        
+        content_emb_latent = content_emb  # torch.Size([7, 32, 256])
+        # style remover for content
+        content_emb_latent = self.IN(content_emb_latent.permute(1,2,0)).permute(2,0,1)  # torch.Size([7, 32, 256])
+        content_emb_latent = content_emb_latent+time_emb  # torch.Size([7, 32, 256])
+        content_emb_latent = self.pe_content(content_emb_latent)  # torch.Size([7, 32, 256])
+        content_emb_latent = self.seqTransEncoder(content_emb_latent).permute(1,0,2)  # torch.Size([32, 7, 256])
+        content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256)  # torch.Size([32, 6, 256])
+        content_emb_latent = content_emb_latent.permute(1,0,2)  # torch.Size([6, 32, 256])
+        # concatenation with sample
+        xseq = torch.cat((content_emb_latent, sample), axis=0) # torch.Size([13, 32, 256])
 
-        # --- 准备 adaLN 的风格和轨迹条件 (保持 bs 在前) ---
-        motion_style_cond = None
-        style_emb = encoder_hidden_states[1] # [1, bs, 512]
-        if style_emb is not None:
-            style_emb = style_emb.permute(1, 0, 2) # [bs, 1, 512]
-            style_emb_latent = self.emb_proj_st(style_emb) # [bs, 1, 256]
-            motion_style_cond = (time_emb.permute(1,0,2) + style_emb_latent).squeeze(1) # [bs, 256]
-        else:
-            batch_size = sample.shape[1]
-            motion_style_cond = torch.zeros(batch_size, self.latent_dim, device=sample.device)
-        
-        trans_cond = encoder_hidden_states[-1] # [bs, nframes, 3]
-        trans_emb = self.trans_Encoder(trans_cond, lengths) # [1, bs, 256]
-        trans_emb = (time_emb + trans_emb).squeeze(0) # [bs, 256]
-        
-        # --- 准备内容条件 (保持 L 在前) ---
-        content_emb = encoder_hidden_states[0] # [L_content, bs, 256]
-        content_emb_latent = self.IN(content_emb.permute(1,2,0)).permute(2,0,1)
-        content_emb_latent = content_emb_latent + time_emb
-        content_emb_latent = self.pe_content(content_emb_latent)
-        content_emb_latent = self.seqTransEncoder(content_emb_latent) # 输出仍是 (L_c, bs, D)
-        # [修改] 下面这部分 reshape 操作非常危险，我们先简化它
-        content_emb_reshaped = content_emb_latent.permute(1,0,2).reshape(content_emb_latent.shape[1], -1)
-        content_emb_linear = self.linear(content_emb_reshaped)
-        content_emb_final = content_emb_linear.reshape(content_emb_latent.shape[1], 6, 256).permute(1,0,2)
-        
-        # --- 准备 DiTBlock 的输入序列 (保持 L 在前) ---
-        xseq = torch.cat((content_emb_final, sample), axis=0) # [L_c + L_s, bs, D]
-        xseq = self.query_pos(xseq) # 添加位置编码，形状不变
-        
-        # --- [核心修复] 将数据转换为 DiTBlock 期望的 (B, L, D) ---
-        xseq = xseq.permute(1, 0, 2) # (L, B, D) -> (B, L, D)
+        # style encoder
+        style_emb_latent = self.emb_proj_st(style_emb)  # style_emb_latent：torch.Size([1, 32, 256])，输入函数的style_emb：torch.Size([1, 32, 512])
+        style_emb_latent = time_emb + style_emb_latent  # torch.Size([1, 32, 256])
+        style_emb_latent = style_emb_latent.squeeze()  # torch.Size([32, 256])
 
-        # --- 循环调用改造后的 DiTBlock ---
+        # trajectory encoder
+        trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
+        trans_emb = trans_emb + time_emb  # torch.Size([1, 32, 256])
+        trans_emb = trans_emb.squeeze()  # torch.Size([32, 256])
+
+        # --- NEW: Text Style Path ---
+        text_emb_latent = None # NEW:
+        if style_text_feature is not None: # NEW:
+            # Project text feature to the latent dimension
+            text_emb_latent = self.text_style_proj(style_text_feature.permute(1, 0, 2)) # Input (B, 1, 512) -> (1, B, 512)
+            # Add time embedding, same as other conditions
+            text_emb_latent = time_emb + text_emb_latent # NEW:
+            text_emb_latent = text_emb_latent.squeeze(0) # Squeeze to (B, D)
+        
+        # to dit blocks (N, T, D)
+        xseq = self.query_pos(xseq).permute(1,0,2)  # torch.Size([32, 13, 256])
         for block in self.blocks:
-            xseq = block(
-                xseq, 
-                c=motion_style_cond,
-                t=trans_emb,
-                text_context=text_context
-            )
-
-        # --- [核心修复] 将 DiTBlock 的输出转换回内部处理格式 (L, B, D) ---
-        xseq = xseq.permute(1, 0, 2) # (B, L, D) -> (L, B, D)
-
-        # --- 提取去噪后的样本部分 ---
-        sample_denoised = xseq[content_emb_final.shape[0]:, :, :] # (L_s, bs, D)
-    
-        # --- [核心修复] 将最终输出转换为模型外部期望的 (B, D, L) ---
-        output = sample_denoised.permute(1, 2, 0) # (L, B, D) -> (B, D, L)
-        
-        return (output, )
-        
-        # # ---------------------------
-        # content_emb = encoder_hidden_states[0].permute(1, 0, 2)
-        # trans_cond = encoder_hidden_states[-1]
-        
-        # # content        
-        # content_emb_latent = content_emb
-        # # style remover for content
-        # content_emb_latent = self.IN(content_emb_latent.permute(1,2,0)).permute(2,0,1)
-        # content_emb_latent = content_emb_latent+time_emb
-        # content_emb_latent = self.pe_content(content_emb_latent)
-        # content_emb_latent = self.seqTransEncoder(content_emb_latent).permute(1,0,2)
-        # content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256)
-        # content_emb_latent = content_emb_latent.permute(1,0,2)
-        # # concatenation with sample
-        # xseq = torch.cat((content_emb_latent, sample), axis=0)
-
-        # # style encoder
-        # style_emb_latent = self.emb_proj_st(style_emb)
-        # style_emb_latent = time_emb + style_emb_latent
-        # style_emb_latent = style_emb_latent.squeeze()
-
-        # # trajectory encoder
-        # trans_emb = self.trans_Encoder(trans_cond, lengths)
-        # trans_emb = trans_emb + time_emb
-        # trans_emb = trans_emb.squeeze()
-        
-        # # to dit blocks (N, T, D)
-        # xseq = self.query_pos(xseq).permute(1,0,2)
-        # for block in self.blocks:
-        #     xseq = block(xseq, style_emb_latent, trans_emb) 
-        # sample = xseq[:,content_emb_latent.shape[0]:,:]
+            xseq = block(xseq, style_emb_latent, trans_emb, style_text_feature=text_emb_latent) 
+        sample = xseq[:,content_emb_latent.shape[0]:,:]  # torch.Size([32, 7, 256])
        
 
-        # return (sample, )        
+        return (sample, )        
 
 
 class EmbedAction(nn.Module):

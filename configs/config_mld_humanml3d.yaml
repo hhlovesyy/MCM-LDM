@@ -35,6 +35,7 @@ TRAIN:
   OPTIM:
     TYPE: AdamW # Optimizer type
     LR: 1e-4 # Learning rate
+    LR_NEW: 1e-4
   # Ablation study configurations.
   ABLATION:
     SKIP_CONNECT: True

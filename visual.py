@@ -17,7 +17,7 @@ parser.add_argument('--motion_path', type=str, default=
 
 
 
-def visual_pos(motion_path, save_path = './motion_output/59.mp4', caption = ' '):
+def visual_pos(motion_path, save_path = './motion_output/59.mp4', caption = ' ', view_mode='fixed_camera'):
 
 #    motion_path = './datasets/cmu_new/test_file/000059.npy'
     skeleton = paramUtil.t2m_kinematic_chain
@@ -28,7 +28,7 @@ def visual_pos(motion_path, save_path = './motion_output/59.mp4', caption = ' ')
 
 
     print('generate video for', save_path)
-    plot_3d_motion(save_path, skeleton, motion, caption, fps=20)
+    plot_3d_motion(save_path, skeleton, motion, caption, fps=20, view_mode=view_mode)
 
 
 

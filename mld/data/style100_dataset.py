@@ -50,68 +50,94 @@ class Style100Dataset(data.Dataset):
             for line in f.readlines():
                 id_list.append(line.strip())
 
-        self.data_dict = {}
-        self.name_list = []
-        count = 0
-        maxdata = 10 if tiny else (100 if debug else 1e10)
-        
-        for name in id_list:
-            if count >= maxdata: break
-            try:
-                motion_path = pjoin(motion_dir, name + ".npy")
-                motion = np.load(motion_path)
-                if not (min_filter_length <= len(motion) < max_filter_length): continue
-                
-                # --- [核心修复] 数据清洗 ---
-                text_data = []
-                with open(pjoin(text_dir, name + ".txt"), 'r') as f:
-                    for line in f.readlines():
-                        line_split = line.strip().split('#')
-                        
-                        # 1. 检查 tokens 部分是否存在且不为空
-                        if len(line_split) < 2 or not line_split[1].strip():
-                            logger.warning(f"Skipping empty or malformed token line in {name}.txt")
-                            continue
+        # --- [新增] 诊断与调试逻辑 ---
+        logger.info("--- [DEBUG] Starting Diagnostic for Style100Dataset ---")
+        logger.info(f"Filter settings: MIN={min_filter_length}, MAX={max_filter_length}")
 
-                        tokens_str = line_split[1].strip()
-                        raw_tokens = tokens_str.split(" ")
-                        
-                        # 2. 过滤掉所有格式不正确的 token
-                        cleaned_tokens = [t for t in raw_tokens if '/' in t and len(t.split('/')) == 2]
+        total_samples_before_filter = len(id_list)
+        passed_samples_count = 0
+        # 我们将把通过的样本信息 dump 到这个文件
+        dump_file_path = "passed_samples_style100.txt" 
+        with open(dump_file_path, "w") as dump_f:
+            dump_f.write(f"# Samples passed filter: MIN={min_filter_length}, MAX={max_filter_length}\n")
+            dump_f.write("# Format: [Sample Name] [Original Length]\n")
 
-                        # 3. 如果清洗后 token 列表为空，则跳过此行
-                        if not cleaned_tokens:
-                            logger.warning(f"No valid tokens found in line of {name}.txt after cleaning.")
-                            continue
+            self.data_dict = {}
+            self.name_list = []
+            count = 0
+            maxdata = 10 if tiny else (100 if debug else 1e10)
+            
+            for name in id_list:
+                # if count >= maxdata: break
+                try:
+                    motion_path = pjoin(motion_dir, name + ".npy")
+                    motion = np.load(motion_path)
+                    original_length = len(motion)
+                    if not (min_filter_length <= original_length < max_filter_length): 
+                        continue
+                    
+                    # --- [核心修复] 数据清洗 ---
+                    text_data = []
+                    with open(pjoin(text_dir, name + ".txt"), 'r') as f:
+                        for line in f.readlines():
+                            line_split = line.strip().split('#')
+                            
+                            # 1. 检查 tokens 部分是否存在且不为空
+                            if len(line_split) < 2 or not line_split[1].strip():
+                                logger.warning(f"Skipping empty or malformed token line in {name}.txt")
+                                continue
 
-                        text_dict = {
-                            "caption": line_split[0],
-                            "tokens": cleaned_tokens # 使用清洗后的 tokens
-                        }
-                        text_data.append(text_dict)
+                            tokens_str = line_split[1].strip()
+                            raw_tokens = tokens_str.split(" ")
+                            
+                            # 2. 过滤掉所有格式不正确的 token
+                            cleaned_tokens = [t for t in raw_tokens if '/' in t and len(t.split('/')) == 2]
 
-                # 如果该文件没有任何有效的文本行，则跳过整个样本
-                if not text_data:
-                    logger.warning(f"Skipping sample {name} because it has no valid text entries.")
-                    continue
-                # -------------------------
+                            # 3. 如果清洗后 token 列表为空，则跳过此行
+                            if not cleaned_tokens:
+                                logger.warning(f"No valid tokens found in line of {name}.txt after cleaning.")
+                                continue
 
-                style_name = self.id_to_style.get(name)
-                if not style_name: continue
-                
-                self.data_dict[name] = {
-                    "motion": motion,
-                    "length": len(motion),
-                    "text_list": text_data,
-                    "style_name": style_name
-                }
-                self.name_list.append(name)
-                count += 1
-            except Exception as e:
-                logger.warning(f"Skipping sample {name} due to an unexpected error: {e}")
+                            text_dict = {
+                                "caption": line_split[0],
+                                "tokens": cleaned_tokens # 使用清洗后的 tokens
+                            }
+                            text_data.append(text_dict)
+
+                    # 如果该文件没有任何有效的文本行，则跳过整个样本
+                    if not text_data:
+                        logger.warning(f"Skipping sample {name} because it has no valid text entries.")
+                        continue
+                    # -------------------------
+
+                    style_name = self.id_to_style.get(name)
+                    if not style_name: continue
+                    
+                    # --- 样本完全有效，现在记录它 ---
+                    passed_samples_count += 1
+                    dump_f.write(f"{name} {original_length}\n")
+
+                    self.data_dict[name] = {
+                        "motion": motion,
+                        "length": len(motion),
+                        "text_list": text_data,
+                        "style_name": style_name
+                    }
+                    self.name_list.append(name)
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"Skipping sample {name} due to an unexpected error: {e}")
 
         logger.info(f"Successfully loaded {len(self.name_list)} samples from Style100 after cleaning.")
         if not self.name_list: raise ValueError("No Style100 samples loaded. Check data and filter settings.")
+        # --- [新增] 打印最终的诊断报告 ---
+        pass_rate = (passed_samples_count / total_samples_before_filter) * 100 if total_samples_before_filter > 0 else 0
+        logger.info("--- [DEBUG] Diagnostic Report for Style100Dataset ---")
+        logger.info(f"Total samples in split file: {total_samples_before_filter}")
+        logger.info(f"Samples that passed all filters: {passed_samples_count}")
+        logger.info(f"Pass Rate: {pass_rate:.2f}%")
+        logger.info(f"Details of passed samples have been dumped to: {dump_file_path}")
+        logger.info("-----------------------------------------------------")
         self.nfeats = self.data_dict[self.name_list[0]]['motion'].shape[1]
     
     def __len__(self):
@@ -128,9 +154,36 @@ class Style100Dataset(data.Dataset):
         content_caption = content_text_data["caption"]
         content_tokens = content_text_data["tokens"]
         style_name = data["style_name"].lower()
+
+        # --- [NEW] 智能截断逻辑 ---
+        
+        # 1. 定义各部分和长度限制
+        style_suffix = f", in a {style_name} style"
+        MAX_TEXT_LEN_IN_CHARS = 256 # 安全字符上限
+
+        # 2. 检查总长度
+        total_len = len(content_caption) + len(style_suffix)
+        
+        if total_len > MAX_TEXT_LEN_IN_CHARS:
+            # 3. 计算需要从 content 中删除多少字符
+            chars_to_remove = total_len - MAX_TEXT_LEN_IN_CHARS
+            
+            # 4. 截断 content 部分
+            # [Robustness fix] 确保不会把 content 截成负数长度
+            if chars_to_remove < len(content_caption):
+                truncated_content_caption = content_caption[:-chars_to_remove]
+            else:
+                truncated_content_caption = "" # 如果 content 本身就太长，就把它清空
+            
+            # 5. 重新拼接，确保风格信息完整保留
+            final_caption = truncated_content_caption + style_suffix
+        else:
+            # 如果没超长，正常拼接
+            final_caption = content_caption + style_suffix
+        
         style_prompt_tokens = [",/OTHER", "in/ADP", "a/DET", f"{style_name}/NOUN", "style/NOUN"]
         tokens = ["sos/OTHER"] + content_tokens + style_prompt_tokens + ["eos/OTHER"]
-        final_caption = content_caption + f", in a {style_name} style"
+        # final_caption = content_caption + f", in a {style_name} style"
         sent_len = len(tokens)
         
         if sent_len > self.max_text_len + 2:

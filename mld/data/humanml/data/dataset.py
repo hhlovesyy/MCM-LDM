@@ -1620,6 +1620,13 @@ class Text2MotionDatasetV2(data.Dataset):
         text_data = random.choice(text_list)
         caption, tokens = text_data["caption"], text_data["tokens"]
 
+        # --- [THE FIX] ---
+        # 在处理 tokens 之前，先对 caption 进行截断，以确保 CLIP 的安全
+        MAX_TEXT_LEN_IN_CHARS = 256
+        if len(caption) > MAX_TEXT_LEN_IN_CHARS:
+            caption = caption[:MAX_TEXT_LEN_IN_CHARS]
+        # --- FIX ENDS HERE ---
+
         if len(tokens) < self.max_text_len:
             # pad with "unk"
             tokens = ["sos/OTHER"] + tokens + ["eos/OTHER"]

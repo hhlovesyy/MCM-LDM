@@ -38,6 +38,9 @@ class MixedDataModule(pl.LightningDataModule):
         self.val_dataset = None
         self.nfeats = None # 将在 setup 中被正确赋值
         self.njoints = 22
+
+        # [NEW] 添加 is_mm 属性以兼容评估代码
+        self.is_mm = False
         
         # 3. 创建一个普通的字典来存储归一化参数
         self.norms = {}
