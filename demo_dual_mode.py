@@ -36,8 +36,28 @@ def main():
         device = torch.device("cpu")
     
     # 加载数据集仅为获取元数据 (nfeats)
-    datamodule = get_datasets(cfg, logger=logger, phase="test")[0]
-    datamodule.setup() # 确保 datamodule.norms 等已加载
+    # datamodule = get_datasets(cfg, logger=logger, phase="test")[0]
+    # datamodule.setup() # 确保 datamodule.norms 等已加载
+    # [修改后]
+    # --- [优化] 使用“假加载”快速获取元数据 ---
+    from mld.data.mixed_datamodule import MixedDataModule
+
+    # 我们只传入配置，不实际加载数据，只为了能访问到 nfeats 和 norms
+    logger.info("Performing a quick setup to fetch metadata...")
+    datamodule = MixedDataModule(cfg) 
+
+    # 手动加载 norms，绕过耗时的 setup()
+    import numpy as np
+    from os.path import join as pjoin
+    humanml3d_cfg = cfg.DATASET.HUMANML3D
+    datamodule.norms['mean'] = np.load(pjoin(humanml3d_cfg.ROOT, "Mean.npy"))
+    datamodule.norms['std'] = np.load(pjoin(humanml3d_cfg.ROOT, "Std.npy"))
+
+    # 手动设置 nfeats
+    datamodule.nfeats = cfg.DATASET.NFEATS
+
+    logger.info("Metadata fetched successfully.")
+    # --- 优化结束 ---
 
     # 创建模型
     model = get_model(cfg, datamodule)

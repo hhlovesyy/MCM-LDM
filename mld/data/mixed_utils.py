@@ -5,7 +5,7 @@ import torch.utils.data
 import numpy as np
 import logging
 from .utils import mld_collate # 从现有 utils 导入原始的 collate 函数
-
+from .utils import collate_tensors
 # 初始化日志记录器
 logger = logging.getLogger(__name__)
 
@@ -83,17 +83,77 @@ class MixedBatchSampler(torch.utils.data.Sampler):
         batches_per_epoch_per_dataset = num_samples_per_epoch / self.num_samples_per_dataset
         return int(np.floor(batches_per_epoch_per_dataset.min()))
     
+    
+# todo:原来的mld_collate可能也需要同步修改为dict的版本，或者是引用下面写的这个dict的版本
 def mixed_collate_fn(batch):
     """
-    一个 collate 函数，它能处理来自 ConcatDataset 的、已经由我们各自的 Dataset
-    处理好的、格式完全统一的样本。
-    由于我们已经付出了巨大努力统一了 __getitem__ 的输出格式，
-    这个函数现在变得非常简单：它只需要直接调用原始的 mld_collate 即可。
-    我们保留这个函数是为了逻辑上的清晰和未来的可扩展性。
+    一个智能的 collate 函数，专门用于处理混合了 'humanml3d' 和 'style100' 数据源的批次。
+    它会：
+    1. 将不同来源的样本分离开。
+    2. 对每个子集分别使用原始的 mld_collate 进行处理。
+    3. 将结果合并，并创建一个新的 'is_text_guided' 张量来标记每个样本的类型。
     """
-    # 我们的 __getitem__ 返回的是一个元组。
-    # 我们需要确保传入 mld_collate 的是这个元组的列表。
-    # 在这个阶段，我们不需要再做任何特殊的处理了。
+    # 1. 根据 'source' 标志将样本分流
+    humanml3d_batch = [b for b in batch if b['source'] == 'humanml3d']
+    style100_batch = [b for b in batch if b['source'] == 'style100']
+
+    final_batch = {}
     
-    # 原始的 mld_collate 期望一个元组列表，这正是 DataLoader 传给我们的。
-    return mld_collate(batch)
+    # 2. 分别处理，如果某个子集不为空
+    if humanml3d_batch:
+        collated_hml = mld_collate_dict(humanml3d_batch) # 使用新的字典版 collate
+    if style100_batch:
+        collated_s100 = mld_collate_dict(style100_batch) # 使用新的字典版 collate
+
+    # 3. 合并结果
+    if humanml3d_batch and style100_batch:
+        # 如果两个都有，合并它们
+        for key in collated_hml.keys():
+            if isinstance(collated_hml[key], torch.Tensor):
+                final_batch[key] = torch.cat([collated_hml[key], collated_s100[key]], dim=0)
+            elif isinstance(collated_hml[key], list):
+                final_batch[key] = collated_hml[key] + collated_s100[key]
+        
+        # 4. [核心] 创建区分标志
+        is_text_guided = torch.cat([
+            torch.zeros(len(humanml3d_batch), dtype=torch.bool), # HumanML3D 样本为 False
+            torch.ones(len(style100_batch), dtype=torch.bool)    # 100Style 样本为 True
+        ], dim=0)
+
+    elif humanml3d_batch:
+        # 如果只有 HumanML3D
+        final_batch = collated_hml
+        is_text_guided = torch.zeros(len(humanml3d_batch), dtype=torch.bool)
+    
+    elif style100_batch:
+        # 如果只有 100Style
+        final_batch = collated_s100
+        is_text_guided = torch.ones(len(style100_batch), dtype=torch.bool)
+    else:
+        # 如果 batch 为空
+        return {} # 返回空字典
+
+    final_batch['is_text_guided'] = is_text_guided
+    
+    logger.debug(f"Mixed collate created a batch. Text-guided samples: {is_text_guided.sum()}/{len(is_text_guided)}")
+
+    return final_batch
+
+
+def mld_collate_dict(batch):
+    """
+    mld_collate 的一个适配器版本，用于处理字典列表而不是元组列表。
+    """
+    # 按照句子长度排序 (如果需要的话，原始 mld_collate 做了这件事)
+    batch.sort(key=lambda x: x['sent_len'], reverse=True)
+    
+    # 使用与 mld_collate 相同的逻辑，但从字典中按 key 取值
+    return {
+        "motion": collate_tensors([torch.tensor(b['motion']).float() for b in batch]),
+        "text": [b['caption'] for b in batch],
+        "length": [b['m_length'] for b in batch],
+        "word_embs": collate_tensors([torch.tensor(b['word_embeddings']).float() for b in batch]),
+        "pos_ohot": collate_tensors([torch.tensor(b['pos_one_hots']).float() for b in batch]),
+        "text_len": collate_tensors([torch.tensor(b['sent_len']) for b in batch]),
+        "tokens": [b['tokens'] for b in batch],
+    }

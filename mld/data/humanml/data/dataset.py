@@ -1678,15 +1678,16 @@ class Text2MotionDatasetV2(data.Dataset):
         if np.any(np.isnan(motion)):
             raise ValueError("nan in motion")
 
-        return (
-            word_embeddings,
-            pos_one_hots,
-            caption,
-            sent_len,
-            motion,
-            m_length,
-            "_".join(tokens),
-        )
+        return {
+            "word_embeddings": word_embeddings,
+            "pos_one_hots": pos_one_hots,
+            "caption": caption,
+            "sent_len": sent_len,
+            "motion": motion,
+            "m_length": m_length,
+            "tokens": "_".join(tokens),
+            "source": "humanml3d"  # <--- [新增] 来源标识
+        }
         # return caption, motion, m_length
 
 

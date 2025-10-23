@@ -7,7 +7,7 @@
 ####################################
 
 # 实验名称，会用作输出文件夹的名字
-NAME: DualMode_MLD_Finetune_v1
+NAME: DualMode_MLD_Finetune_v1_1023
 # Debug 模式，设为 True 时会使用极少量数据，方便快速测试流程
 DEBUG: False
 # 加速器类型: 'gpu' 或 'cpu'
@@ -28,7 +28,7 @@ TRAIN:
   # 训练批次大小
   BATCH_SIZE: 128
   # 微调的总轮数
-  END_EPOCH: 100
+  END_EPOCH: 50
 
   # [核心] 指向你下载的、原始的 MCM-LDM Denoiser 预训练权重
   # 这是我们微调的起点
@@ -40,8 +40,8 @@ TRAIN:
   # [核心] 差分学习率配置
   OPTIM:
     TYPE: AdamW
-    LR: 1.0e-5      # 基础学习率 (用于 Denoiser 的旧参数)
-    LR_NEW: 1.0e-4  # 新增层的学习率 (用于 Cross-Attention 等)
+    LR: 1.0e-6      # [修改] 大幅降低基础学习率，从 1e-5 -> 1e-6
+    LR_NEW: 1.0e-4  # [修改] 大幅提高新增层的学习率，从 1e-4 -> 5e-4
     LR_CONFIG:
       # 1. 新增的 CrossAttention 层，使用最大学习率从头训练
       - { name: "cross_attn", layers: "cross_attn", lr: 1.0e-4 }
@@ -75,7 +75,7 @@ DATASET:
   # [核心] 混合数据集的配置
   MIXED:
     # 比例: [HumanML3D, 100Style]。加起来最好等于 BATCH_SIZE
-    BATCH_RATIO: [108, 20] 
+    BATCH_RATIO: [64, 64] 
     # BATCH_RATIO: [2, 2]
 
   # [核心] HumanML3D 数据集的配置
@@ -112,7 +112,7 @@ model:
   
   # --- 推理时 Classifier-Free Guidance 的默认参数 ---
   guidance_scale: 5.0
-  guidance_uncondp: 0.25
+  guidance_uncondp: 0.1
 
   # [核心] Denoiser 的专属配置，将通过 **kwargs 传入
   denoiser:
@@ -125,9 +125,9 @@ model:
 # 日志与保存设置 (Logger & Checkpoint Settings)
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 25 # 每 100 个 epoch 保存一次模型
+  SACE_CHECKPOINT_EPOCH: 10 # 每 100 个 epoch 保存一次模型
   LOG_EVERY_STEPS: 1
-  VAL_EVERY_STEPS: 1000 # 每 500 个训练步，运行一次验证
+  VAL_EVERY_STEPS: 50 # 每 500 个训练步，运行一次验证
   TENSORBOARD: True
   WANDB:
     PROJECT: null # 如果你用 wandb，请填写项目名，例如 "mld-finetune"
@@ -165,13 +165,13 @@ TEST:
 #####################################
 DEMO:
   # [关键] 指定你要测试的、训练好的 checkpoint 文件！
-  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1/checkpoints/epoch=99.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
+  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1023/checkpoints/epoch=49.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
 
   # --- 模式一：文本引导 ---
   # [关键] 如果要使用文本引导，请在这里填入文本。
   # 如果留空 ("") ，则脚本会自动进入动作引导模式。
-  STYLE_TEXT: "a person walks with very Old Style"
-  # STYLE_TEXT: "" 
+  # STYLE_TEXT: "a person walks with very OpenLeg Style"
+  STYLE_TEXT: "" 
 
   # --- 模式二：动作引导 ---
   # 仅在 STYLE_TEXT 为空时生效

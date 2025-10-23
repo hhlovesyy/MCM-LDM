@@ -150,11 +150,11 @@ class DiTBlock(nn.Module):
         self.norm_cross_attn = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6) # NEW:
         self.cross_attn = CrossAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs) # NEW:
 
-        # NEW: Add a separate modulation pathway for the new text condition
-        self.adaLN_modulation_text = nn.Sequential( # NEW:
-            nn.SiLU(), # NEW:
-            nn.Linear(hidden_size, 3 * hidden_size, bias=True) # NEW:
-        ) # NEW:
+        # # NEW: Add a separate modulation pathway for the new text condition
+        # self.adaLN_modulation_text = nn.Sequential( # NEW:
+        #     nn.SiLU(), # NEW:
+        #     nn.Linear(hidden_size, 3 * hidden_size, bias=True) # NEW:
+        # ) # NEW:
 
     # def forward(self, x, c, t): # x:torch.Size([32, 13, 256]) c：torch.Size([32, 256]) t：torch.Size([32, 256])
     #     shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
@@ -169,17 +169,15 @@ class DiTBlock(nn.Module):
         shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         
-        # --- NEW: Cross-Attention Path for Text (ACTIVATES ONLY IF TEXT IS PROVIDED) ---
-        if style_text_feature is not None: # NEW:
-            # Generate modulation parameters from the text feature
-            shift_text, scale_text, gate_text = self.adaLN_modulation_text(style_text_feature).chunk(3, dim=1) # NEW:
-            # Apply Cross-Attention
-            # Query is the motion sequence 'x'
-            # Context (Key/Value) is the single text feature vector, unsqueezed to be a sequence of length 1
-            x = x + gate_text.unsqueeze(1) * self.cross_attn( # NEW:
-                modulate(self.norm_cross_attn(x), shift_text, scale_text), # NEW:
-                style_text_feature.unsqueeze(1) # NEW:
-            ) # NEW:
+        # [修改后]
+        if style_text_feature is not None:
+            # 检查张量是否全为零，如果是，则跳过计算以提高效率
+            if torch.any(style_text_feature != 0): # 不是0，则走cross attention机制
+                # 直接、干净地将 Cross-Attention 的结果加到 x 上
+                x = x + self.cross_attn(
+                    self.norm_cross_attn(x),
+                    style_text_feature.unsqueeze(1)
+                )
 
         # --- Original MLP Path (UNTOUCHED) ---
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1)
@@ -276,6 +274,8 @@ class MldDenoiser(nn.Module):
 
 
         self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
+        # [新代码] 为轨迹条件添加一个专门的归一化层
+        self.traj_norm = nn.LayerNorm(3) # 输入特征维度是 3 (x,y,z)
 
 
 
@@ -320,7 +320,12 @@ class MldDenoiser(nn.Module):
         style_emb_latent = style_emb_latent.squeeze()  # torch.Size([32, 256])
 
         # trajectory encoder
-        trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
+        # trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
+        # [修改后]
+        # a. 先对轨迹条件进行 Layer Normalization
+        normalized_trans_cond = self.traj_norm(trans_cond)
+        # b. 再将归一化后的结果送入编码器
+        trans_emb = self.trans_Encoder(normalized_trans_cond, lengths)
         trans_emb = trans_emb + time_emb  # torch.Size([1, 32, 256])
         trans_emb = trans_emb.squeeze()  # torch.Size([32, 256])
 

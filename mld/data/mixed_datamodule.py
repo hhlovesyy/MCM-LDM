@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 # 导入所有需要的组件
 from .humanml.data.dataset import Text2MotionDatasetV2
 from .style100_dataset import Style100Dataset
-from .mixed_utils import MixedBatchSampler, mixed_collate_fn
+from .mixed_utils import MixedBatchSampler, mixed_collate_fn, mld_collate_dict
 from .utils import mld_collate
 from .humanml.scripts.motion_process import recover_from_ric, extract_features
 
@@ -100,10 +100,10 @@ class MixedDataModule(pl.LightningDataModule):
         # 100Style 训练集
         logger.info("--- Setting up 100Style training dataset ---")
         style100_cfg = self.cfg.DATASET.STYLE100
-        style100_mean = np.load(pjoin(style100_cfg.ROOT, "Mean.npy"))
-        style100_std = np.load(pjoin(style100_cfg.ROOT, "Std.npy"))
+        # style100_mean = np.load(pjoin(style100_cfg.ROOT, "Mean.npy"))
+        # style100_std = np.load(pjoin(style100_cfg.ROOT, "Std.npy"))
         style100_train = Style100Dataset(
-            mean=style100_mean, std=style100_std,
+            mean=self.norms['mean'], std=self.norms['std'],
             split_file=pjoin(style100_cfg.ROOT, 'train.txt'),
             motion_dir=pjoin(style100_cfg.ROOT, 'new_joint_vecs'),
             text_dir=pjoin(style100_cfg.ROOT, 'texts'),
@@ -178,7 +178,7 @@ class MixedDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             # --- [核心修复 3] 验证集也应该使用同样的 collate 逻辑 ---
-            collate_fn=mld_collate, # 因为验证集不是混合的，直接用原始的即可
+            collate_fn=mld_collate_dict,
             pin_memory=True
         )
 

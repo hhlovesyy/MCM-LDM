@@ -36,6 +36,10 @@ class Style100Dataset(data.Dataset):
         self.mean = mean
         self.std = std
 
+        # --- [逻辑解读] 风格字典加载 ---
+        # 从 style_dict.txt 加载文件 ID 到风格名称的映射。
+        # 例如：'000123' -> 'proud'
+        # 这个逻辑是清晰且正确的。
         self.id_to_style = {}
         with open(style_dict_path, 'r') as f:
             for line in f.readlines():
@@ -73,6 +77,9 @@ class Style100Dataset(data.Dataset):
                     motion_path = pjoin(motion_dir, name + ".npy")
                     motion = np.load(motion_path)
                     original_length = len(motion)
+                    # --- [核心风险点 1] 长度过滤 ---
+                    # 这是关键的过滤步骤。如果 min/max_filter_length 设置不当，
+                    # 结合数据分布图来看，这里可能会过滤掉大量本就稀有的 100Style 样本。
                     if not (min_filter_length <= original_length < max_filter_length): 
                         continue
                     
@@ -82,7 +89,7 @@ class Style100Dataset(data.Dataset):
                         for line in f.readlines():
                             line_split = line.strip().split('#')
                             
-                            # 1. 检查 tokens 部分是否存在且不为空
+                            # 1. 检查 caption 和 tokens 是否都存在
                             if len(line_split) < 2 or not line_split[1].strip():
                                 logger.warning(f"Skipping empty or malformed token line in {name}.txt")
                                 continue
@@ -90,7 +97,7 @@ class Style100Dataset(data.Dataset):
                             tokens_str = line_split[1].strip()
                             raw_tokens = tokens_str.split(" ")
                             
-                            # 2. 过滤掉所有格式不正确的 token
+                            # 2. 过滤掉所有格式不正确的 token,确保它们是 'word/POS' 格式
                             cleaned_tokens = [t for t in raw_tokens if '/' in t and len(t.split('/')) == 2]
 
                             # 3. 如果清洗后 token 列表为空，则跳过此行
@@ -155,7 +162,10 @@ class Style100Dataset(data.Dataset):
         content_tokens = content_text_data["tokens"]
         style_name = data["style_name"].lower()
 
-        # --- [NEW] 智能截断逻辑 ---
+        # --- [核心修复 - 已完成] 智能文本截断 ---
+        # 这是另一个至关重要的修复！原始的硬截断方式可能会切掉句末的风格描述，
+        # 导致模型接收到错误的、不带风格的文本。
+        # 你的新逻辑优先保留风格后缀，只截断内容部分，这是完全正确的。
         
         # 1. 定义各部分和长度限制
         style_suffix = f", in a {style_name} style"
@@ -190,7 +200,8 @@ class Style100Dataset(data.Dataset):
             tokens = tokens[:self.max_text_len + 1] + ["eos/OTHER"]
             sent_len = len(tokens)
         else:
-            tokens = tokens + ["unk/OTHER"] * (self.max_text_len + 2 - sent_len)
+            tokens = tokens + ["unk/OTHER"] * (self.max_text_len - sent_len)
+            sent_len = self.max_text_len # 更新 sent_len 为填充后的长度
 
         word_embeddings, pos_one_hots = [], []
         for token in tokens:
@@ -203,20 +214,43 @@ class Style100Dataset(data.Dataset):
         word_embeddings = np.concatenate(word_embeddings, axis=0)
         pos_one_hots = np.concatenate(pos_one_hots, axis=0)
         
+        # --- [逻辑解读] 动作裁剪与标准化 ---
         m_length_cropped = min(m_length, self.max_motion_length)
+        # 确保裁剪长度是 unit_length 的整数倍
         m_length_cropped = (m_length_cropped // self.unit_length) * self.unit_length
+        # 确保裁剪后的长度不小于最小长度
         if m_length_cropped < self.min_motion_length:
              m_length_cropped = self.min_motion_length
         
+        # 随机选择裁剪起点
         idx = random.randint(0, m_length - m_length_cropped)
         motion_cropped = motion[idx:idx + m_length_cropped]
         motion = motion_cropped
+        # 标准化
         motion = (motion - self.mean) / self.std
 
+        # --- [代码加固] NaN 值检查 ---
+        # 这个检查非常重要，可以防止坏数据污染 batch。
         if np.any(np.isnan(motion)):
+            logger.warning(f"NaN detected in motion sample {name}. Resampling...")
             return self.__getitem__(np.random.randint(0, len(self.name_list)))
 
-        return (
-            word_embeddings, pos_one_hots, final_caption, sent_len,
-            motion, m_length_cropped, "_".join(tokens),
-        )
+        # --- [核心风险点 2] 返回值结构 ---
+        # 返回的是一个 tuple。这本身没问题，但极易出错。
+        # 在 `MixedDataModule` 中处理时，必须非常小心地按索引取值。
+        # 推荐改为返回一个字典，可读性更强，也更不容易出错。
+        # 例如: return {'text_emb': ..., 'motion': ..., 'caption': ...}
+        # return (
+        #     word_embeddings, pos_one_hots, final_caption, sent_len,
+        #     motion, m_length_cropped, "_".join(tokens),
+        # )
+        return {
+            "word_embeddings": word_embeddings,
+            "pos_one_hots": pos_one_hots,
+            "caption": final_caption,
+            "sent_len": sent_len,
+            "motion": motion,
+            "m_length": m_length_cropped,
+            "tokens": "_".join(tokens),
+            "source": "style100"  # <--- [新增] 来源标识
+        }

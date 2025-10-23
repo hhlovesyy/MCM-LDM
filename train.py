@@ -76,7 +76,8 @@ def main():
         loggers.append(wandb_logger)
     if cfg.LOGGER.TENSORBOARD:
         tb_logger = pl_loggers.TensorBoardLogger(save_dir=cfg.FOLDER_EXP,
-                                                 sub_dir="tensorboard",
+                                                 # sub_dir="tensorboard",
+                                                 sub_dir="",
                                                  version="",
                                                  name="")
         loggers.append(tb_logger)
@@ -149,13 +150,15 @@ def main():
         #strategy=ddp_strategy,
         # move_metrics_to_cpu=True,
         default_root_dir=cfg.FOLDER_EXP,
-        log_every_n_steps=cfg.LOGGER.VAL_EVERY_STEPS,
+        # log_every_n_steps=cfg.LOGGER.VAL_EVERY_STEPS,
+        log_every_n_steps=50,
         deterministic=False,
-        detect_anomaly=False,
+        detect_anomaly=True,
         enable_progress_bar=True,
         logger=loggers,
         callbacks=callbacks,
-        check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
+        #check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
+        check_val_every_n_epoch=1,
     )
     logger.info("Trainer initialized")
 
