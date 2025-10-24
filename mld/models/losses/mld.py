@@ -98,6 +98,7 @@ class MLDLosses(Metric):
 
     def update(self, rs_set):
         total: float = 0.0
+        diffusion_loss = torch.tensor(0.0, device=self.device)
         # Compute the losses
         # Compute instance loss
         if self.stage in ["vae", "vae_diffusion"]:
@@ -109,9 +110,46 @@ class MLDLosses(Metric):
 
         if self.stage in ["diffusion", "vae_diffusion"]:
             # predict noise
+            # --- [核心修复] 在这里实现损失加权 ---
+        
+            # 1. 检查 rs_set 中是否存在我们传递的掩码
+            if "is_text_guided_mask" in rs_set:
+                mask = rs_set["is_text_guided_mask"]
+                
+                # 只有当 batch 中确实存在两种类型的样本时，才进行加权
+                if mask.any() and (~mask).any():
+                    # a. 提取需要的数据
+                    noise_pred = rs_set['noise_pred']
+                    noise = rs_set['noise']
+                    
+                    # b. 分别计算两种任务的 MSE Loss (不加权)
+                    loss_text_guided = self._losses_func["inst_loss"](noise_pred[mask], noise[mask])
+                    loss_motion_guided = self._losses_func["inst_loss"](noise_pred[~mask], noise[~mask])
 
-            total += self._update_loss("inst_loss", rs_set['noise_pred'],
-                                           rs_set['noise'])
+                    # c. 从配置中获取权重 lambda
+                    lambda_text_style = self.cfg.LOSS.get('LAMBDA_TEXT_STYLE', 1.0)
+                    
+                    # d. [关键] 计算加权后的总 diffusion loss
+                    # 我们只对 text-guided 部分的损失应用额外的权重
+                    # _params["inst_loss"] 通常是 1.0
+                    diffusion_loss = self._params["inst_loss"] * (loss_motion_guided + lambda_text_style * loss_text_guided)
+                    
+                    # e. 将计算好的损失累加到 total，并手动更新 inst_loss 的状态用于日志记录
+                    total += diffusion_loss
+                    self.inst_loss += diffusion_loss.detach()
+                    
+                else:
+                    diffusion_loss = self._losses_func["inst_loss"](rs_set['noise_pred'], rs_set['noise'])
+                    # 如果 batch 中只有一种数据，则走原始的、不加权的逻辑
+                    total += self._update_loss("inst_loss", rs_set['noise_pred'], rs_set['noise'])
+
+            else:
+                # [核心修复] 在这个分支中也计算并赋值 diffusion_loss
+                diffusion_loss = self._losses_func["inst_loss"](rs_set['noise_pred'], rs_set['noise'])
+                # 如果没有掩码 (例如在验证时)，则走原始的、不加权的逻辑
+                total += self._update_loss("inst_loss", rs_set['noise_pred'], rs_set['noise'])
+            # total += self._update_loss("inst_loss", rs_set['noise_pred'],
+            #                                rs_set['noise'])
 
             # style loss
             # total += self._update_loss("style_loss", rs_set['gen_motion_feature'],
@@ -132,7 +170,8 @@ class MLDLosses(Metric):
         self.total += total.detach()
         self.count += 1
 
-        return total
+        # [修改] 返回一个包含 'total' 键的字典，以确保与 allsplit_step 的日志记录代码兼容
+        return {"total": total, "diffusion": diffusion_loss.detach()}
 
     def compute(self, split):
         count = getattr(self, "count")

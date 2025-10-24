@@ -483,6 +483,11 @@ class MLD(BaseModel):
             "noise_pred_prior": noise_pred_prior, # 0
         }
 
+        # [新代码] 如果是训练模式，额外传递 is_text_guided_mask
+        if self.training and style_text_feature is not None:
+            is_text_guided_mask = torch.any(style_text_feature.squeeze(1) != 0, dim=-1)
+            n_set["is_text_guided_mask"] = is_text_guided_mask
+
         return n_set
 
     def train_vae_forward(self, batch):
@@ -845,30 +850,6 @@ class MLD(BaseModel):
                 # 如果是单个张量 (通常在 val 时)，只记录总损失
                 self.log(f"{split}/loss", loss_val, prog_bar=True, on_step=(split == 'train'), on_epoch=True)
             # --- 修复结束 ---
-
-            # --- [NEW DEBUG CODE] ---
-            # 只在训练的第一个 batch 打印一次，避免刷屏
-            # if split == 'train' and batch_idx == 0:
-            #     print("\n" + "="*50)
-            #     print(">>> DEBUGGING LOSS OBJECT <<<")
-            #     print(f"    - Type of loss object: {type(loss)}")
-                
-            #     if isinstance(loss, torch.Tensor):
-            #         print(f"    - It's a Tensor!")
-            #         print(f"    - Shape: {loss.shape}")
-            #         print(f"    - Value: {loss.item()}")
-            #     elif isinstance(loss, dict):
-            #         print(f"    - It's a Dictionary!")
-            #         print(f"    - Keys: {loss.keys()}")
-            #         for key, value in loss.items():
-            #             if isinstance(value, torch.Tensor):
-            #                 print(f"      - Key '{key}': Tensor(shape={value.shape}, value={value.item()})")
-            #             else:
-            #                 print(f"      - Key '{key}': {value}")
-            #     else:
-            #         print(f"    - It's another type: {loss}")
-            #     print("="*50 + "\n")
-            # --- END DEBUG CODE ---
 
         # Compute the metrics - currently evaluate results from text to motion
         if split in ["val", "test"]:

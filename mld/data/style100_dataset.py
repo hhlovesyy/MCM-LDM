@@ -4,6 +4,7 @@ from torch.utils import data
 import random
 from os.path import join as pjoin
 import logging
+import csv
 
 # 初始化日志记录器
 logger = logging.getLogger(__name__)
@@ -29,6 +30,20 @@ class Style100Dataset(data.Dataset):
         **kwargs,
     ):
         self.w_vectorizer = w_vectorizer
+        # --- [核心修复] 通过一次查询来动态获取真实的维度 trick---
+        try:
+            # 随便取一个常见的 token 来查询
+            example_word_emb, example_pos_oh = self.w_vectorizer["the/DET"]
+            self.glove_embedding_dim = example_word_emb.shape[0] # 获取向量的长度
+            self.pos_one_hot_dim = example_pos_oh.shape[0]     # 获取 one-hot 向量的长度
+        except Exception as e:
+            # 如果查询失败，提供一个合理的备用值并警告用户
+            logger.warning(f"Could not dynamically determine embedding dims, falling back to defaults. Error: {e}")
+            self.glove_embedding_dim = 300 # Glove 的常见维度
+            self.pos_one_hot_dim = 27      # 一个足够大的备用值
+
+        logger.info(f"Dynamically determined Glove dim: {self.glove_embedding_dim}, POS one-hot dim: {self.pos_one_hot_dim}")
+        # --- 修复结束 ---
         self.max_motion_length = max_motion_length
         self.min_motion_length = min_motion_length
         self.max_text_len = max_text_len
@@ -49,6 +64,24 @@ class Style100Dataset(data.Dataset):
                     style_name = parts[1].split('_')[0]
                     self.id_to_style[file_id] = style_name
         
+        # 简化一下，style_desc_path 直接硬编码，后面再考虑重构，传参
+        style_desc_path = "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/100StyleDataset/Dataset_List.csv"
+
+        # --- 2. [新代码] 加载纯粹的风格描述 ---
+        self.style_to_desc = {}
+        with open(style_desc_path, 'r', newline='') as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader) # 跳过表头 (Style Name,Description,...)
+            for row in reader:
+                # key 是小写的 style name (e.g., 'aeroplane')
+                # value 是纯粹的描述 (e.g., 'Both arms raised as wings...')
+                style_name_key = row[0].lower().replace(" ", "") # 将 'Arms Above Head' 转为 'armsabovehead'
+                description = row[1]
+                self.style_to_desc[style_name_key] = description
+        
+        logger.info(f"Loaded {len(self.style_to_desc)} pure style descriptions.")
+
+
         id_list = []
         with open(split_file, "r") as f:
             for line in f.readlines():
@@ -157,62 +190,80 @@ class Style100Dataset(data.Dataset):
         data = self.data_dict[name]
         motion, m_length = data["motion"], data["length"]
 
-        content_text_data = random.choice(data["text_list"])
-        content_caption = content_text_data["caption"]
-        content_tokens = content_text_data["tokens"]
+        # clip 难以应对带着content信息的style text，所以我们干脆用比较简单的DatasetList.csv里面的文本描述来做
+        # content_text_data = random.choice(data["text_list"])
+        # content_caption = content_text_data["caption"]
+        # content_tokens = content_text_data["tokens"]
         style_name = data["style_name"].lower()
+        # [修改后]
+        # --- 1. [核心修改] 直接从映射中获取纯粹的风格描述 ---
+        style_name_key = style_name.lower().replace(" ", "")
+        final_caption = self.style_to_desc.get(style_name_key)
 
-        # --- [核心修复 - 已完成] 智能文本截断 ---
+        # [健壮性检查] 如果在 csv 中找不到对应的风格，提供一个回退方案
+        if final_caption is None:
+            logger.warning(f"Pure style description for '{style_name_key}' not found. Falling back to simple style name.")
+            final_caption = f"in a {style_name} style"
+
+        # --- [核心修复 - 已完成] 智能文本截断 这个逻辑现在暂时先不用了，因为我们简化了style text，避免模型什么都学不会---
         # 这是另一个至关重要的修复！原始的硬截断方式可能会切掉句末的风格描述，
         # 导致模型接收到错误的、不带风格的文本。
         # 你的新逻辑优先保留风格后缀，只截断内容部分，这是完全正确的。
         
-        # 1. 定义各部分和长度限制
-        style_suffix = f", in a {style_name} style"
-        MAX_TEXT_LEN_IN_CHARS = 256 # 安全字符上限
+        # # 1. 定义各部分和长度限制
+        # style_suffix = f", in a {style_name} style"
+        # MAX_TEXT_LEN_IN_CHARS = 256 # 安全字符上限
 
-        # 2. 检查总长度
-        total_len = len(content_caption) + len(style_suffix)
+        # # 2. 检查总长度
+        # total_len = len(content_caption) + len(style_suffix)
         
-        if total_len > MAX_TEXT_LEN_IN_CHARS:
-            # 3. 计算需要从 content 中删除多少字符
-            chars_to_remove = total_len - MAX_TEXT_LEN_IN_CHARS
+        # if total_len > MAX_TEXT_LEN_IN_CHARS:
+        #     # 3. 计算需要从 content 中删除多少字符
+        #     chars_to_remove = total_len - MAX_TEXT_LEN_IN_CHARS
             
-            # 4. 截断 content 部分
-            # [Robustness fix] 确保不会把 content 截成负数长度
-            if chars_to_remove < len(content_caption):
-                truncated_content_caption = content_caption[:-chars_to_remove]
-            else:
-                truncated_content_caption = "" # 如果 content 本身就太长，就把它清空
+        #     # 4. 截断 content 部分
+        #     # [Robustness fix] 确保不会把 content 截成负数长度
+        #     if chars_to_remove < len(content_caption):
+        #         truncated_content_caption = content_caption[:-chars_to_remove]
+        #     else:
+        #         truncated_content_caption = "" # 如果 content 本身就太长，就把它清空
             
-            # 5. 重新拼接，确保风格信息完整保留
-            final_caption = truncated_content_caption + style_suffix
-        else:
-            # 如果没超长，正常拼接
-            final_caption = content_caption + style_suffix
+        #     # 5. 重新拼接，确保风格信息完整保留
+        #     final_caption = truncated_content_caption + style_suffix
+        # else:
+        #     # 如果没超长，正常拼接
+        #     final_caption = content_caption + style_suffix
         
-        style_prompt_tokens = [",/OTHER", "in/ADP", "a/DET", f"{style_name}/NOUN", "style/NOUN"]
-        tokens = ["sos/OTHER"] + content_tokens + style_prompt_tokens + ["eos/OTHER"]
+        # style_prompt_tokens = [",/OTHER", "in/ADP", "a/DET", f"{style_name}/NOUN", "style/NOUN"]
+        # tokens = ["sos/OTHER"] + content_tokens + style_prompt_tokens + ["eos/OTHER"]
         # final_caption = content_caption + f", in a {style_name} style"
-        sent_len = len(tokens)
         
-        if sent_len > self.max_text_len + 2:
-            tokens = tokens[:self.max_text_len + 1] + ["eos/OTHER"]
-            sent_len = len(tokens)
-        else:
-            tokens = tokens + ["unk/OTHER"] * (self.max_text_len - sent_len)
-            sent_len = self.max_text_len # 更新 sent_len 为填充后的长度
+        # [简化] 我们不再需要为 glove 构建复杂的 tokens
+        tokens = ["unk/OTHER"] * (self.max_text_len + 2)
+        # sent_len = len(tokens)
+        sent_len = 0 # 设为0，因为我们不使用它
+        
+        # if sent_len > self.max_text_len + 2:
+        #     tokens = tokens[:self.max_text_len + 1] + ["eos/OTHER"]
+        #     sent_len = len(tokens)
+        # else:
+        #     tokens = tokens + ["unk/OTHER"] * (self.max_text_len - sent_len)
+        #     sent_len = self.max_text_len # 更新 sent_len 为填充后的长度
 
-        word_embeddings, pos_one_hots = [], []
-        for token in tokens:
-            try:
-                word_emb, pos_oh = self.w_vectorizer[token]
-            except KeyError:
-                word_emb, pos_oh = self.w_vectorizer["unk/OTHER"]
-            word_embeddings.append(word_emb[None, :])
-            pos_one_hots.append(pos_oh[None, :])
-        word_embeddings = np.concatenate(word_embeddings, axis=0)
-        pos_one_hots = np.concatenate(pos_one_hots, axis=0)
+        # word_embeddings, pos_one_hots = [], []
+        # for token in tokens:
+        #     try:
+        #         word_emb, pos_oh = self.w_vectorizer[token]
+        #     except KeyError:
+        #         word_emb, pos_oh = self.w_vectorizer["unk/OTHER"]
+        #     word_embeddings.append(word_emb[None, :])
+        #     pos_one_hots.append(pos_oh[None, :])
+        # word_embeddings = np.concatenate(word_embeddings, axis=0)
+        # pos_one_hots = np.concatenate(pos_one_hots, axis=0)
+
+        # [简化] 创建空的占位符以保持返回字典的结构不变
+        word_embeddings = np.zeros((self.max_text_len + 2, self.glove_embedding_dim))
+        pos_one_hots = np.zeros((self.max_text_len + 2, self.pos_one_hot_dim))
         
         # --- [逻辑解读] 动作裁剪与标准化 ---
         m_length_cropped = min(m_length, self.max_motion_length)
@@ -235,15 +286,6 @@ class Style100Dataset(data.Dataset):
             logger.warning(f"NaN detected in motion sample {name}. Resampling...")
             return self.__getitem__(np.random.randint(0, len(self.name_list)))
 
-        # --- [核心风险点 2] 返回值结构 ---
-        # 返回的是一个 tuple。这本身没问题，但极易出错。
-        # 在 `MixedDataModule` 中处理时，必须非常小心地按索引取值。
-        # 推荐改为返回一个字典，可读性更强，也更不容易出错。
-        # 例如: return {'text_emb': ..., 'motion': ..., 'caption': ...}
-        # return (
-        #     word_embeddings, pos_one_hots, final_caption, sent_len,
-        #     motion, m_length_cropped, "_".join(tokens),
-        # )
         return {
             "word_embeddings": word_embeddings,
             "pos_one_hots": pos_one_hots,
