@@ -87,15 +87,29 @@ class MLD(BaseModel):
         self.std = torch.tensor(self.datamodule.norms['std']).to(self.mld_device)
 
         #don't train motionclip
-        self.motionclip.training = False
+        self.motionclip.train()
         for p in self.motionclip.parameters():
-            p.requires_grad = False
+            p.requires_grad = True
 
         # NEW: 加载并冻结 CLIP 文本编码器
         self.clip_model, _ = clip.load("ViT-B/32", device=self.mld_device)
-        self.clip_model.training = False
-        for p in self.clip_model.parameters():
+        # self.clip_model.train()
+        # print("Finetuning CLIP model. Parameters to be trained:")
+        # for name, p in self.clip_model.named_parameters():
+        #     # 我们只解冻最后一个 Transformer 块 (resblocks.11) 的 MLP 部分
+        #     # 以及文本投影矩阵 (text_projection)，这是 CLIP 的一个重要部分
+        #     # 我们继续冻结所有的 LayerNorm (ln_) 和自注意力模块 (attn)。
+        #     if ("transformer.resblocks.11.mlp" in name) or ("text_projection" in name):
+        #         p.requires_grad = True
+        #         print(f"  - {name}")
+        #     else:
+        #         p.requires_grad = False
+        self.clip_model.eval()
+        for name, p in self.clip_model.named_parameters():
             p.requires_grad = False
+
+        # 验证一下 ln_final 是否被冻结
+        print(f"CLIP's ln_final.weight.requires_grad: {self.clip_model.ln_final.weight.requires_grad}") # 应该输出 False
 
         self.vae = instantiate_from_config(cfg.model.motion_vae)
         # Don't train the motion encoder and decoder
@@ -115,27 +129,6 @@ class MLD(BaseModel):
 
         self._get_t2m_evaluator(cfg)
 
-        # MODIFIED: 配置差分学习率优化器
-        if cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
-            new_params = []
-            base_params = []
-            for name, param in self.denoiser.named_parameters():
-                if 'cross_attn' in name or 'norm_cross_attn' in name or 'adaLN_modulation_text' in name or 'text_style_proj' in name:
-                    new_params.append(param)
-                else:
-                    base_params.append(param)
-            
-            # 确保您在配置文件中定义了 LR_NEW
-            lr_new = cfg.TRAIN.OPTIM.get('LR_NEW', cfg.TRAIN.OPTIM.LR * 10)
-
-            self.optimizer = AdamW([
-                {'params': base_params, 'lr': cfg.TRAIN.OPTIM.LR},
-                {'params': new_params, 'lr': lr_new}
-            ])
-            print(f"Optimizer configured with base LR: {cfg.TRAIN.OPTIM.LR} and new layer LR: {lr_new}")
-        else:
-            raise NotImplementedError("Do not support other optimizer for now.")
-
         if cfg.LOSS.TYPE == "mld":
             self._losses = MetricCollection({
                 split: MLDLosses(vae=self.is_vae, mode="xyz", cfg=cfg)
@@ -154,31 +147,44 @@ class MLD(BaseModel):
         self.feats2joints = datamodule.feats2joints
         self.joints2feats = datamodule.joints2feats
     
-    # # NEW: Implement configure_optimizers for fine-grained LR control
-    # def configure_optimizers(self):
-    #     # Separate parameters into two groups
-    #     newly_added_params = []
-    #     original_params = []
+    def configure_optimizers(self):
+        # 核心思路：这是 PyTorch Lightning 配置优化器的标准方法。
+        # 我们将之前在 __init__ 中的所有逻辑都搬到这里。
+        # 当 Trainer 启动时，它会自动调用这个方法，并获取返回的优化器。
+        # 这样做，可以确保 AMP 插件能够正确地“包装”和管理我们的优化器。
 
-    #     for name, param in self.denoiser.named_parameters():
-    #         if param.requires_grad:
-    #             if 'cross_attn' in name or 'norm_cross_attn' in name or 'adaLN_modulation_text' in name or 'text_style_proj' in name:
-    #                 newly_added_params.append(param)
-    #             else:
-    #                 original_params.append(param)
+        if self.cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
+            print("Configuring differential learning rates in `configure_optimizers`...")
+            denoiser_base_params = []
+            denoiser_new_params = []
+            
+            for name, param in self.denoiser.named_parameters():
+                if param.requires_grad:
+                    if 'adaLN_modulation_text' in name or 'text_style_proj' in name:
+                        denoiser_new_params.append(param)
+                    else:
+                        denoiser_base_params.append(param)
+            
+            lr_base = self.cfg.TRAIN.OPTIM.LR
+            lr_new = self.cfg.TRAIN.OPTIM.get('LR_NEW', lr_base * 5)
+            lr_finetune = self.cfg.TRAIN.OPTIM.get('LR_FINETUNE', lr_base * 0.1)
+            lr_finetune_clip = lr_base * 0.01
+            lr_finetune_motionclip = lr_base * 0.1
+            param_groups = [
+                {'params': denoiser_base_params, 'lr': lr_base, 'name': 'denoiser_base'},
+                {'params': denoiser_new_params, 'lr': lr_new, 'name': 'denoiser_new'},
+                {'params': filter(lambda p: p.requires_grad, self.clip_model.parameters()), 'lr': lr_finetune_clip, 'name': 'clip_finetune'},
+                {'params': filter(lambda p: p.requires_grad, self.motionclip.parameters()), 'lr': lr_finetune_motionclip, 'name': 'motionclip_finetune'}
+            ]
 
-    #     # Create parameter groups for the optimizer
-    #     param_groups = [
-    #         {'params': original_params, 'lr': self.cfg.TRAIN.OPTIM.LR}, # Original params with base LR
-    #         {'params': newly_added_params, 'lr': self.cfg.TRAIN.OPTIM.LR_NEW} # New params with a higher LR
-    #     ]
+            optimizer = AdamW(param_groups)
 
-    #     if self.cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
-    #         optimizer = AdamW(param_groups)
-    #     else:
-    #         raise NotImplementedError("Only AdamW optimizer is supported for differential learning rates.")
-        
-    #     return optimizer
+            for group in optimizer.param_groups:
+                print(f"  - Group '{group['name']}': {len(group['params'])} params, LR: {group['lr']}")
+            
+            return optimizer
+        else:
+            raise NotImplementedError("Do not support other optimizer for now.")
 
     def _get_t2m_evaluator(self, cfg):
         """
@@ -265,113 +271,96 @@ class MLD(BaseModel):
     
 # test
     def forward(self, batch):
-
-        lengths = batch["length"]
-        bs = len(lengths) # NEW: Get batch size for later use
-        # style
-        # motion = batch["style_motion"].clone()
-        # motion[...,:3] = 0
-
-
-        # content
+        """
+        This is the inference function.
+        It should perfectly mirror the logic of train_diffusion_forward,
+        but with Classifier-Free Guidance (CFG) explicitly constructed.
+        (Final Corrected Version v2)
+        """
+        # --- 1. 准备 Content 和 Trajectory ---
         content_motion = batch['content_motion']
-        content_motion = (content_motion - self.mean.to(content_motion.device))/self.std.to(content_motion.device)
+        content_motion_normalized = (content_motion - self.mean.to(content_motion.device)) / self.std.to(content_motion.device)
 
-        # trajectory
-        trans_motion = content_motion.clone()
-        # 
-        content_motion[...,:3] = 0
+        trans_motion_unnormalized = content_motion_normalized.clone()
+        content_motion_normalized[..., :3] = 0.0
 
+        # [修改] 我们将 content_lengths 和 style_lengths 分开处理
+        content_lengths = batch["length"]
+        bs = len(content_lengths)
 
-        scale = batch.get("tag_scale", self.guidance_scale) # 如果 batch 中没提供，则使用默认值
-        lengths1 = [content_motion.shape[1]]* content_motion.shape[0]
-        
-        if self.cfg.TEST.COUNT_TIME:
-            self.starttime = time.time()
-            
-        if self.stage in ['diffusion', 'vae_diffusion']:\
-            #add style text in test
-            # NEW: 初始化 style_text_feature 为 None
-            style_text_feature = None
-            
-            # content motion
-            with torch.no_grad():
-                z, dist_m = self.vae.encode(content_motion.float(), lengths1)
-            uncond_tokens = torch.cat([z, z], dim = 1).permute(1,0,2)
-            motion_emb_content = uncond_tokens
-
-            # trajectory
-            trans_cond = trans_motion[...,:3]
-            uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
-
-            # --- 3. [核心修复] 智能判断模式并构建风格条件 ---
-        
-            # 模式一: 文本引导
-            if "style_text" in batch and batch["style_text"] is not None:
-                texts = batch["style_text"]
-                with torch.no_grad():
-                    text_tokens = clip.tokenize(texts).to(self.mld_device)
-                    text_features = self.clip_model.encode_text(text_tokens).float()
-                
-                uncond_text_features = torch.zeros_like(text_features)
-                style_text_feature = torch.cat([uncond_text_features, text_features], dim=0).unsqueeze(1)
-                
-                # 创建一个全零的 motion_emb 占位符
-                # motion_emb = torch.zeros(bs * 2, 1, self.motionclip.motion_encoder.output_size).to(self.mld_device)
-                motion_emb_dim = 512
-                motion_emb = torch.zeros(bs * 2, 1, motion_emb_dim).to(self.mld_device)
-                text_style_cond = style_text_feature
-            
-            # 模式二: 动作引导
-            elif "style_motion" in batch:
-                style_motion = batch["style_motion"].clone()
-                style_motion[..., :3] = 0
-                
-                # [新代码 - 关键] 动作风格也需要归一化！
-                # style_motion = (style_motion - self.mean.to(style_motion.device)) / self.std.to(style_motion.device)
-                
-                style_lengths = [style_motion.shape[1]] * bs
-                motion_seq = style_motion.unsqueeze(-1).permute(0, 2, 3, 1)
-
-                motion_emb_features = self.motionclip.encoder({
-                    'x': motion_seq.float(),
-                    'y': torch.zeros(bs, dtype=int, device=motion_seq.device),
-                    'mask': lengths_to_mask(style_lengths, device=motion_seq.device)
-                })["mu"]
-
-                # [修改] 正确构建 CFG 条件: [uncond, cond]
-                uncond_motion_emb = torch.zeros_like(motion_emb_features)
-                motion_emb = torch.cat([uncond_motion_emb, motion_emb_features], dim=0).unsqueeze(1)
-
-                # [修改] 创建一个全零的 text_style_cond 占位符
-                text_style_cond = torch.zeros(bs * 2, 1, 512, device=self.mld_device)
-            
-            else:
-                raise ValueError("Inference batch must contain either 'style_text' or 'style_motion'")
-
-            # three conditions
-            multi_cond_emb = [motion_emb_content, motion_emb, uncond_trans]
-
-
-            z = self._diffusion_reverse(multi_cond_emb, lengths, scale, style_text_feature=text_style_cond)
-
-        elif self.stage in ['vae']:
-            motions = batch['motion']
-            z, dist_m = self.vae.encode(motions, lengths)
+        scale = batch.get("tag_scale", self.guidance_scale)
 
         with torch.no_grad():
-            feats_rst = self.vae.decode(z, lengths)
-            # feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
-            if trans_motion is not None:
-                feats_rst[..., :3] = trans_motion[..., :3]
+            z_content, _ = self.vae.encode(content_motion_normalized.float(), content_lengths)
+            cond_emb = torch.cat([z_content, z_content], dim=1).permute(1, 0, 2)
 
-        # [新代码 - 关键] 反归一化，得到正确尺度的动作数据
-        # feats_rst = feats_rst * self.std.to(feats_rst.device) + self.mean.to(feats_rst.device)
-        # 这里其实是要反归一化的，feats2joints里面有做，理论上违反了单一职责的原则，但为了不破坏原有代码结构，只能这样做了
+        trans_cond = trans_motion_unnormalized[..., :3]
+        uncond_trans = torch.cat([trans_cond, trans_cond], dim=0)
+
+        # --- 2. [核心修改] 构建与训练时完全一致的风格条件 ---
+        is_text_mode = "style_text" in batch and batch["style_text"] is not None
+        is_motion_mode = "style_motion" in batch
+
+        if not is_text_mode and not is_motion_mode:
+            raise ValueError("Inference batch must contain either 'style_text' or 'style_motion'")
+
+        motion_style_cond = torch.zeros(bs * 2, 1, 512, device=self.mld_device, dtype=torch.float)
+        text_style_cond = torch.zeros(bs * 2, 1, 512, device=self.mld_device, dtype=torch.float)
+
+        if is_text_mode:
+            texts = batch["style_text"]
+            with torch.no_grad():
+                text_tokens = clip.tokenize(texts).to(self.mld_device)
+                with torch.cuda.amp.autocast(enabled=False):
+                    text_features = self.clip_model.encode_text(text_tokens).float()
+            
+            uncond_text_features = torch.zeros_like(text_features)
+            text_style_cond = torch.cat([uncond_text_features, text_features], dim=0).unsqueeze(1)
+
+        elif is_motion_mode:
+            style_motion = batch["style_motion"]
+            
+            # --- [最终修复] ---
+            # 1. 为 style_motion 单独计算其长度
+            style_lengths = [style_motion.shape[1]] * style_motion.shape[0]
+
+            # 2. MotionClip 期望接收未经归一化的数据
+            style_motion_raw = style_motion.clone()
+            style_motion_raw[..., :3] = 0.0
+            
+            motion_seq = style_motion_raw.unsqueeze(-1).permute(0, 2, 3, 1)
+
+            with torch.no_grad():
+                    motion_emb_features = self.motionclip.encoder({
+                    'x': motion_seq.float(),
+                    'y': torch.zeros(bs, dtype=int, device=self.mld_device),
+                    # 3. 使用正确的 style_lengths 来生成掩码！
+                    'mask': lengths_to_mask(style_lengths, device=self.mld_device)
+                })["mu"]
+            # --- 修复结束 ---
+
+            uncond_motion_emb = torch.zeros_like(motion_emb_features)
+            motion_style_cond = torch.cat([uncond_motion_emb, motion_emb_features], dim=0).unsqueeze(1)
+
+        # --- 3. [核心修改] 打包所有条件并调用扩散逆过程 ---
+        multi_cond_emb = [cond_emb, motion_style_cond, uncond_trans]
+
+        z = self._diffusion_reverse(
+            encoder_hidden_states=multi_cond_emb, 
+            lengths=content_lengths, # 逆过程的长度以 content 为准
+            scale=scale, 
+            style_text_feature=text_style_cond
+        )
+
+        # --- 4. VAE 解码并返回结果 ---
+        with torch.no_grad():
+            feats_rst = self.vae.decode(z, content_lengths) # 解码的长度也以 content 为准
+            if trans_motion_unnormalized is not None:
+                feats_rst[..., :3] = trans_motion_unnormalized[..., :3]
+
         joints = self.feats2joints(feats_rst.detach().cpu())
 
-        return remove_padding(joints, lengths)
-    
+        return remove_padding(joints, content_lengths)
 
 
     def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None, style_text_feature=None):
@@ -531,79 +520,144 @@ class MLD(BaseModel):
         return rs_set
 # train
     def train_diffusion_forward(self, batch):
-        feats_ref = batch["motion"]  # shape:torch.Size([32, 28, 263]): 应该是[batchsize, motion_len, nfeats]
-        feats_content = batch["motion"].clone()  # shape:torch.Size([32, 28, 263]):
-        feats_content[...,:3] = 0.0  # shape:torch.Size([32, 28, 263]):
-        lengths = batch["length"]  # len(): 32
+        # print("\n" + "="*20 + " NEW BATCH DIAGNOSIS " + "="*20)
+        feats_ref = batch["motion"]  # shape:torch.Size([batch_size, motion_len, 263]): 应该是[batchsize, motion_len, nfeats]
+        feats_content = batch["motion"].clone()  # shape:torch.Size([batch_size, motion_len, 263]):
+        feats_content[...,:3] = 0.0  # shape:torch.Size([batch_size, motion_len, 263]):
+        lengths = batch["length"]  # len(): batch_size
+        bs = feats_ref.shape[0]
+
+        # 1. 从 batch 中解包出我们的关键标志
+        is_text_guided = batch['is_text_guided']  # torch.Size([batch_size])，前面全是false，后面全是true，毕竟是直接拼接的
+        # print(f"Batch Size: {bs}, Text-Guided Samples: {is_text_guided.sum().item()}")
+
+        # 检查输入数据本身是否有 nan
+        # if torch.isnan(feats_ref).any():
+        #     print("!!!!!! FATAL: NaN detected in the initial 'batch[\"motion\"]' itself! Problem is in the dataset/dataloader.")
+        #     raise RuntimeError("NaN in initial batch data.")
+        # print("Step 0: Initial batch data is clean (no NaN).")
         
+        # print("\n--- Step 1: VAE Encoding for Content Condition ---")
         # content condition
         with torch.no_grad():
-            z, dist = self.vae.encode(feats_ref, lengths)  # z: torch.Size([7, 32, 256]), dist(batch_shape): torch.Size([7, 32, 256])
-            z_content, dist = self.vae.encode(feats_content, lengths) # z_content: torch.Size([7, 32, 256]), dist:batch_shape:torch.Size([7, 32, 256])
-        cond_emb = z_content.permute(1,0,2)  # torch.Size([32, 7, 256])    
-
+            z, dist = self.vae.encode(feats_ref, lengths)  # z: torch.Size([7, batch_size, 256]), dist(batch_shape): torch.Size([7, batch_size, 256])
+            z_content, dist = self.vae.encode(feats_content, lengths) # z_content: torch.Size([7, batch_size, 256]), dist:batch_shape:torch.Size([7, batch_size, 256])
+        
+        # if torch.isnan(z_content).any():
+        #     print("!!!!!! FATAL: NaN detected in 'z_content' immediately after VAE encoding!")
+        #     # 找出是哪个样本出了问题
+        #     nan_indices = torch.any(torch.isnan(z_content), dim=(0, 2)).nonzero(as_tuple=True)[0]
+        #     print(f"Indices in batch with NaN content: {nan_indices.tolist()}")
+        #     for idx in nan_indices:
+        #         print(f" -> Sample at index {idx.item()} is from {'100Style' if is_text_guided[idx] else 'HumanML3D'}")
+        #     raise RuntimeError("NaN from VAE encoder.")
+        # print("Step 1: VAE content encoding is clean.")
+        
+        cond_emb = z_content.permute(1,0,2)  # torch.Size([batch_size, 7, 256])    
+        
         # trans condition
-        trans_cond = batch["motion"][...,:3]  # torch.Size([32, 28, 3]) 这里面的3推测应该是全局的xyz属性，表示轨迹       
+        trans_cond = batch["motion"][...,:3]  # torch.Size([batch_size, motion_len, 3]) 这里面的3推测应该是全局的xyz属性，表示轨迹       
         
         # --- [核心修复] 实现基于 is_text_guided 的精确条件开关 ---
 
-        # 1. 从 batch 中解包出我们的关键标志
-        is_text_guided = batch['is_text_guided']  # (bs,) e.g. [F, F, T, T, F, ...]
-
         # 2. 初始化两个风格条件张量，全部为零
         # 动作风格 (fs) 的 embedding 维度是 512
-        motion_style_cond = torch.zeros(feats_ref.shape[0], 1, 512, device=self.mld_device, dtype=torch.float)
+        motion_style_cond = torch.zeros(feats_ref.shape[0], 1, 512, device=self.mld_device, dtype=torch.float) # torch.Size([batch_size, 1, 512])
         # 文本风格 (text_style) 的 embedding 维度也是 512 (来自 CLIP ViT-B/32)
-        text_style_cond = torch.zeros(feats_ref.shape[0], 1, 512, device=self.mld_device, dtype=torch.float)
+        text_style_cond = torch.zeros(feats_ref.shape[0], 1, 512, device=self.mld_device, dtype=torch.float)  # torch.Size([batch_size, 1, 512])
 
         # 3. 根据标志，为每个样本填充正确的风格条件
-
+        # 初始化用于 align_loss 的张量
+        text_emb_for_align = None
+        motion_emb_for_align = None
         # 找到所有需要“动作引导”的样本的索引
-        motion_indices = ~is_text_guided
+        motion_indices = ~is_text_guided # torch.Size([batch_size]),前一半都是True，后一半都是False
         if motion_indices.any():
             # a. 只为这些样本提取动作风格
-            motion_seq = feats_ref[motion_indices] * self.std + self.mean
+            motion_seq = feats_ref[motion_indices] * self.std + self.mean  # torch.Size([batch_size / 2, motion_len, 263])
             motion_seq[..., :3] = 0.0
-            motion_seq = motion_seq.unsqueeze(-1).permute(0, 2, 3, 1)
+            motion_seq = motion_seq.unsqueeze(-1).permute(0, 2, 3, 1) # torch.Size([batch_size / 2, 263, 1, motion_len])
             
-            lengths_motion = [lengths[i] for i, flag in enumerate(motion_indices) if flag]
+            lengths_motion = [lengths[i] for i, flag in enumerate(motion_indices) if flag]  # len(): batch_size / 2
 
             motion_emb = self.motionclip.encoder({
                 'x': motion_seq,
                 'y': torch.zeros(motion_seq.shape[0], dtype=int, device=self.mld_device),
                 'mask': lengths_to_mask(lengths_motion, device=self.mld_device)
-            })["mu"].unsqueeze(1) # (N_motion, 1, 512)
+            })["mu"].unsqueeze(1) # torch.Size([batch_size / 2, 1, 512])
             
+            # if torch.isnan(motion_emb).any():
+            #     print("!!!!!! FATAL: NaN detected from MotionClip encoder!， motion features！")
+            #     raise RuntimeError("NaN from MotionClip.")
+            # print("Step 2a: MotionClip encoding is clean.")
+
             # b. 应用 CFG dropout
-            mask_uncond = torch.rand(motion_emb.shape[0], device=self.mld_device) < self.guidance_uncodp
+            mask_uncond = torch.rand(motion_emb.shape[0], device=self.mld_device) < self.guidance_uncodp  # torch.Size([batch_size/2])
             motion_emb[mask_uncond, ...] = 0
             
             # c. 将计算出的 embedding 填充回主张量的对应位置
-            motion_style_cond[motion_indices] = motion_emb
+            motion_style_cond[motion_indices] = motion_emb  # torch.Size([batch_size, 1, 512])，每个样本前一半有值，后一半为0，这对吗？？？会不会对原来的MCM-LDM造成比较大的干扰？这个逻辑模型能学到东西吗？
 
         # 找到所有需要“文本引导”的样本的索引
-        text_indices = is_text_guided
+        text_indices = is_text_guided  # 前一半都是False，后一半都是True
         if text_indices.any():
             # a. 只为这些样本提取文本
             texts = [batch['text'][i] for i, flag in enumerate(text_indices) if flag]
             
-            # b. 编码文本
-            with torch.no_grad():
-                text_tokens = clip.tokenize(texts).to(self.mld_device)
-                text_features = self.clip_model.encode_text(text_tokens).float().unsqueeze(1) # (N_text, 1, 512)
+            # b. 编码文本，得到干净的 embedding
+            text_tokens = clip.tokenize(texts).to(self.mld_device)
+            with torch.cuda.amp.autocast(enabled=False):
+                text_features = self.clip_model.encode_text(text_tokens).float().unsqueeze(1)
 
-            # c. 应用 CFG dropout
+            # c. 在应用 dropout 之前，先用干净的 embedding 准备 align_loss 的数据
+            text_emb_for_align = text_features.squeeze(1).clone()
+            
+            # d. 现在，对 text_features 应用 dropout，用于 denoiser 条件
             mask_uncond = torch.rand(text_features.shape[0], device=self.mld_device) < self.guidance_uncodp
             text_features[mask_uncond, ...] = 0
 
-            # d. 将计算出的 embedding 填充回主张量的对应位置
+            # e. 将最终的、可能经过 dropout 的 embedding 填充到 text_style_cond 中
             text_style_cond[text_indices] = text_features
+
+            # f. GT (Ground Truth) embedding 的提取逻辑
+            with torch.no_grad():
+                motion_seq_for_text = feats_ref[text_indices] * self.std + self.mean
+                motion_seq_for_text[..., :3] = 0.0
+                motion_seq_for_text = motion_seq_for_text.unsqueeze(-1).permute(0, 2, 3, 1)
+                lengths_text = [lengths[i] for i, flag in enumerate(text_indices) if flag]
+                
+                self.motionclip.eval()
+                # 将提取出的 GT embedding 赋值给一个临时变量
+                gt_motion_emb_for_text = self.motionclip.encoder({
+                    'x': motion_seq_for_text,
+                    'y': torch.zeros(motion_seq_for_text.shape[0], dtype=int, device=self.mld_device),
+                    'mask': lengths_to_mask(lengths_text, device=self.mld_device)
+                })["mu"]
+                self.motionclip.train()
             
+            # 将用于对齐的两个 embedding 保存下来
+            text_emb_for_align = text_features.squeeze(1) # (batch_size / 2, 512)
+            motion_emb_for_align = gt_motion_emb_for_text # (batch_size / 2, 512)
+            
+        # print("\n--- Step 3: Final Check before _diffusion_process ---")
+
         # 4. [核心] 打包所有条件
         multi_cond_emb = [cond_emb, motion_style_cond, trans_cond]
+        # 我们把你之前的检查站放在这里
+        # if torch.isnan(z).any(): raise RuntimeError("FATAL: NaN in 'z'")
+        # if torch.isnan(cond_emb).any(): raise RuntimeError("FATAL: NaN in 'cond_emb'")
+        # if torch.isnan(motion_style_cond).any(): raise RuntimeError("FATAL: NaN in 'motion_style_cond'")
+        # if torch.isnan(trans_cond).any(): raise RuntimeError("FATAL: NaN in 'trans_cond'")
+        # if torch.isnan(text_style_cond).any(): raise RuntimeError("FATAL: NaN in 'text_style_cond'")
+        # print("Step 3: All inputs to Denoiser are clean.")
+        # print("="*50 + "\n")
+        
         # 注意：我们将 text_style_cond 作为一个独立的参数传入，这与你之前的设计保持一致
-        n_set = self._diffusion_process(z, multi_cond_emb, lengths, style_text_feature=text_style_cond)
-
+        n_set = self._diffusion_process(z, multi_cond_emb, lengths, style_text_feature=text_style_cond) # 回顾：style_text_feature的shape是torch.Size([batch_size, 1, 512])
+        # [核心修改] 将用于 align_loss 的张量加入返回字典
+        if text_emb_for_align is not None:
+            n_set['text_style_emb'] = text_emb_for_align
+            n_set['motion_style_emb_for_text'] = motion_emb_for_align
         return {**n_set}
 
 
@@ -788,45 +842,7 @@ class MLD(BaseModel):
         loss_val = None
         if split in ["train", "val"]:
             if self.stage == "diffusion":
-                rs_set = None 
-                
-                if split == "train":
-                    # [训练逻辑] - 调用我们修复好的、健壮的双模态函数
-                    rs_set = self.train_diffusion_forward(batch)
-                
-                elif split == "val":
-                    # [验证逻辑] - [最终修复]
-                    # 为了 100% 保证验证流程的维度正确性，我们在这里
-                    # 只调用原始的、单模态的训练逻辑。
-                    feats_ref = batch["motion"]
-                    feats_content = batch["motion"].clone()
-                    feats_content[...,:3] = 0.0
-                    lengths = batch["length"]
-                    
-                    with torch.no_grad():
-                        z, _ = self.vae.encode(feats_ref, lengths)
-                        z_content, _ = self.vae.encode(feats_content, lengths)
-                        # VAE 输出 (T, bs, D), Denoiser 需要 (bs, T, D) 作为 list 元素
-                        cond_emb = z_content.permute(1,0,2)
-
-                    motion_seq = feats_ref*self.std + self.mean
-                    motion_seq[...,:3]=0.0
-                    motion_seq = motion_seq.unsqueeze(-1).permute(0,2,3,1)
-                    
-                    motion_emb = self.motionclip.encoder({'x': motion_seq,
-                                    'y': torch.zeros(motion_seq.shape[0], dtype=int, device=self.mld_device),
-                                    'mask': lengths_to_mask(lengths, device=self.mld_device)})["mu"].unsqueeze(1)
-                    
-                    # 在验证时，我们不应用 CFG dropout
-                    # mask_uncond = torch.rand(motion_emb.shape[0]) < self.guidance_uncodp
-                    # motion_emb[mask_uncond, ...] = 0
-
-                    trans_cond = batch["motion"][...,:3]
-                    
-                    multi_cond_emb = [cond_emb, motion_emb, trans_cond]
-
-                    # 在验证时，我们不传递任何文本特征
-                    rs_set = self._diffusion_process(z, multi_cond_emb, lengths, style_text_feature=None)
+                rs_set = self.train_diffusion_forward(batch)
 
             # ... (后续的 vae 和 loss 计算逻辑保持不变)
             elif self.stage == "vae":
@@ -837,94 +853,120 @@ class MLD(BaseModel):
 
             # --- [最终日志修复] ---
             # 计算损失，并用 loss_val 变量接收
-            loss_val = self.losses[split].update(rs_set)
-            if loss_val is None:
-                raise ValueError("Loss is None from torchmetrics.")
+            total_loss, loss_dict = self.losses[split].update(rs_set)
+            if loss_dict is None:
+                if self.trainer.sanity_checking and total_loss is None:
+                    return None
+                raise ValueError("Loss dictionary is None from torchmetrics.")
 
-            # [核心修复] 智能地记录日志，无论返回值是字典还是张量
-            if isinstance(loss_val, dict):
-                # 如果是字典 (通常在 train 时)，遍历并记录所有键
-                for key, value in loss_val.items():
-                    self.log(f"{split}/{key}", value, prog_bar=(key == 'total'), on_step=(split == 'train'), on_epoch=True)
-            elif isinstance(loss_val, torch.Tensor):
-                # 如果是单个张量 (通常在 val 时)，只记录总损失
-                self.log(f"{split}/loss", loss_val, prog_bar=True, on_step=(split == 'train'), on_epoch=True)
-            # --- 修复结束 ---
+            # 记录日志，这个逻辑也保持你现有的不变
+            for key, value in loss_dict.items():
+                self.log(f"{split}/{key}_loss", value, prog_bar=(key == 'total'), on_step=(split == 'train'), on_epoch=True, batch_size=self.cfg.TRAIN.BATCH_SIZE)
 
-        # Compute the metrics - currently evaluate results from text to motion
-        if split in ["val", "test"]:
-            # use t2m evaluators
-            rs_set = self.t2m_eval(batch)
+        # # Compute the metrics - currently evaluate results from text to motion
+        # if split in ["val", "test"]:
+        #     # 1. 从混合批次中，筛选出只属于 HumanML3D 的那部分数据
+        #     #    因为 t2m_eval 函数是专门为 HumanML3D 的数据格式设计的。
+            
+        #     # a. 找到 HumanML3D 样本的布尔掩码
+        #     is_humanml3d_mask = [s == "humanml3d" for s in batch["source"]]
+            
+        #     # b. 如果当前批次中没有任何 HumanML3D 样本，则无法进行 t2m 评估，直接跳过
+        #     if not any(is_humanml3d_mask):
+        #         print(f"\n[INFO] Skipping metrics calculation for a '{split}' batch containing only Style100 samples.\n")
+        #         # 对于 test 阶段，需要返回一个符合预期的空结果
+        #         if split == "test": return [], []
+        #         # 对于 val 阶段，直接返回之前计算好的损失值即可
+        #         return total_loss
 
-            # MultiModality evaluation sperately
-            if self.trainer.datamodule.is_mm:
-                metrics_dicts = ['MMMetrics']
-            else:
-                metrics_dicts = self.metrics_dict
-            # metric = 'TemosMetric' 'TM2TMetrics'
-            for metric in metrics_dicts:
-                if metric == "TemosMetric":
-                    phase = split if split != "val" else "eval"
-                    if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
-                    ) not in [
-                            "humanml3d",
-                            "kit",
-                    ]:
-                        raise TypeError(
-                            "APE and AVE metrics only support humanml3d and kit datasets now"
-                        )
+        #     # c. 创建一个新的 "纯净" 的批次字典，只包含 HumanML3D 的数据
+        #     humanml3d_batch = {}
+        #     for key, value in batch.items():
+        #         if isinstance(value, torch.Tensor):
+        #             # 使用布尔掩码索引 Tensor
+        #             humanml3d_batch[key] = value[torch.tensor(is_humanml3d_mask, device=value.device)]
+        #         elif isinstance(value, list):
+        #             humanml3d_batch[key] = [v for v, flag in zip(value, is_humanml3d_mask) if flag]
+        #         else:
+        #             humanml3d_batch[key] = value
+                    
+        #     # 2. 将这个“纯净”的 HumanML3D 批次送入评估函数
+        #     #    如果筛选后批次为空，也需要跳过
+        #     if len(humanml3d_batch['motion']) == 0:
+        #         if split == "test": return [], []
+        #         return total_loss
 
-                    getattr(self, metric).update(rs_set["joints_rst"],
-                                                 rs_set["joints_ref"],
-                                                 batch["length"])
-                elif metric == "TM2TMetrics":
-                    getattr(self, metric).update(
-                        # lat_t, latent encoded from diffusion-based text
-                        # lat_rm, latent encoded from reconstructed motion
-                        # lat_m, latent encoded from gt motion
-                        # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
-                        rs_set["lat_t"],
-                        rs_set["lat_rm"],
-                        rs_set["lat_m"],
-                        batch["length"],
-                    )
-                elif metric == "UncondMetrics":
-                    getattr(self, metric).update(
-                        recmotion_embeddings=rs_set["lat_rm"],
-                        gtmotion_embeddings=rs_set["lat_m"],
-                        lengths=batch["length"],
-                    )
-                elif metric == "MRMetrics":
-                    getattr(self, metric).update(rs_set["joints_rst"],
-                                                 rs_set["joints_ref"],
-                                                 batch["length"])
-                elif metric == "MMMetrics":
-                    getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
-                                                 batch["length"])
-                elif metric == "HUMANACTMetrics":
-                    getattr(self, metric).update(rs_set["m_action"],
-                                                 rs_set["joints_eval_rst"],
-                                                 rs_set["joints_eval_ref"],
-                                                 rs_set["m_lens"])
-                elif metric == "UESTCMetrics":
-                    # the stgcn model expects rotations only
-                    getattr(self, metric).update(
-                        rs_set["m_action"],
-                        rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
-                                             25).permute(0, 3, 2, 1)[:, :-1],
-                        rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
-                                             25).permute(0, 3, 2, 1)[:, :-1],
-                        rs_set["m_lens"])
-                else:
-                    raise TypeError(f"Not support this metric {metric}")
+            # rs_set = self.t2m_eval(humanml3d_batch)
+
+            # # MultiModality evaluation sperately
+            # if self.trainer.datamodule.is_mm:
+            #     metrics_dicts = ['MMMetrics']
+            # else:
+            #     metrics_dicts = self.metrics_dict
+            # # metric = 'TemosMetric' 'TM2TMetrics'
+            # for metric in metrics_dicts:
+            #     if metric == "TemosMetric":
+            #         phase = split if split != "val" else "eval"
+            #         if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
+            #         ) not in [
+            #                 "humanml3d",
+            #                 "kit",
+            #         ]:
+            #             raise TypeError(
+            #                 "APE and AVE metrics only support humanml3d and kit datasets now"
+            #             )
+
+            #         getattr(self, metric).update(rs_set["joints_rst"],
+            #                                      rs_set["joints_ref"],
+            #                                      batch["length"])
+            #     elif metric == "TM2TMetrics":
+            #         getattr(self, metric).update(
+            #             # lat_t, latent encoded from diffusion-based text
+            #             # lat_rm, latent encoded from reconstructed motion
+            #             # lat_m, latent encoded from gt motion
+            #             # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
+            #             rs_set["lat_t"],
+            #             rs_set["lat_rm"],
+            #             rs_set["lat_m"],
+            #             batch["length"],
+            #         )
+            #     elif metric == "UncondMetrics":
+            #         getattr(self, metric).update(
+            #             recmotion_embeddings=rs_set["lat_rm"],
+            #             gtmotion_embeddings=rs_set["lat_m"],
+            #             lengths=batch["length"],
+            #         )
+            #     elif metric == "MRMetrics":
+            #         getattr(self, metric).update(rs_set["joints_rst"],
+            #                                      rs_set["joints_ref"],
+            #                                      batch["length"])
+            #     elif metric == "MMMetrics":
+            #         getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
+            #                                      batch["length"])
+            #     elif metric == "HUMANACTMetrics":
+            #         getattr(self, metric).update(rs_set["m_action"],
+            #                                      rs_set["joints_eval_rst"],
+            #                                      rs_set["joints_eval_ref"],
+            #                                      rs_set["m_lens"])
+            #     elif metric == "UESTCMetrics":
+            #         # the stgcn model expects rotations only
+            #         getattr(self, metric).update(
+            #             rs_set["m_action"],
+            #             rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
+            #                                  25).permute(0, 3, 2, 1)[:, :-1],
+            #             rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
+            #                                  25).permute(0, 3, 2, 1)[:, :-1],
+            #             rs_set["m_lens"])
+            #     else:
+            #         raise TypeError(f"Not support this metric {metric}")
 
         # return forward output rather than loss during test
         if split in ["test"]:
             return rs_set["joints_rst"], batch["length"]
         # return loss
         # 返回总损失给优化器
-        if isinstance(loss_val, dict):
-            return loss_val['total']
+        # if isinstance(loss_val, dict):
+        #     return loss_val['total']
         
         # 如果 loss_val 是张量，直接返回它
-        return loss_val
+        return total_loss

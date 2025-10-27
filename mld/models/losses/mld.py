@@ -27,8 +27,9 @@ class MLDLosses(Metric):
         if self.stage in ['diffusion', 'vae_diffusion']:
             # instance noise loss
             losses.append("inst_loss")
-            losses.append("x_loss")
-            losses.append("style_loss")
+            losses.append("align_loss")
+            # losses.append("x_loss")
+            # losses.append("style_loss")
             if self.cfg.LOSS.LAMBDA_PRIOR != 0.0:
                 # prior noise loss
                 losses.append("prior_loss")
@@ -64,7 +65,15 @@ class MLDLosses(Metric):
         for loss in losses:
             if loss.split('_')[0] == 'inst':
                 self._losses_func[loss] = nn.MSELoss(reduction='mean')
-                self._params[loss] = 1
+                self._params[loss] = 1.0
+            # [核心修改] 添加 align_loss 的定义
+            elif loss.split('_')[0] == 'align':
+                # 核心思路：我们使用余弦嵌入损失 (CosineEmbeddingLoss)。
+                # 目标是让 text_style_emb 和 motion_style_emb 之间的余弦相似度尽可能接近 1。
+                # 因此，损失函数的目标 target 就是一个全为 1 的向量。
+                self._losses_func[loss] = nn.CosineEmbeddingLoss(reduction='mean')
+                # 从配置文件中读取 align_loss 的权重 lambda，如果未定义则默认为 1.0
+                self._params[loss] = self.cfg.LOSS.get('LAMBDA_ALIGN', 1.0)
             elif loss.split('_')[0] == 'x':
                 self._losses_func[loss] = nn.MSELoss(reduction='mean')
                 self._params[loss] = 1
@@ -109,48 +118,20 @@ class MLDLosses(Metric):
             total += self._update_loss("kl_motion", rs_set['dist_m'], rs_set['dist_ref'])
 
         if self.stage in ["diffusion", "vae_diffusion"]:
-            # predict noise
-            # --- [核心修复] 在这里实现损失加权 ---
-        
-            # 1. 检查 rs_set 中是否存在我们传递的掩码
-            if "is_text_guided_mask" in rs_set:
-                mask = rs_set["is_text_guided_mask"]
+            total += self._update_loss("inst_loss", rs_set['noise_pred'], rs_set['noise'])
+
+            # 2. [核心修改] 计算 align_loss (对齐损失)
+            # 核心思路：只有在 rs_set 中包含了我们从 mld.py 传递过来的、用于对齐的两个 embedding 时，才计算此损失。
+            # 这确保了只有在处理 100Style 的文本引导数据时，才会激活对齐损失。
+            if 'text_style_emb' in rs_set and 'motion_style_emb_for_text' in rs_set:
+                # a. 准备 CosineEmbeddingLoss 的目标向量 (全为 1)
+                target = torch.ones(rs_set['text_style_emb'].shape[0], device=self.device)
                 
-                # 只有当 batch 中确实存在两种类型的样本时，才进行加权
-                if mask.any() and (~mask).any():
-                    # a. 提取需要的数据
-                    noise_pred = rs_set['noise_pred']
-                    noise = rs_set['noise']
-                    
-                    # b. 分别计算两种任务的 MSE Loss (不加权)
-                    loss_text_guided = self._losses_func["inst_loss"](noise_pred[mask], noise[mask])
-                    loss_motion_guided = self._losses_func["inst_loss"](noise_pred[~mask], noise[~mask])
-
-                    # c. 从配置中获取权重 lambda
-                    lambda_text_style = self.cfg.LOSS.get('LAMBDA_TEXT_STYLE', 1.0)
-                    
-                    # d. [关键] 计算加权后的总 diffusion loss
-                    # 我们只对 text-guided 部分的损失应用额外的权重
-                    # _params["inst_loss"] 通常是 1.0
-                    diffusion_loss = self._params["inst_loss"] * (loss_motion_guided + lambda_text_style * loss_text_guided)
-                    
-                    # e. 将计算好的损失累加到 total，并手动更新 inst_loss 的状态用于日志记录
-                    total += diffusion_loss
-                    self.inst_loss += diffusion_loss.detach()
-                    
-                else:
-                    diffusion_loss = self._losses_func["inst_loss"](rs_set['noise_pred'], rs_set['noise'])
-                    # 如果 batch 中只有一种数据，则走原始的、不加权的逻辑
-                    total += self._update_loss("inst_loss", rs_set['noise_pred'], rs_set['noise'])
-
-            else:
-                # [核心修复] 在这个分支中也计算并赋值 diffusion_loss
-                diffusion_loss = self._losses_func["inst_loss"](rs_set['noise_pred'], rs_set['noise'])
-                # 如果没有掩码 (例如在验证时)，则走原始的、不加权的逻辑
-                total += self._update_loss("inst_loss", rs_set['noise_pred'], rs_set['noise'])
-            # total += self._update_loss("inst_loss", rs_set['noise_pred'],
-            #                                rs_set['noise'])
-
+                # b. 调用辅助函数计算加权后的 align_loss，并累加到 total
+                total += self._update_loss_cosine("align_loss", 
+                                                rs_set['text_style_emb'], 
+                                                rs_set['motion_style_emb_for_text'], 
+                                                target)
             # style loss
             # total += self._update_loss("style_loss", rs_set['gen_motion_feature'],
             #                                rs_set['gt_motion_feature'])
@@ -171,10 +152,24 @@ class MLDLosses(Metric):
         self.count += 1
 
         # [修改] 返回一个包含 'total' 键的字典，以确保与 allsplit_step 的日志记录代码兼容
-        return {"total": total, "diffusion": diffusion_loss.detach()}
+        # [核心修改] 返回一个包含所有已计算损失项的字典
+        log_dict = {"total": self.total / self.count}
+        
+        # 将其他你关心的损失也加入字典
+        if 'inst_loss' in self.losses and self.inst_loss.item() != 0:
+            log_dict['inst'] = self.inst_loss.detach() / self.count # 计算平均值
+        if 'align_loss' in self.losses and self.align_loss.item() != 0:
+            log_dict['align'] = self.align_loss.detach() / self.count
+
+        # update 函数本身返回用于反向传播的总损失张量
+        return total, log_dict
 
     def compute(self, split):
         count = getattr(self, "count")
+        # 避免除以零的错误
+        if count == 0:
+            print("出现了除以0的错误，请检查代码有什么问题，或者训练有什么安全隐患")
+            return {loss: torch.tensor(0.0) for loss in self.losses}
         return {loss: getattr(self, loss) / count for loss in self.losses}
 
     def _update_loss(self, loss: str, outputs, inputs):
@@ -186,6 +181,20 @@ class MLDLosses(Metric):
             val = self._losses_func[loss](outputs, inputs)
         getattr(self, loss).__iadd__(val.detach())
         # Return a weighted sum
+        weighted_loss = self._params[loss] * val
+        return weighted_loss
+    
+    def _update_loss_cosine(self, loss: str, output1, output2, target):
+        # 核心思路：这个函数专门处理需要三个输入的损失，如 CosineEmbeddingLoss。
+        # 它的逻辑与 _update_loss 完全相同，只是调用损失函数时传递的参数不同。
+        
+        # 1. 计算损失值
+        val = self._losses_func[loss](output1, output2, target)
+        
+        # 2. 更新累积状态 (用于日志记录)
+        getattr(self, loss).__iadd__(val.detach())
+        
+        # 3. 返回加权后的损失值，用于累加到 total_loss
         weighted_loss = self._params[loss] * val
         return weighted_loss
 

@@ -1,5 +1,3 @@
-# mld/data/mixed_datamodule.py (The Final, Clean Version)
-
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
@@ -9,75 +7,62 @@ import os
 import torch
 from omegaconf import OmegaConf
 
-# 导入所有需要的组件
 from .humanml.data.dataset import Text2MotionDatasetV2
 from .style100_dataset import Style100Dataset
 from .mixed_utils import MixedBatchSampler, mixed_collate_fn, mld_collate_dict
 from .utils import mld_collate
 from .humanml.scripts.motion_process import recover_from_ric, extract_features
 
-# 配置日志
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO) 
 
 class MixedDataModule(pl.LightningDataModule):
     def __init__(self, cfg, **kwargs):
         super().__init__()
-        # 1. 保存所有必要配置
         self.cfg = cfg
         self.batch_size = cfg.TRAIN.BATCH_SIZE
         self.val_batch_size = cfg.EVAL.BATCH_SIZE 
         self.num_workers = cfg.TRAIN.NUM_WORKERS
 
-        # --- [DIAGNOSTIC] ---
-        # 1. 在初始化时，明确将所有核心属性设为 None
-        print(f"\n[DIAGNOSTIC TRACE] 1. Initializing MixedDataModule instance with id: {id(self)}")
-        # 2. 初始化所有属性为 None，这是最佳实践
+        # print(f"\n[DIAGNOSTIC TRACE] 1. Initializing MixedDataModule instance with id: {id(self)}")
         self.w_vectorizer = None
         self.train_dataset = None
         self.val_dataset = None
         self.nfeats = None # 将在 setup 中被正确赋值
         self.njoints = 22
 
-        # [NEW] 添加 is_mm 属性以兼容评估代码
         self.is_mm = False
         
-        # 3. 创建一个普通的字典来存储归一化参数
+        # 3. 创建一个普通的字典来存储归一化等参数
         self.norms = {}
 
         logger.info("MixedDataModule initialized.")
 
-    def prepare_data(self):
-        # 这个钩子用于在主进程中进行一次性操作（如下载数据）
-        # 我们暂时不需要，但保留它是好的实践
+    def prepare_data(self): # 保留的用于数据下载等操作的hook
         pass
 
     def setup(self, stage=None):
         # 这个方法会在每个 GPU 进程中被调用，用于创建数据集
-        # --- [DIAGNOSTIC] ---
-        # 2. 每次 setup 被调用时，都打印出是哪个实例、为了什么 stage
         print(f"\n[DIAGNOSTIC TRACE] 2. Entering 'setup' method for instance {id(self)} with stage: '{stage}'")
-        # --------------------
         
-        # 4. 防止重复执行
+        # 防止重复执行
         if self.train_dataset is not None and self.val_dataset is not None:
             print(f"[DIAGNOSTIC TRACE] 2a. Datasets already exist. Skipping setup.")
             return
 
-        # 5. 懒加载 WordVectorizer
+        # 懒加载 WordVectorizer
         logger.info(f"Loading WordVectorizer from: {self.cfg.DATASET.WORD_VERTILIZER_PATH}")
         from .humanml.utils.word_vectorizer import WordVectorizer
         if not os.path.exists(self.cfg.DATASET.WORD_VERTILIZER_PATH):
             raise FileNotFoundError(f"Word vectorizer path not found: {self.cfg.DATASET.WORD_VERTILIZER_PATH}")
         self.w_vectorizer = WordVectorizer(self.cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
 
-        # 6. 加载通用的归一化参数
-        print(f"[DIAGNOSTIC TRACE] 2b. Instantiating 'val_dataset'...")
+        # 6. 加载通用的归一化参数，目前都使用HumanML3D的mean和std做归一化
         humanml3d_cfg = self.cfg.DATASET.HUMANML3D
         self.norms['mean'] = np.load(pjoin(humanml3d_cfg.ROOT, "Mean.npy"))
         self.norms['std'] = np.load(pjoin(humanml3d_cfg.ROOT, "Std.npy"))
         
-        t2m_meta_path = pjoin(self.cfg.model.t2m_path, "t2m", "Comp_v6_KLD01", "meta")
+        t2m_meta_path = pjoin(self.cfg.model.t2m_path, "t2m", "Comp_v6_KLD01", "meta")  # 【QUESTION】这个评估一般是什么？现阶段是不是还用不到，不过你可以展开简单讲一讲
         self.norms['mean_eval'] = np.load(pjoin(t2m_meta_path, "mean.npy"))
         self.norms['std_eval'] = np.load(pjoin(t2m_meta_path, "std.npy"))
         
@@ -97,11 +82,8 @@ class MixedDataModule(pl.LightningDataModule):
             min_filter_length=humanml3d_cfg.MIN_FILTER_LEN, max_filter_length=humanml3d_cfg.MAX_FILTER_LEN
         )
 
-        # 100Style 训练集
         logger.info("--- Setting up 100Style training dataset ---")
         style100_cfg = self.cfg.DATASET.STYLE100
-        # style100_mean = np.load(pjoin(style100_cfg.ROOT, "Mean.npy"))
-        # style100_std = np.load(pjoin(style100_cfg.ROOT, "Std.npy"))
         style100_train = Style100Dataset(
             mean=self.norms['mean'], std=self.norms['std'],
             split_file=pjoin(style100_cfg.ROOT, 'train.txt'),
@@ -115,19 +97,56 @@ class MixedDataModule(pl.LightningDataModule):
             min_filter_length=style100_cfg.MIN_FILTER_LEN, max_filter_length=style100_cfg.MAX_FILTER_LEN
         )
 
-        # HumanML3D 验证集
+        # HumanML3D 验证集，纯粹的只有HumanML3D的，不包含100Style，先留在这里，后面可能用得上
+        
+        # logger.info("--- Setting up HumanML3D validation dataset ---")
+        # self.val_dataset = Text2MotionDatasetV2(
+        #     mean=self.norms['mean'], std=self.norms['std'],
+        #     split_file=pjoin(humanml3d_cfg.ROOT, 'val.txt'),
+        #     motion_dir=pjoin(humanml3d_cfg.ROOT, 'new_joint_vecs'),
+        #     text_dir=pjoin(humanml3d_cfg.ROOT, 'texts'),
+        #     w_vectorizer=self.w_vectorizer,
+        #     tiny=self.cfg.DEBUG, debug=self.cfg.DEBUG,
+        #     max_motion_length=humanml3d_cfg.SAMPLER.MAX_LEN, min_motion_length=humanml3d_cfg.SAMPLER.MIN_LEN,
+        #     max_text_len=humanml3d_cfg.SAMPLER.MAX_TEXT_LEN, unit_length=humanml3d_cfg.UNIT_LEN,
+        #     min_filter_length=humanml3d_cfg.MIN_FILTER_LEN, max_filter_length=humanml3d_cfg.MAX_FILTER_LEN
+        # )
+
         logger.info("--- Setting up HumanML3D validation dataset ---")
-        self.val_dataset = Text2MotionDatasetV2(
-            mean=self.norms['mean'], std=self.norms['std'],
-            split_file=pjoin(humanml3d_cfg.ROOT, 'val.txt'),
-            motion_dir=pjoin(humanml3d_cfg.ROOT, 'new_joint_vecs'),
-            text_dir=pjoin(humanml3d_cfg.ROOT, 'texts'),
-            w_vectorizer=self.w_vectorizer,
-            tiny=self.cfg.DEBUG, debug=self.cfg.DEBUG,
-            max_motion_length=humanml3d_cfg.SAMPLER.MAX_LEN, min_motion_length=humanml3d_cfg.SAMPLER.MIN_LEN,
-            max_text_len=humanml3d_cfg.SAMPLER.MAX_TEXT_LEN, unit_length=humanml3d_cfg.UNIT_LEN,
-            min_filter_length=humanml3d_cfg.MIN_FILTER_LEN, max_filter_length=humanml3d_cfg.MAX_FILTER_LEN
-        )
+        humanml3d_val = Text2MotionDatasetV2( 
+            mean=self.norms['mean'], 
+            std=self.norms['std'], 
+            split_file=pjoin(humanml3d_cfg.ROOT, 'val.txt'), 
+            motion_dir=pjoin(humanml3d_cfg.ROOT, 'new_joint_vecs'), 
+            text_dir=pjoin(humanml3d_cfg.ROOT, 'texts'), 
+            w_vectorizer=self.w_vectorizer, 
+            tiny=self.cfg.DEBUG, debug=self.cfg.DEBUG, 
+            max_motion_length=humanml3d_cfg.SAMPLER.MAX_LEN, min_motion_length=humanml3d_cfg.SAMPLER.MIN_LEN, 
+            max_text_len=humanml3d_cfg.SAMPLER.MAX_TEXT_LEN, unit_length=humanml3d_cfg.UNIT_LEN, 
+            min_filter_length=humanml3d_cfg.MIN_FILTER_LEN, max_filter_length=humanml3d_cfg.MAX_FILTER_LEN)
+
+        logger.info("--- Setting up 100Style validation dataset ---")
+        style100_val_split_file = pjoin(style100_cfg.ROOT, 'val.txt')
+        if not os.path.exists(style100_val_split_file):
+             # 如果沒有驗證集，我們可以重用測試集或一小部分訓練集作為替代，打印警告，查了一下应该是有验证集的
+             logger.warning(f"Validation split '{style100_val_split_file}' not found for 100Style.")
+             logger.warning("Falling back to use the 'test.txt' split for validation.")
+             style100_val_split_file = pjoin(style100_cfg.ROOT, 'test.txt')
+
+        style100_val = Style100Dataset( 
+            mean=self.norms['mean'], 
+            std=self.norms['std'], 
+            split_file=style100_val_split_file, 
+            motion_dir=pjoin(style100_cfg.ROOT, 'new_joint_vecs'), 
+            text_dir=pjoin(style100_cfg.ROOT, 'texts'), 
+            style_dict_path=pjoin(style100_cfg.ROOT, 'Style_name_dict.txt'), 
+            w_vectorizer=self.w_vectorizer, 
+            tiny=self.cfg.DEBUG, debug=self.cfg.DEBUG, 
+            max_motion_length=style100_cfg.SAMPLER.MAX_LEN, min_motion_length=style100_cfg.SAMPLER.MIN_LEN, 
+            max_text_len=style100_cfg.SAMPLER.MAX_TEXT_LEN, unit_length=style100_cfg.UNIT_LEN, 
+            min_filter_length=style100_cfg.MIN_FILTER_LEN, max_filter_length=style100_cfg.MAX_FILTER_LEN)
+        
+        self.val_dataset = ConcatDataset([humanml3d_val, style100_val])
         print(f"[DIAGNOSTIC TRACE] 2c. 'val_dataset' instantiated. Length: {len(self.val_dataset)}")
 
         # 8. 组合训练集并更新元数据
@@ -142,12 +161,10 @@ class MixedDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         logger.info("Creating train dataloader with MixedBatchSampler...")
-        # setup() 会在 trainer.fit() 开始时被自动调用，这里无需手动调用
         
         dataset_sizes = [len(self.train_dataset.datasets[0]), len(self.train_dataset.datasets[1])]
         batch_ratio = self.cfg.DATASET.MIXED.BATCH_RATIO
         
-        # --- [核心修复 1] 使用正确的参数名 batch_ratio ---
         sampler = MixedBatchSampler(
             dataset_sizes=dataset_sizes, 
             batch_size=self.batch_size, 
@@ -158,27 +175,47 @@ class MixedDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_sampler=sampler,
             num_workers=self.num_workers,
-            # --- [核心修复 2] 使用我们设计的、正确的 mixed_collate_fn ---
             collate_fn=mixed_collate_fn,
             pin_memory=True
         )
 
     def val_dataloader(self):
-        logger.info("Creating validation dataloaloader from HumanML3D val set...")
-        # setup() 会在 trainer.validate() 开始时被自动调用
+        # 【QUESTION】目前我们的验证阶段的数据集也改成了混合数据集，请你确认这是正确的，符合我们当前阶段目标的
+
+        # logger.info("Creating validation dataloaloader from HumanML3D val set...")
+        # # setup() 会在 trainer.validate() 开始时被自动调用
         
-        batch_size = min(self.val_batch_size, len(self.val_dataset))
-        if batch_size == 0:
-            logger.warning("Validation dataset is empty, returning empty dataloader.")
-            return DataLoader([])
+        # batch_size = min(self.val_batch_size, len(self.val_dataset))
+        # if batch_size == 0:
+        #     logger.warning("Validation dataset is empty, returning empty dataloader.")
+        #     return DataLoader([])
             
+        # return DataLoader(
+        #     self.val_dataset,
+        #     batch_size=batch_size,
+        #     shuffle=False,
+        #     num_workers=self.num_workers,
+        #     # --- [核心修复 3] 验证集也应该使用同样的 collate 逻辑 ---
+        #     collate_fn=mld_collate_dict,
+        #     pin_memory=True
+        # )
+        logger.info("Creating MIXED validation dataloader with MixedBatchSampler...") 
+        val_dataset_sizes = [len(d) for d in self.val_dataset.datasets]
+        if any(size == 0 for size in val_dataset_sizes):
+            logger.warning("One of the validation datasets is empty. Returning an empty dataloader.")
+            return DataLoader([])
+
+        val_sampler = MixedBatchSampler(
+            dataset_sizes=val_dataset_sizes, 
+            batch_size=self.val_batch_size, # 使用驗證批次大小
+            batch_ratio=self.cfg.DATASET.MIXED.BATCH_RATIO # 使用與訓練時相同的混合比例
+        )
+        
         return DataLoader(
             self.val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
+            batch_sampler=val_sampler,
             num_workers=self.num_workers,
-            # --- [核心修复 3] 验证集也应该使用同样的 collate 逻辑 ---
-            collate_fn=mld_collate_dict,
+            collate_fn=mixed_collate_fn, 
             pin_memory=True
         )
 

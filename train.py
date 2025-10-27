@@ -159,6 +159,7 @@ def main():
         callbacks=callbacks,
         #check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
         check_val_every_n_epoch=1,
+        gradient_clip_val=1.0,
     )
     logger.info("Trainer initialized")
 

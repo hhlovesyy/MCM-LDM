@@ -13,7 +13,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
     handlers=[
-        logging.FileHandler("sanity_check.log"), # 保存到文件
+        logging.FileHandler("sanity_check_1025.log"), # 保存到文件
         logging.StreamHandler()                    # 同时在控制台显示
     ]
 )

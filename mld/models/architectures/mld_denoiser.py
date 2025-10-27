@@ -147,14 +147,14 @@ class DiTBlock(nn.Module):
         )
 
         # NEW: Add Cross-Attention and its corresponding LayerNorm
-        self.norm_cross_attn = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6) # NEW:
-        self.cross_attn = CrossAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs) # NEW:
+        # self.norm_cross_attn = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6) # NEW:
+        # self.cross_attn = CrossAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs) # NEW:
 
         # # NEW: Add a separate modulation pathway for the new text condition
-        # self.adaLN_modulation_text = nn.Sequential( # NEW:
-        #     nn.SiLU(), # NEW:
-        #     nn.Linear(hidden_size, 3 * hidden_size, bias=True) # NEW:
-        # ) # NEW:
+        self.adaLN_modulation_text = nn.Sequential( 
+            nn.SiLU(), # NEW:
+            nn.Linear(hidden_size, 3 * hidden_size, bias=True) 
+        ) 
 
     # def forward(self, x, c, t): # x:torch.Size([32, 13, 256]) c：torch.Size([32, 256]) t：torch.Size([32, 256])
     #     shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
@@ -163,24 +163,34 @@ class DiTBlock(nn.Module):
     #     x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
     #     return x  # torch.Size([32, 13, 256])
         
-    # NEW: Update forward signature to accept the optional text feature
-    def forward(self, x, c, t, style_text_feature=None): # x: (B, T, D), c: (B, D), t: (B, D), style_text_feature: (B, D) or None
-        # --- Original Self-Attention Path (UNTOUCHED) ---
-        shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+    def forward(self, x, c_motion, c_traj, c_text=None):
+        # 核心思路：我们将三个条件 c_motion, c_traj, c_text 分别用于调制网络的不同部分，
+        # 并通过参数相加的方式，让 c_traj 和 c_text 共同影响 MLP 模块，实现多条件的融合引导。
         
-        # [修改后]
-        if style_text_feature is not None:
-            # 检查张量是否全为零，如果是，则跳过计算以提高效率
-            if torch.any(style_text_feature != 0): # 不是0，则走cross attention机制
-                # 直接、干净地将 Cross-Attention 的结果加到 x 上
-                x = x + self.cross_attn(
-                    self.norm_cross_attn(x),
-                    style_text_feature.unsqueeze(1)
-                )
+        # 1. 动作风格条件 (c_motion) 调制自注意力 (Self-Attention) 模块
+        #    这个逻辑与原始 MCM-LDM 完全保持一致，确保了动作引导的稳定性。
+        shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c_motion).chunk(3, dim=1)
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
 
-        # --- Original MLP Path (UNTOUCHED) ---
-        shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1)
+        # 2. 轨迹条件 (c_traj) 生成其对 MLP 模块的调制参数
+        shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(c_traj).chunk(3, dim=1)
+        
+        # 3. 文本风格条件 (c_text) 也生成其对 MLP 模块的调制参数
+        #    只有当 c_text 存在且不为零时，才进行计算和融合。
+        if c_text is not None:
+            # 使用 .sum() 来检查张量中是否有非零元素，比 torch.any() 更适合处理浮点数。
+            if c_text.sum() != 0:
+                # a. 通过我们新加的 adaLN_modulation_text 模块，计算文本条件的调制参数
+                shift_mlp_text, scale_mlp_text, gate_mlp_text = self.adaLN_modulation_text(c_text).chunk(3, dim=1)
+                
+                # b. [关键融合点] 将文本和轨迹的调制参数直接相加。
+                #    这使得 MLP 模块同时接收到来自两个引导源的指令，是一种高效且优雅的融合方式。
+                shift_mlp = shift_mlp + shift_mlp_text
+                scale_mlp = scale_mlp + scale_mlp_text
+                gate_mlp = gate_mlp + gate_mlp_text
+
+        # 4. 应用最终的 (可能是融合后的) 调制参数到 MLP 模块
+        #    这个逻辑也与原始 MCM-LDM 完全一致。
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         
         return x
@@ -341,7 +351,10 @@ class MldDenoiser(nn.Module):
         # to dit blocks (N, T, D)
         xseq = self.query_pos(xseq).permute(1,0,2)  # torch.Size([32, 13, 256])
         for block in self.blocks:
-            xseq = block(xseq, style_emb_latent, trans_emb, style_text_feature=text_emb_latent) 
+            xseq = block(x=xseq, 
+                 c_motion=style_emb_latent, 
+                 c_traj=trans_emb, 
+                 c_text=text_emb_latent) 
         sample = xseq[:,content_emb_latent.shape[0]:,:]  # torch.Size([32, 7, 256])
        
 

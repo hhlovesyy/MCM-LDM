@@ -1,12 +1,10 @@
-# mld/data/mixed_utils.py
-
 import torch
 import torch.utils.data
 import numpy as np
 import logging
-from .utils import mld_collate # 从现有 utils 导入原始的 collate 函数
+from .utils import mld_collate 
 from .utils import collate_tensors
-# 初始化日志记录器
+
 logger = logging.getLogger(__name__)
 
 class MixedBatchSampler(torch.utils.data.Sampler):
@@ -22,11 +20,8 @@ class MixedBatchSampler(torch.utils.data.Sampler):
         """
         self.dataset_sizes = dataset_sizes
         self.batch_size = batch_size
-        
-        # --- [核心修复] 直接使用 batch_ratio 作为绝对数量 ---
         self.num_samples_per_dataset = np.array(batch_ratio, dtype=int)
         
-        # --- [增加] 健壮性检查 ---
         if self.num_samples_per_dataset.sum() != self.batch_size:
             raise ValueError(
                 f"The sum of BATCH_RATIO ({self.num_samples_per_dataset.sum()}) "
@@ -37,7 +32,6 @@ class MixedBatchSampler(torch.utils.data.Sampler):
         
         self.total_samples = sum(dataset_sizes)
 
-        # 索引范围的计算保持不变
         self.ranges = []
         start = 0
         for size in dataset_sizes:
@@ -48,9 +42,7 @@ class MixedBatchSampler(torch.utils.data.Sampler):
                     f"batch size {batch_size}, and a fixed batch composition of {self.num_samples_per_dataset}.")
 
     def __iter__(self):
-        # 1. 为每个数据集生成打乱的索引列表
         shuffled_indices_pools = [np.random.permutation(r) for r in self.ranges]
-        # 2. 为每个索引池创建一个迭代器
         pool_iterators = [iter(pool) for pool in shuffled_indices_pools]
 
         # 3. [优化] 计算总批次数时，应基于【瓶颈】数据集
@@ -67,8 +59,7 @@ class MixedBatchSampler(torch.utils.data.Sampler):
                 for _ in range(num_samples):
                     try:
                         batch_indices.append(next(pool_iterators[i]))
-                    except StopIteration:
-                        # 索引耗尽的逻辑保持不变，这是正确的
+                    except StopIteration: # 耗尽了，重新打乱并创建新的迭代器
                         shuffled_indices_pools[i] = np.random.permutation(self.ranges[i])
                         pool_iterators[i] = iter(shuffled_indices_pools[i])
                         batch_indices.append(next(pool_iterators[i]))
@@ -84,7 +75,7 @@ class MixedBatchSampler(torch.utils.data.Sampler):
         return int(np.floor(batches_per_epoch_per_dataset.min()))
     
     
-# todo:原来的mld_collate可能也需要同步修改为dict的版本，或者是引用下面写的这个dict的版本
+
 def mixed_collate_fn(batch):
     """
     一个智能的 collate 函数，专门用于处理混合了 'humanml3d' 和 'style100' 数据源的批次。
@@ -126,7 +117,6 @@ def mixed_collate_fn(batch):
         is_text_guided = torch.zeros(len(humanml3d_batch), dtype=torch.bool)
     
     elif style100_batch:
-        # 如果只有 100Style
         final_batch = collated_s100
         is_text_guided = torch.ones(len(style100_batch), dtype=torch.bool)
     else:
@@ -156,4 +146,5 @@ def mld_collate_dict(batch):
         "pos_ohot": collate_tensors([torch.tensor(b['pos_one_hots']).float() for b in batch]),
         "text_len": collate_tensors([torch.tensor(b['sent_len']) for b in batch]),
         "tokens": [b['tokens'] for b in batch],
+        "source": [b['source'] for b in batch],  # 保留来源信息
     }
