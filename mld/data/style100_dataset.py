@@ -209,6 +209,10 @@ class Style100Dataset(data.Dataset):
             logger.warning(f"Pure style description for '{style_name_key}' not found. Falling back to simple style name.")
             final_caption = f"in a {style_name} style"
         
+        final_caption = style_name  # 先简化为仅风格名称，后续再考虑复杂描述的效果如何
+        # if item < 5:  # 仅打印前5个样本以避免日志过多
+        #     print(f"[Debug] Sample {name}: Using caption: '{final_caption}'")
+        
         # [简化] 我们不再需要为 glove 构建复杂的 tokens
         tokens = ["unk/OTHER"] * (self.max_text_len + 2)
         sent_len = 0 # 设为0，因为我们不使用它
