@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torchmetrics import Metric
-
+import torch.nn.functional as F
 from mld.data.humanml.scripts.motion_process import (qrot,
                                                      recover_root_rot_pos)
 
@@ -28,6 +28,8 @@ class MLDLosses(Metric):
             # instance noise loss
             losses.append("inst_loss")
             losses.append("align_loss")
+            losses.append("align_loss_text") # text -> motion 方向
+            losses.append("align_loss_motion") # motion -> text 方向
             # losses.append("x_loss")
             # losses.append("style_loss")
             if self.cfg.LOSS.LAMBDA_PRIOR != 0.0:
@@ -68,11 +70,9 @@ class MLDLosses(Metric):
                 self._params[loss] = 1.0
             # [核心修改] 添加 align_loss 的定义
             elif loss.split('_')[0] == 'align':
-                # 核心思路：我们使用余弦嵌入损失 (CosineEmbeddingLoss)。
-                # 目标是让 text_style_emb 和 motion_style_emb 之间的余弦相似度尽可能接近 1。
-                # 因此，损失函数的目标 target 就是一个全为 1 的向量。
-                self._losses_func[loss] = nn.CosineEmbeddingLoss(reduction='mean')
-                # 从配置文件中读取 align_loss 的权重 lambda，如果未定义则默认为 1.0
+                # 核心思路：我们使用 CLIP-style 的对比损失，它由两个交叉熵损失构成。
+                self._losses_func[loss] = nn.CrossEntropyLoss()
+                # 从配置文件中读取 align_loss 的权重 lambda
                 self._params[loss] = self.cfg.LOSS.get('LAMBDA_ALIGN', 1.0)
             elif loss.split('_')[0] == 'x':
                 self._losses_func[loss] = nn.MSELoss(reduction='mean')
@@ -104,6 +104,8 @@ class MLDLosses(Metric):
                 ValueError("This loss is not recognized.")
             if loss.split('_')[-1] == 'joints':
                 self._params[loss] = cfg.LOSS.LAMBDA_JOINT
+        # self._params["align_loss_text"] = self._params["align_loss"] # _params是保存的参数，不是loss值，是一些比如lambda值之类的
+        # self._params["align_loss_motion"] = self._params["align_loss"]
 
     def update(self, rs_set):
         total: float = 0.0
@@ -123,15 +125,38 @@ class MLDLosses(Metric):
             # 2. [核心修改] 计算 align_loss (对齐损失)
             # 核心思路：只有在 rs_set 中包含了我们从 mld.py 传递过来的、用于对齐的两个 embedding 时，才计算此损失。
             # 这确保了只有在处理 100Style 的文本引导数据时，才会激活对齐损失。
-            if 'text_style_emb' in rs_set and 'motion_style_emb_for_text' in rs_set:
-                # a. 准备 CosineEmbeddingLoss 的目标向量 (全为 1)
-                target = torch.ones(rs_set['text_style_emb'].shape[0], device=self.device)
+            if 'text_style_emb' in rs_set and rs_set['text_style_emb'] is not None:
+                text_embeddings = rs_set['text_style_emb']
+                motion_embeddings = rs_set['motion_style_emb_for_text']
                 
-                # b. 调用辅助函数计算加权后的 align_loss，并累加到 total
-                total += self._update_loss_cosine("align_loss", 
-                                                rs_set['text_style_emb'], 
-                                                rs_set['motion_style_emb_for_text'], 
-                                                target)
+                # [安全检查] 确保我们有超过1个样本，否则对比学习没有意义
+                if text_embeddings.shape[0] > 1:
+                    # a. 温度参数 (logit_scale)
+                    logit_scale = torch.exp(torch.tensor(2.659, device=self.device))
+
+                    # b. 归一化 (Normalization)
+                    text_embeds_norm = F.normalize(text_embeddings, p=2, dim=-1)
+                    motion_embeds_norm = F.normalize(motion_embeddings, p=2, dim=-1)
+
+                    # c. 计算 N_text x N_text 的相似度矩阵 (Logits Matrix)
+                    logits_per_text = torch.matmul(text_embeds_norm, motion_embeds_norm.t()) * logit_scale
+                    logits_per_motion = logits_per_text.t()
+
+                    # d. 创建 Ground Truth 标签
+                    num_text_samples = text_embeddings.shape[0]
+                    ground_truth = torch.arange(num_text_samples, dtype=torch.long, device=self.device)
+
+                    # e. 计算交叉熵损失
+                    loss_text = self._losses_func["align_loss"](logits_per_text, ground_truth)
+                    loss_motion = self._losses_func["align_loss"](logits_per_motion, ground_truth)
+                    contrastive_loss = (loss_text + loss_motion) / 2.0
+                    
+                    # f. 更新和累加损失
+                    self.align_loss += contrastive_loss.detach()
+                    self.align_loss_text += loss_text.detach()       # <-- 新增
+                    self.align_loss_motion += loss_motion.detach()   # <-- 新增
+                    total += self._params["align_loss"] * contrastive_loss
+            # ===> END: 替换代码 (最终修正版) <===
             # style loss
             # total += self._update_loss("style_loss", rs_set['gen_motion_feature'],
             #                                rs_set['gt_motion_feature'])
@@ -159,7 +184,9 @@ class MLDLosses(Metric):
         if 'inst_loss' in self.losses and self.inst_loss.item() != 0:
             log_dict['inst'] = self.inst_loss.detach() / self.count # 计算平均值
         if 'align_loss' in self.losses and self.align_loss.item() != 0:
-            log_dict['align'] = self.align_loss.detach() / self.count
+            log_dict['align_total'] = self.align_loss.detach() / self.count
+            log_dict['align_text'] = self.align_loss_text.detach() / self.count
+            log_dict['align_motion'] = self.align_loss_motion.detach() / self.count
 
         # update 函数本身返回用于反向传播的总损失张量
         return total, log_dict

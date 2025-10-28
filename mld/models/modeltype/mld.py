@@ -85,14 +85,13 @@ class MLD(BaseModel):
         self.guidance_uncodp = cfg.model.guidance_uncondp
         self.datamodule = datamodule
 
-        self.mld_device = 'cuda:{}'.format(cfg["DEVICE"][0]) # NEW: 定义一个 device 方便后续使用
-
+        self.mld_device = 'cuda:{}'.format(cfg["DEVICE"][0]) 
 
         # self.text_encoder = instantiate_from_config(cfg.model.text_encoder)
 
         parameters = read_yaml_to_dict("configs/motionclip_config/motionclip_params_263.yaml")
         parameters["device"] = 'cuda:{}'.format(cfg["DEVICE"][0])        
-        self.motionclip = get_model_and_data(parameters, split='vald')
+        self.motionclip = get_model_and_data(parameters, split='vald') # 这个现在是”学生“
         print("load motion clip-xyz-263")
         print("Restore weights..")
         checkpointpath = "checkpoints/motionclip_checkpoint/motionclip.pth.tar"
@@ -102,24 +101,23 @@ class MLD(BaseModel):
         self.mean = torch.tensor(self.datamodule.norms['mean']).to(self.mld_device)
         self.std = torch.tensor(self.datamodule.norms['std']).to(self.mld_device)
 
-        #don't train motionclip
-        self.motionclip.train()
+        self.motionclip.train()  # 这个是学生网络
         for p in self.motionclip.parameters():
             p.requires_grad = True
+        print("INFO: [C-Plan] Trainable 'motionclip' (student) initialized.")
 
-        # NEW: 加载并冻结 CLIP 文本编码器
+        # 2025.10.28 创建一个teacher motionclip，冻结
+        self.motionclip_teacher = get_model_and_data(parameters, split='vald')
+        state_dict = torch.load(checkpointpath, map_location=parameters["device"])
+        load_model_wo_clip(self.motionclip_teacher, state_dict)
+        self.motionclip_teacher.eval() # 设置为评估模式
+        for p in self.motionclip_teacher.parameters():
+            p.requires_grad = False
+        print("INFO: [C-Plan] Frozen 'motionclip_teacher' initialized.")
+
+
+        # NOTE: 加载并冻结 CLIP 文本编码器，目前我们冻结CLIP，后面可以考虑解冻，因为CLIP是文本图像域对齐做的，而我们是”动作“的风格描述，CLIP模型可能理解里本身不够
         self.clip_model, _ = clip.load("ViT-B/32", device=self.mld_device)
-        # self.clip_model.train()
-        # print("Finetuning CLIP model. Parameters to be trained:")
-        # for name, p in self.clip_model.named_parameters():
-        #     # 我们只解冻最后一个 Transformer 块 (resblocks.11) 的 MLP 部分
-        #     # 以及文本投影矩阵 (text_projection)，这是 CLIP 的一个重要部分
-        #     # 我们继续冻结所有的 LayerNorm (ln_) 和自注意力模块 (attn)。
-        #     if ("transformer.resblocks.11.mlp" in name) or ("text_projection" in name):
-        #         p.requires_grad = True
-        #         print(f"  - {name}")
-        #     else:
-        #         p.requires_grad = False
         self.clip_model.eval()
         for name, p in self.clip_model.named_parameters():
             p.requires_grad = False
@@ -135,7 +133,7 @@ class MLD(BaseModel):
                 p.requires_grad = False
 
         # Pass the new text_style_dim parameter which is 512 for ViT-B/32
-        cfg.model.denoiser.text_style_dim = 512 # NEW:
+        cfg.model.denoiser.text_style_dim = 512 
         self.denoiser = instantiate_from_config(cfg.model.denoiser)
 
         self.scheduler = instantiate_from_config(cfg.model.scheduler)
@@ -145,6 +143,7 @@ class MLD(BaseModel):
 
         self._get_t2m_evaluator(cfg)
 
+        # NOTE: 注意看一下能否和losses那里的对上，逻辑是否正确，可以结合后面的一起关注
         if cfg.LOSS.TYPE == "mld":
             self._losses = MetricCollection({
                 split: MLDLosses(vae=self.is_vae, mode="xyz", cfg=cfg)
@@ -164,14 +163,13 @@ class MLD(BaseModel):
         self.joints2feats = datamodule.joints2feats
 
         self.text_adapter = TextAdapter(input_dim=512, output_dim=512, num_layers=3).to(self.mld_device)
-        print("INFO: [B-Plan] TextAdapter (MLP Mapping Network) has been added.")
+        # [最终解决方案] 添加两个 LayerNorm 层，用于强制对齐尺度
+        self.text_emb_norm = nn.LayerNorm(512).to(self.mld_device)
+        self.motion_emb_norm = nn.LayerNorm(512).to(self.mld_device)
+        print("INFO: TextAdapter (MLP Mapping Network) has been added.")
     
-    def configure_optimizers(self):
-        # 核心思路：这是 PyTorch Lightning 配置优化器的标准方法。
-        # 我们将之前在 __init__ 中的所有逻辑都搬到这里。
-        # 当 Trainer 启动时，它会自动调用这个方法，并获取返回的优化器。
-        # 这样做，可以确保 AMP 插件能够正确地“包装”和管理我们的优化器。
 
+    def configure_optimizers(self):  # overriding pl.LightningModule method
         if self.cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
             print("Configuring differential learning rates in `configure_optimizers`...")
             denoiser_base_params = []
@@ -253,17 +251,6 @@ class MLD(BaseModel):
             p.requires_grad = False
 
 
-
-
-
-
-
-
-
-
-# 
-
-
     def sample_from_distribution(
         self,
         dist,
@@ -334,7 +321,8 @@ class MLD(BaseModel):
                 with torch.cuda.amp.autocast(enabled=False):
                     raw_clip_features = self.clip_model.encode_text(text_tokens).float()
                 adapted_features = self.text_adapter(raw_clip_features)
-                text_features = adapted_features
+                normalized_text_emb = self.text_emb_norm(adapted_features)
+                text_features = normalized_text_emb
                 
             uncond_text_features = torch.zeros_like(text_features)
             text_style_cond = torch.cat([uncond_text_features, text_features], dim=0).unsqueeze(1)
@@ -342,7 +330,6 @@ class MLD(BaseModel):
         elif is_motion_mode:
             style_motion = batch["style_motion"]
             
-            # --- [最终修复] ---
             # 1. 为 style_motion 单独计算其长度
             style_lengths = [style_motion.shape[1]] * style_motion.shape[0]
 
@@ -356,20 +343,17 @@ class MLD(BaseModel):
                     motion_emb_features = self.motionclip.encoder({
                     'x': motion_seq.float(),
                     'y': torch.zeros(bs, dtype=int, device=self.mld_device),
-                    # 3. 使用正确的 style_lengths 来生成掩码！
                     'mask': lengths_to_mask(style_lengths, device=self.mld_device)
                 })["mu"]
-            # --- 修复结束 ---
 
             uncond_motion_emb = torch.zeros_like(motion_emb_features)
             motion_style_cond = torch.cat([uncond_motion_emb, motion_emb_features], dim=0).unsqueeze(1)
 
-        # --- 3. [核心修改] 打包所有条件并调用扩散逆过程 ---
         multi_cond_emb = [cond_emb, motion_style_cond, uncond_trans]
 
         z = self._diffusion_reverse(
             encoder_hidden_states=multi_cond_emb, 
-            lengths=content_lengths, # 逆过程的长度以 content 为准
+            lengths=content_lengths, 
             scale=scale, 
             style_text_feature=text_style_cond
         )
@@ -442,19 +426,15 @@ class MLD(BaseModel):
         return latents
 
 
-
-
-
     def _diffusion_process(self, latents, encoder_hidden_states, lengths=None, style_text_feature=None):
         """
         heavily from https://github.com/huggingface/diffusers/blob/main/examples/dreambooth/train_dreambooth.py
         """
         # 直观地说，函数形参地latents是torch.Size([7, 32, 256])，32是batch_size
-        # 你也解释一下这里的32和7是什么，n_token和latent_dim分别代表什么，这个7应该是token，256应该是latent_dim，整个latents的含义似乎是batch里面的原始动作经过vae编码后的latent表示
+        # 这个7应该是token，256应该是latent_dim，整个latents的含义似乎是batch里面的原始动作经过vae编码后的latent表示
         # [n_token, batch_size, latent_dim] -> [batch_size, n_token, latent_dim]
         latents = latents.permute(1, 0, 2)  # torch.Size([32, 7, 256])
 
-        # Sample noise that we'll add to the latents
         # [batch_size, n_token, latent_dim]
         noise = torch.randn_like(latents)  # torch.Size([32, 7, 256])
         bsz = latents.shape[0]  # 32
@@ -475,7 +455,7 @@ class MLD(BaseModel):
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
             lengths=lengths,
-            style_text_feature=style_text_feature, # <-- 唯一的改动
+            style_text_feature=style_text_feature, 
             return_dict=False,
         )[0]  # torch.Size([32, 7, 256])
         # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
@@ -494,8 +474,9 @@ class MLD(BaseModel):
             "noise_pred_prior": noise_pred_prior, # 0
         }
 
-        # [新代码] 如果是训练模式，额外传递 is_text_guided_mask
-        if self.training and style_text_feature is not None:
+        # 新增了style reconstruction相关的loss计算
+        if self.training and self.cfg.LOSS.get('LAMBDA_STYLE_RECON', 0.0) > 0.0:
+            print("Computing style reconstruction loss components...C1 Plan!")
             is_text_guided_mask = torch.any(style_text_feature.squeeze(1) != 0, dim=-1)
             n_set["is_text_guided_mask"] = is_text_guided_mask
 
@@ -542,38 +523,20 @@ class MLD(BaseModel):
         return rs_set
 # train
     def train_diffusion_forward(self, batch):
-        # print("\n" + "="*20 + " NEW BATCH DIAGNOSIS " + "="*20)
         feats_ref = batch["motion"]  # shape:torch.Size([batch_size, motion_len, 263]): 应该是[batchsize, motion_len, nfeats]
         feats_content = batch["motion"].clone()  # shape:torch.Size([batch_size, motion_len, 263]):
-        feats_content[...,:3] = 0.0  # shape:torch.Size([batch_size, motion_len, 263]):
-        lengths = batch["length"]  # len(): batch_size
+        feats_content[...,:3] = 0.0  # shape:torch.Size([batch_size, motion_len, 263]):  feats_content会干掉轨迹
+        lengths = batch["length"]  # len(): batch_size，一个list，里面是各个样本的长度，比如192，88，60等
         bs = feats_ref.shape[0]
 
         # 1. 从 batch 中解包出我们的关键标志
         is_text_guided = batch['is_text_guided']  # torch.Size([batch_size])，前面全是false，后面全是true，毕竟是直接拼接的
         # print(f"Batch Size: {bs}, Text-Guided Samples: {is_text_guided.sum().item()}")
 
-        # 检查输入数据本身是否有 nan
-        # if torch.isnan(feats_ref).any():
-        #     print("!!!!!! FATAL: NaN detected in the initial 'batch[\"motion\"]' itself! Problem is in the dataset/dataloader.")
-        #     raise RuntimeError("NaN in initial batch data.")
-        # print("Step 0: Initial batch data is clean (no NaN).")
-        
-        # print("\n--- Step 1: VAE Encoding for Content Condition ---")
         # content condition
         with torch.no_grad():
             z, dist = self.vae.encode(feats_ref, lengths)  # z: torch.Size([7, batch_size, 256]), dist(batch_shape): torch.Size([7, batch_size, 256])
             z_content, dist = self.vae.encode(feats_content, lengths) # z_content: torch.Size([7, batch_size, 256]), dist:batch_shape:torch.Size([7, batch_size, 256])
-        
-        # if torch.isnan(z_content).any():
-        #     print("!!!!!! FATAL: NaN detected in 'z_content' immediately after VAE encoding!")
-        #     # 找出是哪个样本出了问题
-        #     nan_indices = torch.any(torch.isnan(z_content), dim=(0, 2)).nonzero(as_tuple=True)[0]
-        #     print(f"Indices in batch with NaN content: {nan_indices.tolist()}")
-        #     for idx in nan_indices:
-        #         print(f" -> Sample at index {idx.item()} is from {'100Style' if is_text_guided[idx] else 'HumanML3D'}")
-        #     raise RuntimeError("NaN from VAE encoder.")
-        # print("Step 1: VAE content encoding is clean.")
         
         cond_emb = z_content.permute(1,0,2)  # torch.Size([batch_size, 7, 256])    
         
@@ -584,9 +547,9 @@ class MLD(BaseModel):
 
         # 2. 初始化两个风格条件张量，全部为零
         # 动作风格 (fs) 的 embedding 维度是 512
-        motion_style_cond = torch.zeros(feats_ref.shape[0], 1, 512, device=self.mld_device, dtype=torch.float) # torch.Size([batch_size, 1, 512])
+        motion_style_cond = torch.zeros(feats_ref.shape[0], 1, 512, device=self.mld_device, dtype=torch.float) # torch.Size([batch_size, 1, 512])，里面全是0
         # 文本风格 (text_style) 的 embedding 维度也是 512 (来自 CLIP ViT-B/32)
-        text_style_cond = torch.zeros(feats_ref.shape[0], 1, 512, device=self.mld_device, dtype=torch.float)  # torch.Size([batch_size, 1, 512])
+        text_style_cond = torch.zeros(feats_ref.shape[0], 1, 512, device=self.mld_device, dtype=torch.float)  # torch.Size([batch_size, 1, 512])，里面全是0
 
         # 3. 根据标志，为每个样本填充正确的风格条件
         # 初始化用于 align_loss 的张量
@@ -594,96 +557,110 @@ class MLD(BaseModel):
         motion_emb_for_align = None
         # 找到所有需要“动作引导”的样本的索引
         motion_indices = ~is_text_guided # torch.Size([batch_size]),前一半都是True，后一半都是False
-        if motion_indices.any():
+        if motion_indices.any(): # 这样的话肯定能进了
             # a. 只为这些样本提取动作风格
-            motion_seq = feats_ref[motion_indices] * self.std + self.mean  # torch.Size([batch_size / 2, motion_len, 263])
+            motion_seq = feats_ref[motion_indices] * self.std + self.mean  # torch.Size([batch_size / 2, motion_len, 263])，motion_length对于一个batch来说应该填充到一样长了
             motion_seq[..., :3] = 0.0
             motion_seq = motion_seq.unsqueeze(-1).permute(0, 2, 3, 1) # torch.Size([batch_size / 2, 263, 1, motion_len])
-            
+            # 【QUESTION】这里有问题了！我发现motion_seq里面基本都是1和0，我需要把这个dump到一个文件里看看，一会你帮我补充一下代码
             lengths_motion = [lengths[i] for i, flag in enumerate(motion_indices) if flag]  # len(): batch_size / 2
 
-            motion_emb = self.motionclip.encoder({
+            motion_emb = self.motionclip.encoder({ # 【QUESTION】这里使用学生网络，可以学习是不是？
                 'x': motion_seq,
                 'y': torch.zeros(motion_seq.shape[0], dtype=int, device=self.mld_device),
                 'mask': lengths_to_mask(lengths_motion, device=self.mld_device)
             })["mu"].unsqueeze(1) # torch.Size([batch_size / 2, 1, 512])
             
-            # if torch.isnan(motion_emb).any():
-            #     print("!!!!!! FATAL: NaN detected from MotionClip encoder!， motion features！")
-            #     raise RuntimeError("NaN from MotionClip.")
-            # print("Step 2a: MotionClip encoding is clean.")
-
             # b. 应用 CFG dropout
-            mask_uncond = torch.rand(motion_emb.shape[0], device=self.mld_device) < self.guidance_uncodp  # torch.Size([batch_size/2])
-            motion_emb[mask_uncond, ...] = 0
+            mask_uncond = torch.rand(motion_emb.shape[0], device=self.mld_device) < self.guidance_uncodp  # torch.Size([batch_size/2])，【QUESTION】几乎都是False，True非常少，应该没什么问题？
+            motion_emb[mask_uncond, ...] = 0  # 【QUESTION】这种写法是说mask_uncond是True的部分会变成0，其他部分不变么
             
-            # c. 将计算出的 embedding 填充回主张量的对应位置
-            motion_style_cond[motion_indices] = motion_emb  # torch.Size([batch_size, 1, 512])，每个样本前一半有值，后一半为0，这对吗？？？会不会对原来的MCM-LDM造成比较大的干扰？这个逻辑模型能学到东西吗？
-
+            # c. 将计算出的 embedding 填充回主张量的对应位置，这个逻辑对么？
+            motion_style_cond[motion_indices] = motion_emb  # torch.Size([batch_size, 1, 512])
+            # 【QUESTION】debug的时候我发现motion_style_cond里面有两个字段，一个是T，一个是data，其中T看起来每个样本后一半都是0，但是data比较正常一些？前一半样本有值，后一半样本为0，这个data和T分别指的是什么？
         # 找到所有需要“文本引导”的样本的索引
         text_indices = is_text_guided  # 前一半都是False，后一半都是True
         if text_indices.any():
             # a. 只为这些样本提取文本
-            texts = [batch['text'][i] for i, flag in enumerate(text_indices) if flag]
+            texts = [batch['text'][i] for i, flag in enumerate(text_indices) if flag] # 这是一个list，长度是batch_size / 2，里面每个元素是一个style的文本，比如chicken，old
             
             # b. 编码文本，得到干净的 embedding
-            text_tokens = clip.tokenize(texts).to(self.mld_device)
+            text_tokens = clip.tokenize(texts).to(self.mld_device)  # torch.Size([batch_size / 2, 77])
             with torch.cuda.amp.autocast(enabled=False):
-                raw_clip_features = self.clip_model.encode_text(text_tokens).float()
-
-            # c. 在应用 dropout 之前，先用干净的 embedding 准备 align_loss 的数据
-            adapted_features = self.text_adapter(raw_clip_features)
-            text_features = adapted_features.unsqueeze(1)
+                raw_clip_features = self.clip_model.encode_text(text_tokens).float()  # torch.Size([batch_size / 2, 512])
             
+            # c. 在应用 dropout 之前，先用干净的 embedding 准备 align_loss 的数据
+            adapted_features = self.text_adapter(raw_clip_features)  # torch.Size([batch_size / 2, 512])
+            # d. [核心修复] 对其进行 Layer Normalization，强制将其尺度拉到标准范围
+            normalized_text_emb = self.text_emb_norm(adapted_features)
+        
+            text_features = normalized_text_emb.unsqueeze(1)  # torch.Size([64, 1, 512])
+            # #【QUESTION】debug了一下，text_features和前面的motion_emb尺度有点不同，这个会有影响么？要不要debug出来看看
             # d. 现在，对 text_features 应用 dropout，用于 denoiser 条件
-            mask_uncond = torch.rand(text_features.shape[0], device=self.mld_device) < self.guidance_uncodp
+            mask_uncond = torch.rand(text_features.shape[0], device=self.mld_device) < self.guidance_uncodp  # 基本都是False，偶尔有的是True
             text_features[mask_uncond, ...] = 0
 
             # e. 将最终的、可能经过 dropout 的 embedding 填充到 text_style_cond 中
-            text_style_cond[text_indices] = text_features
+            text_style_cond[text_indices] = text_features  # torch.Size([batch_size, 1, 512])，如果看data不看T的话，前一半样本全是0，后一半样本有值
 
             # f. GT (Ground Truth) embedding 的提取逻辑
             with torch.no_grad():
-                motion_seq_for_text = feats_ref[text_indices] * self.std + self.mean
-                motion_seq_for_text[..., :3] = 0.0
-                motion_seq_for_text = motion_seq_for_text.unsqueeze(-1).permute(0, 2, 3, 1)
-                lengths_text = [lengths[i] for i, flag in enumerate(text_indices) if flag]
+                motion_seq_for_text = feats_ref[text_indices] * self.std + self.mean  # 【QUESTION】到这里，我觉得应该仔细看看归一化的逻辑了，MotionCLIP应该吃的是未经归一化的数据，你能解释一下所有的归一化逻辑么？看样子我们只归一化text style的这部分，这对么？前面的归一化你也要看一下
+                motion_seq_for_text[..., :3] = 0.0  # torch.Size([batch_size / 2, 196, 263])
+                motion_seq_for_text = motion_seq_for_text.unsqueeze(-1).permute(0, 2, 3, 1)  # 【QUESTION】torch.Size([64, 263, 1, 196]),依旧发现这里面有很多0和很多1，这正常么？需要debug一下吗
+                lengths_text = [lengths[i] for i, flag in enumerate(text_indices) if flag]  # len(): batch_size / 2
                 
-                self.motionclip.eval()
-                # 将提取出的 GT embedding 赋值给一个临时变量
-                gt_motion_emb_for_text = self.motionclip.encoder({
+                gt_motion_emb_for_text = self.motionclip_teacher.encoder({
                     'x': motion_seq_for_text,
                     'y': torch.zeros(motion_seq_for_text.shape[0], dtype=int, device=self.mld_device),
                     'mask': lengths_to_mask(lengths_text, device=self.mld_device)
-                })["mu"]
-                self.motionclip.train()
+                })["mu"]  # torch.Size([batch_size / 2, 512])
+                # i. [核心修复] 同样对 GT motion embedding 进行 Layer Normalization
+                normalized_gt_motion_emb = self.motion_emb_norm(gt_motion_emb_for_text)
             
             # 将用于对齐的两个 embedding 保存下来
             text_emb_for_align = text_features.squeeze(1) # (batch_size / 2, 512)
-            motion_emb_for_align = gt_motion_emb_for_text # (batch_size / 2, 512)
+            motion_emb_for_align = normalized_gt_motion_emb # (batch_size / 2, 512)
             
-        # print("\n--- Step 3: Final Check before _diffusion_process ---")
 
-        # 4. [核心] 打包所有条件
+        # 4. [核心] 打包所有条件，cond_emb：torch.Size([batch_size, 7, 256])，motion_style_cond：torch.Size([batch_size, 1, 512])， trans_cond：torch.Size([batch_size, 196, 3])
         multi_cond_emb = [cond_emb, motion_style_cond, trans_cond]
-        # 我们把你之前的检查站放在这里
-        # if torch.isnan(z).any(): raise RuntimeError("FATAL: NaN in 'z'")
-        # if torch.isnan(cond_emb).any(): raise RuntimeError("FATAL: NaN in 'cond_emb'")
-        # if torch.isnan(motion_style_cond).any(): raise RuntimeError("FATAL: NaN in 'motion_style_cond'")
-        # if torch.isnan(trans_cond).any(): raise RuntimeError("FATAL: NaN in 'trans_cond'")
-        # if torch.isnan(text_style_cond).any(): raise RuntimeError("FATAL: NaN in 'text_style_cond'")
-        # print("Step 3: All inputs to Denoiser are clean.")
-        # print("="*50 + "\n")
         
-        # 注意：我们将 text_style_cond 作为一个独立的参数传入，这与你之前的设计保持一致
         n_set = self._diffusion_process(z, multi_cond_emb, lengths, style_text_feature=text_style_cond) # 回顾：style_text_feature的shape是torch.Size([batch_size, 1, 512])
         # [核心修改] 将用于 align_loss 的张量加入返回字典
-        if text_emb_for_align is not None:
+        if text_emb_for_align is not None:  # torch.Size([batch_size/2, 512])
             n_set['text_style_emb'] = text_emb_for_align
-            n_set['motion_style_emb_for_text'] = motion_emb_for_align
+            n_set['motion_style_emb_for_text'] = motion_emb_for_align # torch.Size([batch_size/2, 512])
+        
+        # import os
+        # # 只在训练的第一次迭代时执行
+        # if self.global_step == 0:
+        #     print("\n[DEBUG] DUMPING TENSORS FOR THE FIRST BATCH...")
+            
+        #     # 准备保存路径
+        #     dump_dir = "debug_dumps"
+        #     os.makedirs(dump_dir, exist_ok=True)
+        #     dump_path = os.path.join(dump_dir, "tensors_first_batch.pt")
+
+        #     # 收集我们想检查的 tensors
+        #     tensors_to_dump = {
+        #         "motion_emb": motion_emb.detach().cpu(),
+        #         "gt_motion_emb_for_text": gt_motion_emb_for_text.detach().cpu(),
+        #         "text_features_for_denoiser": text_features.detach().cpu(), # 用于 denoiser 的
+        #         "text_emb_for_align": text_emb_for_align.detach().cpu(), # 用于 align_loss 的
+        #         "motion_seq_unnormalized": motion_seq.detach().cpu(),
+        #         "motion_seq_for_text_unnormalized": motion_seq_for_text.detach().cpu()
+        #     }
+            
+        #     # 保存到文件
+        #     torch.save(tensors_to_dump, dump_path)
+        #     print(f"[DEBUG] Tensors have been dumped to: {dump_path}")
+        #     print("[DEBUG] Exiting for analysis.")
+            
+        #     # 退出程序
+        #     exit()
+        
         return {**n_set}
-
-
 
 # 
 # evaluate the reconstruction in training time
@@ -861,31 +838,27 @@ class MLD(BaseModel):
         return rs_set
 
     def allsplit_step(self, split: str, batch, batch_idx):
-        # --- 第一部分：计算损失 ---
-        loss_val = None
         if split in ["train", "val"]:
             if self.stage == "diffusion":
                 rs_set = self.train_diffusion_forward(batch)
 
-            # ... (后续的 vae 和 loss 计算逻辑保持不变)
             elif self.stage == "vae":
                  rs_set = self.train_vae_forward(batch)
                  rs_set["lat_t"] = rs_set["lat_m"]
             else:
                 raise ValueError(f"Unsupported stage for loss calculation: {self.stage}!")
 
-            # --- [最终日志修复] ---
-            # 计算损失，并用 loss_val 变量接收
             total_loss, loss_dict = self.losses[split].update(rs_set)
             if loss_dict is None:
                 if self.trainer.sanity_checking and total_loss is None:
                     return None
                 raise ValueError("Loss dictionary is None from torchmetrics.")
-
-            # 记录日志，这个逻辑也保持你现有的不变
+            
             for key, value in loss_dict.items():
                 self.log(f"{split}/{key}_loss", value, prog_bar=(key == 'total'), on_step=(split == 'train'), on_epoch=True, batch_size=self.cfg.TRAIN.BATCH_SIZE)
 
+        # NOTE: 本来的用来评估的部分的代码，先注释掉，我们先把逻辑跑起来
+                
         # # Compute the metrics - currently evaluate results from text to motion
         # if split in ["val", "test"]:
         #     # 1. 从混合批次中，筛选出只属于 HumanML3D 的那部分数据
@@ -983,13 +956,7 @@ class MLD(BaseModel):
             #     else:
             #         raise TypeError(f"Not support this metric {metric}")
 
-        # return forward output rather than loss during test
         if split in ["test"]:
             return rs_set["joints_rst"], batch["length"]
-        # return loss
-        # 返回总损失给优化器
-        # if isinstance(loss_val, dict):
-        #     return loss_val['total']
         
-        # 如果 loss_val 是张量，直接返回它
         return total_loss

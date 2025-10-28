@@ -108,17 +108,6 @@ class TransEncoder(nn.Module):
 
         return dist
 
-
-
-
-
-
-
-
-
-
-
-
 # adaln-zero in dit
 
 def modulate(x, shift, scale):
@@ -137,60 +126,54 @@ class DiTBlock(nn.Module):
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
-        self.adaLN_modulation = nn.Sequential(
+        
+        # 理论上更合理的新设计：
+        # 通路1：motion_style 用于调制 Self-Attention (MSA)
+        self.adaLN_modulation_motion_style = nn.Sequential(
             nn.SiLU(),
             nn.Linear(hidden_size, 3 * hidden_size, bias=True)
         )
-        self.adaLN_modulation_trans = nn.Sequential(
+        # 通路2：text_style 也用于调制 Self-Attention (MSA)
+        self.adaLN_modulation_text_style = nn.Sequential(
             nn.SiLU(),
             nn.Linear(hidden_size, 3 * hidden_size, bias=True)
         )
-
-        # NEW: Add Cross-Attention and its corresponding LayerNorm
-        # self.norm_cross_attn = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6) # NEW:
-        # self.cross_attn = CrossAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs) # NEW:
-
-        # # NEW: Add a separate modulation pathway for the new text condition
-        self.adaLN_modulation_text = nn.Sequential( 
-            nn.SiLU(), # NEW:
-            nn.Linear(hidden_size, 3 * hidden_size, bias=True) 
-        ) 
-
-    # def forward(self, x, c, t): # x:torch.Size([32, 13, 256]) c：torch.Size([32, 256]) t：torch.Size([32, 256])
-    #     shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
-    #     shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1)
-    #     x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-    #     x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-    #     return x  # torch.Size([32, 13, 256])
+        # 通路3：trajectory 用于调制 MLP
+        self.adaLN_modulation_trajectory = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+        )
         
-    def forward(self, x, c_motion, c_traj, c_text=None):
-        # 核心思路：我们将三个条件 c_motion, c_traj, c_text 分别用于调制网络的不同部分，
-        # 并通过参数相加的方式，让 c_traj 和 c_text 共同影响 MLP 模块，实现多条件的融合引导。
-        
-        # 1. 动作风格条件 (c_motion) 调制自注意力 (Self-Attention) 模块
-        #    这个逻辑与原始 MCM-LDM 完全保持一致，确保了动作引导的稳定性。
-        shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c_motion).chunk(3, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        # 为了代码兼容性，我们将原来的变量名重命名，指向新的正确的模块
+        # 这样 MldDenoiser 类中的代码几乎不用改
+        self.adaLN_modulation = self.adaLN_modulation_motion_style
+        self.adaLN_modulation_text = self.adaLN_modulation_text_style
+        self.adaLN_modulation_trans = self.adaLN_modulation_trajectory
 
-        # 2. 轨迹条件 (c_traj) 生成其对 MLP 模块的调制参数
-        shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(c_traj).chunk(3, dim=1)
         
-        # 3. 文本风格条件 (c_text) 也生成其对 MLP 模块的调制参数
-        #    只有当 c_text 存在且不为零时，才进行计算和融合。
-        if c_text is not None:
-            # 使用 .sum() 来检查张量中是否有非零元素，比 torch.any() 更适合处理浮点数。
-            if c_text.sum() != 0:
-                # a. 通过我们新加的 adaLN_modulation_text 模块，计算文本条件的调制参数
-                shift_mlp_text, scale_mlp_text, gate_mlp_text = self.adaLN_modulation_text(c_text).chunk(3, dim=1)
-                
-                # b. [关键融合点] 将文本和轨迹的调制参数直接相加。
-                #    这使得 MLP 模块同时接收到来自两个引导源的指令，是一种高效且优雅的融合方式。
-                shift_mlp = shift_mlp + shift_mlp_text
-                scale_mlp = scale_mlp + scale_mlp_text
-                gate_mlp = gate_mlp + gate_mlp_text
+    def forward(self, x, c_motion, c_traj, c_text): # 移除 c_text=None 默认值，因为它总被提供
+        # 理论上更合理的新设计：
+        
+        # 1. 统一和融合风格条件 (motion_style 和 text_style) 来调制 Self-Attention (MSA)
+        # a. 分别计算两种风格的调制参数
+        shift_msa_motion, scale_msa_motion, gate_msa_motion = self.adaLN_modulation_motion_style(c_motion).chunk(3, dim=1)
+        shift_msa_text, scale_msa_text, gate_msa_text = self.adaLN_modulation_text_style(c_text).chunk(3, dim=1)
 
-        # 4. 应用最终的 (可能是融合后的) 调制参数到 MLP 模块
-        #    这个逻辑也与原始 MCM-LDM 完全一致。
+        # b. [优雅的融合] 直接相加。
+        #    这个设计的精妙之处在于，上游逻辑已经保证了：
+        #    - 对于 motion-guided 样本, c_motion 是有效信号, c_text 是从零向量派生的“噪声”信号。
+        #    - 对于 text-guided 样本, c_motion 是从零向量派生的“噪声”信号, c_text 是有效信号。
+        #    相加后，有效信号会主导，而“噪声”信号的影响可以被网络通过训练学会忽略。
+        #    这比在 forward 中用 if/else 分支更高效，对 GPU 更友好。
+        shift_msa_final = shift_msa_motion + shift_msa_text
+        scale_msa_final = scale_msa_motion + scale_msa_text
+        gate_msa_final = gate_msa_motion + gate_msa_text
+        
+        # c. 应用最终的、被统一风格信号调制的 Self-Attention
+        x = x + gate_msa_final.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa_final, scale_msa_final))
+
+        # 2. 轨迹条件 (c_traj) 保持不变，继续调制 MLP 模块
+        shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trajectory(c_traj).chunk(3, dim=1)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         
         return x
@@ -231,10 +214,6 @@ class MldDenoiser(nn.Module):
         self.arch = arch
         self.motion_encoded_dim = motion_encoded_dim
 
-
-
-
-
         # emb proj
 
         # text condition
@@ -250,20 +229,16 @@ class MldDenoiser(nn.Module):
             nn.ReLU(), nn.Linear(motion_encoded_dim, self.latent_dim))
 
         # NEW: Add a projection layer for the text style feature
-        self.text_style_proj = nn.Sequential( # NEW:
-            nn.ReLU(), # NEW:
-            nn.Linear(text_style_dim, self.latent_dim) # NEW:
-        ) # NEW:
-
-
+        self.text_style_proj = nn.Sequential( 
+            nn.ReLU(), 
+            nn.Linear(text_style_dim, self.latent_dim) 
+        ) 
 
         self.query_pos = build_position_encoding(
                 self.latent_dim, position_embedding=position_embedding)
             
         self.mem_pos = build_position_encoding(
                 self.latent_dim, position_embedding=position_embedding)
-
-
 
         # DIT
         self.blocks = nn.ModuleList([
@@ -329,7 +304,7 @@ class MldDenoiser(nn.Module):
         style_emb_latent = time_emb + style_emb_latent  # torch.Size([1, 32, 256])
         style_emb_latent = style_emb_latent.squeeze()  # torch.Size([32, 256])
 
-        # trajectory encoder
+        # trajectory encoder  本来的，但是发现在train的过程中可能会梯度爆炸，所以加了一步LN
         # trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
         # [修改后]
         # a. 先对轨迹条件进行 Layer Normalization
@@ -340,12 +315,12 @@ class MldDenoiser(nn.Module):
         trans_emb = trans_emb.squeeze()  # torch.Size([32, 256])
 
         # --- NEW: Text Style Path ---
-        text_emb_latent = None # NEW:
-        if style_text_feature is not None: # NEW:
+        text_emb_latent = None 
+        if style_text_feature is not None: 
             # Project text feature to the latent dimension
             text_emb_latent = self.text_style_proj(style_text_feature.permute(1, 0, 2)) # Input (B, 1, 512) -> (1, B, 512)
             # Add time embedding, same as other conditions
-            text_emb_latent = time_emb + text_emb_latent # NEW:
+            text_emb_latent = time_emb + text_emb_latent 
             text_emb_latent = text_emb_latent.squeeze(0) # Squeeze to (B, D)
         
         # to dit blocks (N, T, D)

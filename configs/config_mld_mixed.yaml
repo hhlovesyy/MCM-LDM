@@ -163,7 +163,7 @@ TEST:
   CHECKPOINTS: '' # 微调后，将这里指向你最好的新 checkpoint
   DATASETS: ['humanml3d']
   SPLIT: test
-  BATCH_SIZE: 32
+  BATCH_SIZE: 128
 
 #####################################
 # The following are demo settings
@@ -173,7 +173,7 @@ TEST:
 #####################################
 DEMO:
   # [关键] 指定你要测试的、训练好的 checkpoint 文件！
-  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1028/checkpoints/epoch=159.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
+  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1028/checkpoints/epoch=99.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
 
   # --- 模式一：文本引导 ---
   # [关键] 如果要使用文本引导，请在这里填入文本。
@@ -181,7 +181,7 @@ DEMO:
   # STYLE_TEXT: "Arms out to side for balance - tilting side to side"
   # STYLE_TEXT: "reach his left arm very high."
   # STYLE_TEXT: "" 
-  STYLE_TEXT: "chicken"
+  STYLE_TEXT: "shieldedLeft"
 
   # --- 模式二：动作引导 ---
   # 仅在 STYLE_TEXT 为空时生效
