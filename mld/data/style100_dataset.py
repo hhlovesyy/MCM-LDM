@@ -187,11 +187,23 @@ class Style100Dataset(data.Dataset):
         motion, m_length = data["motion"], data["length"]  # motion：(176, 263)， length：176， 特征维度：263
 
         style_name = data["style_name"].lower()  # 'whirlarms'
-        # --- 直接从映射中获取纯粹的风格描述,这是因为100Style本来动作的text文本部分包含content，我们需要纯粹的style ---
-        # ---【QUESTION】是否需要扩充style的风格描述？比如显式把Style的类型也放进去，这样让模型学的更快？能学的更好吗？
-        style_name_key = style_name.lower().replace(" ", "")
-        final_caption = self.style_to_desc.get(style_name_key)  # 'Windmill arms'，这个风格太短了，不一定靠谱，这能让网络学到东西么？
+        # # --- 直接从映射中获取纯粹的风格描述,这是因为100Style本来动作的text文本部分包含content，我们需要纯粹的style ---
+        # # ---【QUESTION】是否需要扩充style的风格描述？比如显式把Style的类型也放进去，这样让模型学的更快？能学的更好吗？
+        # style_name_key = style_name.lower().replace(" ", "")
+        # final_caption = self.style_to_desc.get(style_name_key)  # 'Windmill arms'，这个风格太短了，不一定靠谱，这能让网络学到东西么？
+        # --- [B 计划修改] 实现模板化提示 ---
 
+        style_name_key = style_name.lower().replace(" ", "")
+        description = self.style_to_desc.get(style_name_key)
+
+        if description is None:
+            # 如果找不到描述，提供一个简单的回退
+            logger.warning(f"Pure style description for '{style_name_key}' not found.")
+            final_caption = f"a motion in {style_name} style"
+        else:
+            # 使用我们最终确认的模板
+            final_caption = f"a motion in {style_name} style: {description}"
+            
         # [健壮性检查] 如果在 csv 中找不到对应的风格，提供一个回退方案
         if final_caption is None:
             logger.warning(f"Pure style description for '{style_name_key}' not found. Falling back to simple style name.")

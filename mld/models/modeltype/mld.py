@@ -40,8 +40,24 @@ from datasets.utils.common.quaternion import *
 from datasets.utils.paramUtil import *
 # import evaluate.utils.rotation_conversions as geometry
 
+import torch.nn as nn
 
+class TextAdapter(nn.Module):
+    def __init__(self, input_dim=512, output_dim=512, hidden_dim=512, num_layers=3):
+        super().__init__()
+        layers = [
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU()
+        ]
+        # 允许构建更深的 MLP
+        for _ in range(num_layers - 2):
+            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.GELU()])
+        layers.append(nn.Linear(hidden_dim, output_dim))
+        
+        self.mlp = nn.Sequential(*layers)
 
+    def forward(self, x):
+        return self.mlp(x)
 
 
 from .base import BaseModel
@@ -146,6 +162,9 @@ class MLD(BaseModel):
         self.do_classifier_free_guidance = True
         self.feats2joints = datamodule.feats2joints
         self.joints2feats = datamodule.joints2feats
+
+        self.text_adapter = TextAdapter(input_dim=512, output_dim=512, num_layers=3).to(self.mld_device)
+        print("INFO: [B-Plan] TextAdapter (MLP Mapping Network) has been added.")
     
     def configure_optimizers(self):
         # 核心思路：这是 PyTorch Lightning 配置优化器的标准方法。
@@ -173,6 +192,7 @@ class MLD(BaseModel):
             param_groups = [
                 {'params': denoiser_base_params, 'lr': lr_base, 'name': 'denoiser_base'},
                 {'params': denoiser_new_params, 'lr': lr_new, 'name': 'denoiser_new'},
+                {'params': self.text_adapter.parameters(), 'lr': lr_new, 'name': 'text_adapter'},
                 {'params': filter(lambda p: p.requires_grad, self.clip_model.parameters()), 'lr': lr_finetune_clip, 'name': 'clip_finetune'},
                 {'params': filter(lambda p: p.requires_grad, self.motionclip.parameters()), 'lr': lr_finetune_motionclip, 'name': 'motionclip_finetune'}
             ]
@@ -312,8 +332,10 @@ class MLD(BaseModel):
             with torch.no_grad():
                 text_tokens = clip.tokenize(texts).to(self.mld_device)
                 with torch.cuda.amp.autocast(enabled=False):
-                    text_features = self.clip_model.encode_text(text_tokens).float()
-            
+                    raw_clip_features = self.clip_model.encode_text(text_tokens).float()
+                adapted_features = self.text_adapter(raw_clip_features)
+                text_features = adapted_features
+                
             uncond_text_features = torch.zeros_like(text_features)
             text_style_cond = torch.cat([uncond_text_features, text_features], dim=0).unsqueeze(1)
 
@@ -607,10 +629,11 @@ class MLD(BaseModel):
             # b. 编码文本，得到干净的 embedding
             text_tokens = clip.tokenize(texts).to(self.mld_device)
             with torch.cuda.amp.autocast(enabled=False):
-                text_features = self.clip_model.encode_text(text_tokens).float().unsqueeze(1)
+                raw_clip_features = self.clip_model.encode_text(text_tokens).float()
 
             # c. 在应用 dropout 之前，先用干净的 embedding 准备 align_loss 的数据
-            text_emb_for_align = text_features.squeeze(1).clone()
+            adapted_features = self.text_adapter(raw_clip_features)
+            text_features = adapted_features.unsqueeze(1)
             
             # d. 现在，对 text_features 应用 dropout，用于 denoiser 条件
             mask_uncond = torch.rand(text_features.shape[0], device=self.mld_device) < self.guidance_uncodp
