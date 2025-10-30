@@ -41,6 +41,7 @@ from datasets.utils.paramUtil import *
 # import evaluate.utils.rotation_conversions as geometry
 
 import torch.nn as nn
+from peft import get_peft_model, LoraConfig, TaskType
 
 class TextAdapter(nn.Module):
     def __init__(self, input_dim=512, output_dim=512, hidden_dim=512, num_layers=3):
@@ -116,11 +117,56 @@ class MLD(BaseModel):
         print("INFO: [C-Plan] Frozen 'motionclip_teacher' initialized.")
 
 
-        # NOTE: 加载并冻结 CLIP 文本编码器，目前我们冻结CLIP，后面可以考虑解冻，因为CLIP是文本图像域对齐做的，而我们是”动作“的风格描述，CLIP模型可能理解里本身不够
+        # # NOTE: 加载并冻结 CLIP 文本编码器，目前我们冻结CLIP，后面可以考虑解冻，因为CLIP是文本图像域对齐做的，而我们是”动作“的风格描述，CLIP模型可能理解里本身不够
+        # self.clip_model, _ = clip.load("ViT-B/32", device=self.mld_device)
+        # self.clip_model.eval()
+        # for name, p in self.clip_model.named_parameters():
+        #     p.requires_grad = False
+
+        # 接LoRA
+        # ===> START: 替换代码 <===
         self.clip_model, _ = clip.load("ViT-B/32", device=self.mld_device)
+        # # b. [临时诊断代码] 打印出模型的结构，然后退出
+        # print("\n--- CLIP Model Structure ---")
+        # print(self.clip_model)
+        # print("----------------------------\n")
+        # print("[DEBUG] Exiting after printing model structure.")
+        # exit()
+
+        # [核心修改] 使用 PEFT (LoRA) 来微调 CLIP 的文本编码器
+
+        # a. 首先，冻结 CLIP 的所有参数。这是 LoRA 的前提。
+        for param in self.clip_model.parameters():
+            param.requires_grad = False
+            
+        # b. 定义 LoRA 配置
+        #    TaskType.FEATURE_EXTRACTION 表示我们只用它来提取特征
+        #    target_modules 指定了我们要在哪种类型的层上应用 LoRA。
+        #    对于 CLIP 的 Transformer，q_proj 和 v_proj 是最常见的选择。
+        lora_config = LoraConfig(
+            r=16, # LoRA 的秩，r 越大，可训练参数越多，能力越强，但越容易过拟合。8 或 16 是常用值。
+            lora_alpha=16, # LoRA 的缩放因子
+            # target_modules=["q_proj", "v_proj"], # 只在 attention 的 q 和 v 投影层上加 LoRA
+            # [核心修复] 将目标模块指向 MLP 内部的线性层,因为attention模块一般是黑箱，peft检索不到，而MLP模块是明确的
+            target_modules=["c_fc", "c_proj"],
+            lora_dropout=0.1,
+            bias="none",
+            task_type=TaskType.FEATURE_EXTRACTION,
+        )
+
+        # c. 将 LoRA 配置应用到 CLIP 模型上
+        #    get_peft_model 会自动找到所有 target_modules 并为它们加上 LoRA 层
+        self.clip_model = get_peft_model(self.clip_model, lora_config)
+
+        # d. 打印出可训练的参数，以确认 LoRA 是否成功应用
+        print("\n--- LoRA Applied to CLIP Model ---")
+        self.clip_model.print_trainable_parameters()
+        print("---------------------------------\n")
+
+        # 我们依然需要将模型设置为 eval() 模式，以关闭 Dropout 等层。
+        # LoRA 的训练不受 model.eval() 的影响。
         self.clip_model.eval()
-        for name, p in self.clip_model.named_parameters():
-            p.requires_grad = False
+        # ===> END: 替换代码 <===
 
         # 验证一下 ln_final 是否被冻结
         print(f"CLIP's ln_final.weight.requires_grad: {self.clip_model.ln_final.weight.requires_grad}") # 应该输出 False
@@ -187,11 +233,14 @@ class MLD(BaseModel):
             lr_finetune = self.cfg.TRAIN.OPTIM.get('LR_FINETUNE', lr_base * 0.1)
             lr_finetune_clip = lr_base * 0.01
             lr_finetune_motionclip = lr_base * 0.1
+            # peft 库在将 LoRA 应用到 clip_model 后，会自动将 CLIP 的原始参数的 requires_grad 属性设置为 False，而只将新增的 LoRA 参数的 requires_grad 保持为 True。
+            clip_trainable_params = list(filter(lambda p: p.requires_grad, self.clip_model.parameters()))
             param_groups = [
                 {'params': denoiser_base_params, 'lr': lr_base, 'name': 'denoiser_base'},
                 {'params': denoiser_new_params, 'lr': lr_new, 'name': 'denoiser_new'},
                 {'params': self.text_adapter.parameters(), 'lr': lr_new, 'name': 'text_adapter'},
-                {'params': filter(lambda p: p.requires_grad, self.clip_model.parameters()), 'lr': lr_finetune_clip, 'name': 'clip_finetune'},
+                {'params': clip_trainable_params, 'lr': lr_finetune_clip, 'name': 'clip_lora'},
+                # {'params': filter(lambda p: p.requires_grad, self.clip_model.parameters()), 'lr': lr_finetune_clip, 'name': 'clip_finetune'},
                 {'params': filter(lambda p: p.requires_grad, self.motionclip.parameters()), 'lr': lr_finetune_motionclip, 'name': 'motionclip_finetune'}
             ]
 

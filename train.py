@@ -14,6 +14,8 @@ from mld.data.get_data import get_datasets
 from mld.models.get_model import get_model
 from mld.utils.logger import create_logger
 
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+
 
 def main():
     # parse options
@@ -117,23 +119,66 @@ def main():
         "gt_Accuracy": "Metrics/gt_accuracy",
     }
 
-    # callbacks
-    callbacks = [
-        pl.callbacks.RichProgressBar(),
-        ProgressLogger(metric_monitor=metric_monitor),
-        # ModelCheckpoint(dirpath=os.path.join(cfg.FOLDER_EXP,'checkpoints'),filename='latest-{epoch}',every_n_epochs=1,save_top_k=1,save_last=True,save_on_train_epoch_end=True),
-        ModelCheckpoint(
-            dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
-            filename="{epoch}",
-            monitor="step",
-            mode="max",
-            every_n_epochs=cfg.LOGGER.SACE_CHECKPOINT_EPOCH,
-            save_top_k=-1,
-            save_last=False,
-            save_on_train_epoch_end=True,
-        ),
-    ]
-    logger.info("Callbacks initialized")
+    # # callbacks
+    # callbacks = [
+    #     pl.callbacks.RichProgressBar(),
+    #     ProgressLogger(metric_monitor=metric_monitor),
+    #     # ModelCheckpoint(dirpath=os.path.join(cfg.FOLDER_EXP,'checkpoints'),filename='latest-{epoch}',every_n_epochs=1,save_top_k=1,save_last=True,save_on_train_epoch_end=True),
+    #     ModelCheckpoint(
+    #         dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
+    #         filename="{epoch}",
+    #         monitor="step",
+    #         mode="max",
+    #         every_n_epochs=cfg.LOGGER.SACE_CHECKPOINT_EPOCH,
+    #         save_top_k=-1,
+    #         save_last=False,
+    #         save_on_train_epoch_end=True,
+    #     ),
+    #     EarlyStopping(
+    #         monitor="val/total_loss", # [核心] 监控的指标
+    #         mode="min", # 希望它越小越好
+    #         patience=30, # [关键参数] 如果连续 30 个 epoch 损失都没有创新低，就停止
+    #         min_delta=0.001, # 认为损失下降了至少 0.001 才算是“有效下降”
+    #         verbose=True # 打印出早停的信息
+    #     )
+    # ]
+    # logger.info("Callbacks initialized")
+
+    callbacks = []
+
+    # 1. 添加您喜欢的进度条 (这个很好，可以保留)
+    callbacks.append(pl.callbacks.RichProgressBar())
+    
+    # 2. ProgressLogger (如果这是您自定义的日志记录器，可以保留)
+    #    请确保 metric_monitor 与我们新的监控指标一致
+    if metric_monitor: # 假设 metric_monitor 是一个外部变量
+        callbacks.append(ProgressLogger(metric_monitor=metric_monitor))
+
+    # 3. [核心] 配置我们需要的 ModelCheckpoint
+    #    这个配置会自动为我们找到并保存最好的模型
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
+        filename="best-{epoch}-{val/total_loss:.2f}", # 文件名包含 epoch 和 loss，方便识别
+        monitor="val/total_loss", # 监控我们最关心的指标
+        mode="min",               # 越小越好
+        save_top_k=1,             # 只保存最好的那 1 个
+        save_last=True,           # 同时保存 last.ckpt 以便断点续训
+        every_n_epochs=1          # 每个 epoch 都检查一次
+    )
+    callbacks.append(checkpoint_callback)
+
+    # 4. [核心] 配置 EarlyStopping
+    #    这个配置会在模型不再进步时停止训练，节省时间和资源
+    early_stopping_callback = EarlyStopping(
+        monitor="val/total_loss",
+        mode="min",
+        patience=30, # 如果连续30个epoch都没有进步，就停止
+        min_delta=0.0005, # 认为进步至少要这么多才算数
+        verbose=True
+    )
+    callbacks.append(early_stopping_callback)
+    
+    logger.info("Callbacks initialized with RichProgressBar, ModelCheckpoint (best model), and EarlyStopping.")
 
     if len(cfg.DEVICE) > 1:
         # ddp_strategy = DDPStrategy(find_unused_parameters=False)
@@ -151,7 +196,7 @@ def main():
         # move_metrics_to_cpu=True,
         default_root_dir=cfg.FOLDER_EXP,
         # log_every_n_steps=cfg.LOGGER.VAL_EVERY_STEPS,
-        log_every_n_steps=50,
+        log_every_n_steps=30,
         deterministic=False,
         detect_anomaly=True,
         enable_progress_bar=True,

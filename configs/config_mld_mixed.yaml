@@ -7,7 +7,7 @@
 ####################################
 
 # 实验名称，会用作输出文件夹的名字
-NAME: DualMode_MLD_Finetune_v1_1028
+NAME: DualMode_MLD_Finetune_v1_1030
 # Debug 模式，设为 True 时会使用极少量数据，方便快速测试流程
 DEBUG: False
 # 加速器类型: 'gpu' 或 'cpu'
@@ -26,9 +26,9 @@ TRAIN:
   # 数据加载器的工作线程数
   NUM_WORKERS: 8
   # 训练批次大小
-  BATCH_SIZE: 128
+  BATCH_SIZE: 256
   # 微调的总轮数
-  END_EPOCH: 200
+  END_EPOCH: 350
 
   # [核心] 指向你下载的、原始的 MCM-LDM Denoiser 预训练权重
   # 这是我们微调的起点
@@ -62,7 +62,7 @@ EVAL:
   # DATASETS: ['humanml3d']
   DATASETS: ['mixed']
   # 验证批次大小
-  BATCH_SIZE: 128
+  BATCH_SIZE: 256
   SPLIT: val # 固定为 'val'
 
 #####################################
@@ -80,7 +80,7 @@ DATASET:
   # [核心] 混合数据集的配置
   MIXED:
     # 比例: [HumanML3D, 100Style]。加起来最好等于 BATCH_SIZE
-    BATCH_RATIO: [64, 64] 
+    BATCH_RATIO: [128, 128] 
     # BATCH_RATIO: [2, 2]
 
   # [核心] HumanML3D 数据集的配置
@@ -163,7 +163,7 @@ TEST:
   CHECKPOINTS: '' # 微调后，将这里指向你最好的新 checkpoint
   DATASETS: ['humanml3d']
   SPLIT: test
-  BATCH_SIZE: 128
+  BATCH_SIZE: 256
 
 #####################################
 # The following are demo settings
@@ -173,7 +173,7 @@ TEST:
 #####################################
 DEMO:
   # [关键] 指定你要测试的、训练好的 checkpoint 文件！
-  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1028/checkpoints/epoch=99.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
+  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1030/checkpoints/last.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
 
   # --- 模式一：文本引导 ---
   # [关键] 如果要使用文本引导，请在这里填入文本。
@@ -181,7 +181,7 @@ DEMO:
   # STYLE_TEXT: "Arms out to side for balance - tilting side to side"
   # STYLE_TEXT: "reach his left arm very high."
   # STYLE_TEXT: "" 
-  STYLE_TEXT: "shieldedLeft"
+  STYLE_TEXT: "like a bird"
 
   # --- 模式二：动作引导 ---
   # 仅在 STYLE_TEXT 为空时生效

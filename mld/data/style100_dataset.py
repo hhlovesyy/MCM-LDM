@@ -187,30 +187,37 @@ class Style100Dataset(data.Dataset):
         motion, m_length = data["motion"], data["length"]  # motion：(176, 263)， length：176， 特征维度：263
 
         style_name = data["style_name"].lower()  # 'whirlarms'
-        # # --- 直接从映射中获取纯粹的风格描述,这是因为100Style本来动作的text文本部分包含content，我们需要纯粹的style ---
-        # # ---【QUESTION】是否需要扩充style的风格描述？比如显式把Style的类型也放进去，这样让模型学的更快？能学的更好吗？
-        # style_name_key = style_name.lower().replace(" ", "")
-        # final_caption = self.style_to_desc.get(style_name_key)  # 'Windmill arms'，这个风格太短了，不一定靠谱，这能让网络学到东西么？
-        # --- [B 计划修改] 实现模板化提示 ---
-
-        style_name_key = style_name.lower().replace(" ", "")
-        description = self.style_to_desc.get(style_name_key)
-
-        if description is None:
-            # 如果找不到描述，提供一个简单的回退
-            logger.warning(f"Pure style description for '{style_name_key}' not found.")
-            final_caption = f"a motion in {style_name} style"
-        else:
-            # 使用我们最终确认的模板
-            final_caption = f"a motion in {style_name} style: {description}"
-            
-        # [健壮性检查] 如果在 csv 中找不到对应的风格，提供一个回退方案
-        if final_caption is None:
-            logger.warning(f"Pure style description for '{style_name_key}' not found. Falling back to simple style name.")
-            final_caption = f"in a {style_name} style"
+        # --- 2. [核心修改] 文本提示增强 (Text Prompt Augmentation) ---
+    
+        # a. 定义一组句子模板。花括号 {} 将是风格词的占位符。
+        #    这些模板的多样性，将迫使 CLIP 去理解句子结构，而不是死记硬背单词。
+        # prompt_templates = [
+        #     'a movement in the style of {}',
+        #     'a motion with the quality of {}',
+        #     'an action performed in a {} manner',
+        #     'the style of the action is {}',
+        #     'the character of the motion is {}',
+        #     'a {} style of movement',
+        #     'style: {}',
+        #     '{}'  # 永远保留最纯粹的风格词作为“基础题”
+        # ]
         
-        final_caption = style_name  # 先简化为仅风格名称，后续再考虑复杂描述的效果如何
-        # if item < 5:  # 仅打印前5个样本以避免日志过多
+        # # b. 从模板列表中随机选择一个
+        # chosen_template = random.choice(prompt_templates)
+        
+        # # c. 将风格词填充到模板中，生成最终的文本提示
+        # final_caption = chosen_template.format(style_name)
+
+        # 先用最简单的看看模型能不能学会
+        prompt_templates = [
+            '{}', # 50% 的概率是纯单词
+            'a {} style', # 25% 的概率
+            'style of {}' # 25% 的概率
+        ]
+        chosen_template = random.choices(prompt_templates, weights=[0.5, 0.25, 0.25], k=1)[0]
+        final_caption = chosen_template.format(style_name)
+
+        # if item < 2:  # 仅打印前5个样本以避免日志过多
         #     print(f"[Debug] Sample {name}: Using caption: '{final_caption}'")
         
         # [简化] 我们不再需要为 glove 构建复杂的 tokens
