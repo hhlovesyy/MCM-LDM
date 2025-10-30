@@ -173,7 +173,7 @@ TEST:
 #####################################
 DEMO:
   # [关键] 指定你要测试的、训练好的 checkpoint 文件！
-  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1030/checkpoints/last.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
+  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1030/checkpoints/best-epoch=150-val/total_loss=4.59.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
 
   # --- 模式一：文本引导 ---
   # [关键] 如果要使用文本引导，请在这里填入文本。
@@ -181,7 +181,7 @@ DEMO:
   # STYLE_TEXT: "Arms out to side for balance - tilting side to side"
   # STYLE_TEXT: "reach his left arm very high."
   # STYLE_TEXT: "" 
-  STYLE_TEXT: "like a bird"
+  STYLE_TEXT: "normal motion with the upper body tilted to the right"
 
   # --- 模式二：动作引导 ---
   # 仅在 STYLE_TEXT 为空时生效

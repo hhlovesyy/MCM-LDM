@@ -5,6 +5,8 @@ import random
 from os.path import join as pjoin
 import logging
 import csv
+import os
+import json
 
 # 初始化日志记录器
 logger = logging.getLogger(__name__)
@@ -45,9 +47,9 @@ class Style100Dataset(data.Dataset):
         self.max_motion_length = max_motion_length  # 196
         self.min_motion_length = min_motion_length  # 40
         self.max_text_len = max_text_len  # 20
-        self.unit_length = unit_length  # 4,【QUESTION】这是什么？self.max_text_len和self.unit_length在我们的100Style数据集里有用么？本来是什么
+        self.unit_length = unit_length  # 4,
         self.mean = mean
-        self.std = std  # 【QUESTION】这两个目前都是使用HumanML3D的mean和std，这是否make sense？因为目前MCM-LDM是认识100Style的style motion做风格迁移的，所以是不是用humanML3D的mean和std做归一化也可以？这样也比较方便，请你再次仔细评估。
+        self.std = std  # 
 
         # --- [逻辑解读] 风格字典加载 ---
         # 从 style_dict.txt 加载文件 ID 到风格名称的映射。
@@ -175,6 +177,46 @@ class Style100Dataset(data.Dataset):
         logger.info(f"Pass Rate: {pass_rate:.2f}%")
         logger.info(f"Details of passed samples have been dumped to: {dump_file_path}")  # Pass Rate: 92.44%
         logger.info("-----------------------------------------------------")
+
+        # 1. 加载 GPT 扩写的风格描述
+        self.gpt_descriptions = {}
+        # [硬编码路径]
+        descriptions_path = "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/100StyleDataset/style_description.json"
+        
+        if os.path.exists(descriptions_path):
+            with open(descriptions_path, 'r') as f:
+                # 将 json 的 key 转为小写，以匹配我们的 style_name
+                self.gpt_descriptions = {k.lower(): v for k, v in json.load(f).items()}
+            logger.info(f"成功加载了 {len(self.gpt_descriptions)} 种风格的扩写描述。")
+        else:
+            logger.warning(f"扩写的风格描述文件未找到: {descriptions_path}. 将只使用基础模板。")
+            
+        # 2. 剔除已知的“烂完了”的风格样本
+        styles_to_exclude = [
+            "whirlarms",
+            "widelegs",
+            "wigglehips",
+            "wildarms",
+            "wildlegs",
+            "zombie"
+        ]
+        # 将风格名统一为小写，去除空格，以便比较
+        styles_to_exclude = [s.lower().replace(" ", "") for s in styles_to_exclude]
+        
+        logger.info(f"将要剔除以下风格的样本: {styles_to_exclude}")
+        initial_sample_count = len(self.name_list)
+        
+        new_name_list = []
+        for name in self.name_list:
+            # self.id_to_style[name] 存储的是原始的大小写混合的风格名
+            # 我们需要将其处理成与 styles_to_exclude 中格式一致的 key
+            style_key = self.id_to_style[name].lower().replace(" ", "")
+            if style_key not in styles_to_exclude:
+                new_name_list.append(name)
+                
+        self.name_list = new_name_list
+        final_sample_count = len(self.name_list)
+        logger.info(f"样本剔除完成。原始样本数: {initial_sample_count}, 剔除后剩余: {final_sample_count}")
         self.nfeats = self.data_dict[self.name_list[0]]['motion'].shape[1]  
     
     def __len__(self):
@@ -187,38 +229,25 @@ class Style100Dataset(data.Dataset):
         motion, m_length = data["motion"], data["length"]  # motion：(176, 263)， length：176， 特征维度：263
 
         style_name = data["style_name"].lower()  # 'whirlarms'
-        # --- 2. [核心修改] 文本提示增强 (Text Prompt Augmentation) ---
-    
-        # a. 定义一组句子模板。花括号 {} 将是风格词的占位符。
-        #    这些模板的多样性，将迫使 CLIP 去理解句子结构，而不是死记硬背单词。
-        # prompt_templates = [
-        #     'a movement in the style of {}',
-        #     'a motion with the quality of {}',
-        #     'an action performed in a {} manner',
-        #     'the style of the action is {}',
-        #     'the character of the motion is {}',
-        #     'a {} style of movement',
-        #     'style: {}',
-        #     '{}'  # 永远保留最纯粹的风格词作为“基础题”
-        # ]
-        
-        # # b. 从模板列表中随机选择一个
-        # chosen_template = random.choice(prompt_templates)
-        
-        # # c. 将风格词填充到模板中，生成最终的文本提示
-        # final_caption = chosen_template.format(style_name)
+        final_caption = ""
+        # 50% 的概率做“变式题”（如果存在扩写描述）
+        if random.random() < 0.5 and style_name in self.gpt_descriptions and self.gpt_descriptions[style_name]:
+            # 从该风格的扩写描述列表中随机选择一句
+            final_caption = random.choice(self.gpt_descriptions[style_name])
+        else:
+            # 50% 的概率做“基础题”，或当找不到扩写描述时回退
+            # 我们使用之前确认过的“精简版”模板
+            prompt_templates = [
+                '{}', # 纯单词
+                'a {} style',
+                'style of {}'
+            ]
+            # 这里用 choices 带权重更严谨，但 random.choice 也足够简单有效
+            chosen_template = random.choice(prompt_templates)
+            final_caption = chosen_template.format(style_name)
 
-        # 先用最简单的看看模型能不能学会
-        prompt_templates = [
-            '{}', # 50% 的概率是纯单词
-            'a {} style', # 25% 的概率
-            'style of {}' # 25% 的概率
-        ]
-        chosen_template = random.choices(prompt_templates, weights=[0.5, 0.25, 0.25], k=1)[0]
-        final_caption = chosen_template.format(style_name)
-
-        # if item < 2:  # 仅打印前5个样本以避免日志过多
-        #     print(f"[Debug] Sample {name}: Using caption: '{final_caption}'")
+        if item < 5:  # 仅打印前5个样本以避免日志过多
+            print(f"[Debug] Sample {name}: Using caption: '{final_caption}'")
         
         # [简化] 我们不再需要为 glove 构建复杂的 tokens
         tokens = ["unk/OTHER"] * (self.max_text_len + 2)
@@ -248,7 +277,7 @@ class Style100Dataset(data.Dataset):
         return {
             "word_embeddings": word_embeddings,  # (22, 300)：zero
             "pos_one_hots": pos_one_hots,  # shape:(22, 15)： zero
-            "caption": final_caption,  # 'Windmill arms'，【Question】这玩意让一个只会文/图对齐的clip来生成word embedding，是不是太难了，cross attention能很好的注意么？
+            "caption": final_caption,  # 'Windmill arms'，
             "sent_len": sent_len,  # 0
             "motion": motion,  # (176, 263)
             "m_length": m_length_cropped,  # 176
