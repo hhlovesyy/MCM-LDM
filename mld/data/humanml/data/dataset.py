@@ -1686,6 +1686,7 @@ class Text2MotionDatasetV2(data.Dataset):
             "motion": motion,
             "m_length": m_length,
             "tokens": "_".join(tokens),
+            "style_id": -1,
             "source": "humanml3d"  # <--- [新增] 来源标识
         }
         # return caption, motion, m_length

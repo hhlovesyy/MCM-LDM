@@ -642,9 +642,10 @@ class MLD(BaseModel):
             adapted_features = self.text_adapter(raw_clip_features)  # torch.Size([batch_size / 2, 512])
             # d. [核心修复] 对其进行 Layer Normalization，强制将其尺度拉到标准范围
             normalized_text_emb = self.text_emb_norm(adapted_features)
-        
+            text_emb_for_align = normalized_text_emb # 用于 align_loss 的应该是【没有】经过 dropout 的干净 embedding ---
+
             text_features = normalized_text_emb.unsqueeze(1)  # torch.Size([64, 1, 512])
-            # #【QUESTION】debug了一下，text_features和前面的motion_emb尺度有点不同，这个会有影响么？要不要debug出来看看
+
             # d. 现在，对 text_features 应用 dropout，用于 denoiser 条件
             mask_uncond = torch.rand(text_features.shape[0], device=self.mld_device) < self.guidance_uncodp  # 基本都是False，偶尔有的是True
             text_features[mask_uncond, ...] = 0
@@ -668,7 +669,7 @@ class MLD(BaseModel):
                 normalized_gt_motion_emb = self.motion_emb_norm(gt_motion_emb_for_text)
             
             # 将用于对齐的两个 embedding 保存下来
-            text_emb_for_align = text_features.squeeze(1) # (batch_size / 2, 512)
+            # text_emb_for_align = text_features.squeeze(1) # (batch_size / 2, 512), 前面计算过了
             motion_emb_for_align = normalized_gt_motion_emb # (batch_size / 2, 512)
             
 
@@ -680,7 +681,14 @@ class MLD(BaseModel):
         if text_emb_for_align is not None:  # torch.Size([batch_size/2, 512])
             n_set['text_style_emb'] = text_emb_for_align
             n_set['motion_style_emb_for_text'] = motion_emb_for_align # torch.Size([batch_size/2, 512])
-        
+            # 1. 确保 style_id 是一个与 text_indices 在同一设备上的 Tensor
+            style_ids_tensor = torch.tensor(batch['style_id'], device=text_indices.device, dtype=torch.long)  # 前batch/2都是-1，后面batch/2是0,1,2,...
+            
+            # 2. 现在，使用布尔掩码进行索引是完全安全的
+            style_ids = style_ids_tensor[text_indices]  # torch.Size([batchsize / 2])
+
+            # 3. 将筛选出的 style_ids 添加到 n_set 字典中
+            n_set['style_ids'] = style_ids
         # import os
         # # 只在训练的第一次迭代时执行
         # if self.global_step == 0:

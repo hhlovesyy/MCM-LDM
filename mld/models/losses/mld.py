@@ -109,8 +109,7 @@ class MLDLosses(Metric):
 
     def update(self, rs_set):
         total: float = 0.0
-        diffusion_loss = torch.tensor(0.0, device=self.device)
-        # Compute the losses
+        
         # Compute instance loss
         if self.stage in ["vae", "vae_diffusion"]:
             total += self._update_loss("recons_feature", rs_set['m_rst'],
@@ -120,42 +119,75 @@ class MLDLosses(Metric):
             total += self._update_loss("kl_motion", rs_set['dist_m'], rs_set['dist_ref'])
 
         if self.stage in ["diffusion", "vae_diffusion"]:
-            total += self._update_loss("inst_loss", rs_set['noise_pred'], rs_set['noise'])
+            weighted_inst_loss = self._update_loss("inst_loss", rs_set['noise_pred'], rs_set['noise'])
+            total += weighted_inst_loss
 
-            # 2. [核心修改] 计算 align_loss (对齐损失)
-            # 核心思路：只有在 rs_set 中包含了我们从 mld.py 传递过来的、用于对齐的两个 embedding 时，才计算此损失。
-            # 这确保了只有在处理 100Style 的文本引导数据时，才会激活对齐损失。
-            if 'text_style_emb' in rs_set and rs_set['text_style_emb'] is not None:
+            if 'text_style_emb' in rs_set and 'style_ids' in rs_set and rs_set['text_style_emb'] is not None:
                 text_embeddings = rs_set['text_style_emb']
                 motion_embeddings = rs_set['motion_style_emb_for_text']
+                style_ids = rs_set['style_ids']   # torch.Size([batch_size / 2])
                 
-                # [安全检查] 确保我们有超过1个样本，否则对比学习没有意义
-                if text_embeddings.shape[0] > 1:
-                    # a. 温度参数 (logit_scale)
+                # 安全检查，确保有样本进行对比
+                if text_embeddings.shape[0] > 1:  
+                    # 1. 温度参数 (可学习或固定)
+                    # 你也可以在这里定义 self.logit_scale = nn.Parameter(...)
                     logit_scale = torch.exp(torch.tensor(2.659, device=self.device))
 
-                    # b. 归一化 (Normalization)
+                    # 2. 特征归一化
                     text_embeds_norm = F.normalize(text_embeddings, p=2, dim=-1)
                     motion_embeds_norm = F.normalize(motion_embeddings, p=2, dim=-1)
 
-                    # c. 计算 N_text x N_text 的相似度矩阵 (Logits Matrix)
+                    # 3. 计算 text-motion 相似度矩阵 (Logits)
                     logits_per_text = torch.matmul(text_embeds_norm, motion_embeds_norm.t()) * logit_scale
-                    logits_per_motion = logits_per_text.t()
 
-                    # d. 创建 Ground Truth 标签
-                    num_text_samples = text_embeddings.shape[0]
-                    ground_truth = torch.arange(num_text_samples, dtype=torch.long, device=self.device)
+                    # 4. 新逻辑: 创建 Ground Truth 正样本掩码
+                    #    如果样本i和样本j的style_id相同，则 mask[i, j] = 1.0
+                    ground_truth_mask = (style_ids.view(-1, 1) == style_ids.view(1, -1)).float()
 
-                    # e. 计算交叉熵损失
-                    loss_text = self._losses_func["align_loss"](logits_per_text, ground_truth)
-                    loss_motion = self._losses_func["align_loss"](logits_per_motion, ground_truth)
-                    contrastive_loss = (loss_text + loss_motion) / 2.0
+                    # # --- 将 Tensor 保存到文件的代码从这里开始 ---
+
+                    # output_filepath = "dumptensor.txt"
+
+                    # # 1. 将 PyTorch Tensor 转移到 CPU 并转换为 NumPy 数组
+                    # #    如果 Tensor 在 GPU 上，必须先调用 .cpu()
+                    # mask_np = ground_truth_mask.cpu().numpy()
+
+                    # print(f"Ground Truth Mask Shape: {mask_np.shape}")
+                    # print(f"Saving data to {output_filepath}...")
+
+                    # # 2. 将矩阵内容按行写入文件
+                    # with open(output_filepath, 'w') as f:
+                    #     # 遍历矩阵的每一行
+                    #     for i in range(mask_np.shape[0]):
+                            
+                    #         # 将当前行（都是 0 或 1）的元素格式化为不带小数点的整数字符串 ('{:.0f}')，并用空格分隔
+                    #         row_str = ' '.join(f"{x:.0f}" for x in mask_np[i])
+                            
+                    #         # 写入文件，并在行尾添加换行符
+                    #         f.write(row_str + '\n')
+
+                    # print(f"Successfully saved the tensor to {output_filepath}")
+
+                    # 5. 新逻辑: 手动计算对称交叉熵损失
+                    #    - F.log_softmax(logits, dim=1) 是一种数值稳定的计算方式
+                    loss_t2m = - F.log_softmax(logits_per_text, dim=1)
+                    #    用掩码过滤，只对正样本求和，然后除以每行的正样本数量
+                    loss_t2m = (loss_t2m * ground_truth_mask).sum(dim=1) / ground_truth_mask.sum(dim=1)
                     
-                    # f. 更新和累加损失
+                    # 计算 motion-to-text 的损失
+                    loss_m2t = - F.log_softmax(logits_per_text.t(), dim=1)
+                    loss_m2t = (loss_m2t * ground_truth_mask.t()).sum(dim=1) / ground_truth_mask.t().sum(dim=1)
+                    
+                    # 计算最终的对比损失
+                    contrastive_loss = (loss_t2m.mean() + loss_m2t.mean()) / 2.0
+                    
+                    # 6. 更新 metric 状态并累加到 total loss
                     self.align_loss += contrastive_loss.detach()
-                    self.align_loss_text += loss_text.detach()       # <-- 新增
-                    self.align_loss_motion += loss_motion.detach()   # <-- 新增
-                    total += self._params["align_loss"] * contrastive_loss
+                    self.align_loss_text += loss_t2m.mean().detach()
+                    self.align_loss_motion += loss_m2t.mean().detach()
+                    
+                    weighted_align_loss = self._params["align_loss"] * contrastive_loss
+                    total += weighted_align_loss
             # ===> END: 替换代码 (最终修正版) <===
             # style loss
             # total += self._update_loss("style_loss", rs_set['gen_motion_feature'],
@@ -176,19 +208,22 @@ class MLDLosses(Metric):
         self.total += total.detach()
         self.count += 1
 
-        # [修改] 返回一个包含 'total' 键的字典，以确保与 allsplit_step 的日志记录代码兼容
-        # [核心修改] 返回一个包含所有已计算损失项的字典
-        log_dict = {"total": self.total / self.count}
-        
-        # 将其他你关心的损失也加入字典
-        if 'inst_loss' in self.losses and self.inst_loss.item() != 0:
-            log_dict['inst'] = self.inst_loss.detach() / self.count # 计算平均值
-        if 'align_loss' in self.losses and self.align_loss.item() != 0:
-            log_dict['align_total'] = self.align_loss.detach() / self.count
-            log_dict['align_text'] = self.align_loss_text.detach() / self.count
-            log_dict['align_motion'] = self.align_loss_motion.detach() / self.count
+        # 3. 准备用于实时日志 (step-level logging) 的字典
+        log_dict = {"total": total.detach()} # 直接记录当前 step 的 total loss，比用累加/平均更实时
 
-        # update 函数本身返回用于反向传播的总损失张量
+        # 添加独立的、未加权的损失项
+        if self.inst_loss > 0: # 使用 self.inst_loss 而不是 rs_set['noise']
+            log_dict['inst_unweighted'] = self.inst_loss / self.count
+
+        if 'contrastive_loss' in locals():
+            log_dict['align_unweighted'] = contrastive_loss.detach()
+            
+        # 添加加权的损失项
+        log_dict['inst_weighted'] = weighted_inst_loss.detach()
+        if 'weighted_align_loss' in locals():
+            log_dict['align_weighted'] = weighted_align_loss.detach()
+
+        # 返回总损失和日志字典
         return total, log_dict
 
     def compute(self, split):

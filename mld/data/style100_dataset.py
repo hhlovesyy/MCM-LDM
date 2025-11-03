@@ -205,11 +205,17 @@ class Style100Dataset(data.Dataset):
         
         logger.info(f"将要剔除以下风格的样本: {styles_to_exclude}")
         initial_sample_count = len(self.name_list)
+
+        self.style_to_names = {}
+        for name in self.name_list:
+            style_name = self.data_dict[name]["style_name"].lower().replace(" ", "")
+            if style_name not in self.style_to_names:
+                self.style_to_names[style_name] = []
+            self.style_to_names[style_name].append(name)
         
+        # 剔除坏样本
         new_name_list = []
         for name in self.name_list:
-            # self.id_to_style[name] 存储的是原始的大小写混合的风格名
-            # 我们需要将其处理成与 styles_to_exclude 中格式一致的 key
             style_key = self.id_to_style[name].lower().replace(" ", "")
             if style_key not in styles_to_exclude:
                 new_name_list.append(name)
@@ -217,6 +223,12 @@ class Style100Dataset(data.Dataset):
         self.name_list = new_name_list
         final_sample_count = len(self.name_list)
         logger.info(f"样本剔除完成。原始样本数: {initial_sample_count}, 剔除后剩余: {final_sample_count}")
+        
+        # 2025.11.3 新增样本的id信息，用于正确计算align_loss中的对比损失
+        self.style_list = sorted(list(self.style_to_names.keys()))
+        self.style_to_id = {s_name: i for i, s_name in enumerate(self.style_list)}
+        logger.info(f"Created mapping for {len(self.style_to_id)} unique styles for contrastive loss.")
+        
         self.nfeats = self.data_dict[self.name_list[0]]['motion'].shape[1]  
     
     def __len__(self):
@@ -228,15 +240,13 @@ class Style100Dataset(data.Dataset):
         data = self.data_dict[name] 
         motion, m_length = data["motion"], data["length"]  # motion：(176, 263)， length：176， 特征维度：263
 
-        style_name = data["style_name"].lower()  # 'whirlarms'
+        style_name = data["style_name"].lower().replace(" ", "")  # 'whirlarms'
         final_caption = ""
-        # 50% 的概率做“变式题”（如果存在扩写描述）
+        style_id = self.style_to_id[style_name]
+
         if random.random() < 0.5 and style_name in self.gpt_descriptions and self.gpt_descriptions[style_name]:
-            # 从该风格的扩写描述列表中随机选择一句
             final_caption = random.choice(self.gpt_descriptions[style_name])
         else:
-            # 50% 的概率做“基础题”，或当找不到扩写描述时回退
-            # 我们使用之前确认过的“精简版”模板
             prompt_templates = [
                 '{}', # 纯单词
                 'a {} style',
@@ -244,16 +254,16 @@ class Style100Dataset(data.Dataset):
             ]
             # 这里用 choices 带权重更严谨，但 random.choice 也足够简单有效
             chosen_template = random.choice(prompt_templates)
-            final_caption = chosen_template.format(style_name)
+            original_style_name_for_prompt = self.id_to_style[name]
+            final_caption = chosen_template.format(original_style_name_for_prompt)
 
         if item < 5:  # 仅打印前5个样本以避免日志过多
             print(f"[Debug] Sample {name}: Using caption: '{final_caption}'")
         
-        # [简化] 我们不再需要为 glove 构建复杂的 tokens
+        # 不用glove，因为CLIP有tokenizer等的处理
         tokens = ["unk/OTHER"] * (self.max_text_len + 2)
-        sent_len = 0 # 设为0，因为我们不使用它
+        sent_len = 0 
         
-        # [简化] 创建空的占位符以保持返回字典的结构不变
         word_embeddings = np.zeros((self.max_text_len + 2, self.glove_embedding_dim)) # shape:(22, 300)
         pos_one_hots = np.zeros((self.max_text_len + 2, self.pos_one_hot_dim))  # shape:(22, 15)
         
@@ -264,12 +274,11 @@ class Style100Dataset(data.Dataset):
              m_length_cropped = self.min_motion_length
         
         idx = random.randint(0, m_length - m_length_cropped)
-        motion_cropped = motion[idx:idx + m_length_cropped]  # 100Style的很多动作都比较长，基本都要被裁剪，还是随机裁剪，会不会导致数据集的质量非常低
+        motion_cropped = motion[idx:idx + m_length_cropped]  # 100Style的很多动作都比较长，基本都要被裁剪，还是随机裁剪，可能会导致数据集的质量低，这个我们后面再优化
         motion = motion_cropped
-        # 标准化
+
         motion = (motion - self.mean) / self.std
 
-        # --- [代码加固] NaN 值检查 ---
         if np.any(np.isnan(motion)):
             logger.warning(f"NaN detected in motion sample {name}. Resampling...")
             return self.__getitem__(np.random.randint(0, len(self.name_list)))
@@ -277,10 +286,11 @@ class Style100Dataset(data.Dataset):
         return {
             "word_embeddings": word_embeddings,  # (22, 300)：zero
             "pos_one_hots": pos_one_hots,  # shape:(22, 15)： zero
-            "caption": final_caption,  # 'Windmill arms'，
+            "caption": final_caption,  # 'Style of Areoplane'，
             "sent_len": sent_len,  # 0
             "motion": motion,  # (176, 263)
             "m_length": m_length_cropped,  # 176
             "tokens": "_".join(tokens), # 长度22，全是'unk/OTHER'，应该也是为了简化吧
+            "style_id": style_id,  
             "source": "style100"  # 来源标识
         }

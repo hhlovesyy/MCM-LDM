@@ -146,5 +146,6 @@ def mld_collate_dict(batch):
         "pos_ohot": collate_tensors([torch.tensor(b['pos_one_hots']).float() for b in batch]),
         "text_len": collate_tensors([torch.tensor(b['sent_len']) for b in batch]),
         "tokens": [b['tokens'] for b in batch],
+        "style_id": [b['style_id'] for b in batch],
         "source": [b['source'] for b in batch],  # 保留来源信息
     }
