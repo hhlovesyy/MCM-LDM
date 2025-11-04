@@ -132,20 +132,52 @@ def mixed_collate_fn(batch):
 
 def mld_collate_dict(batch):
     """
-    mld_collate 的一个适配器版本，用于处理字典列表而不是元组列表。
+    【最终修复版】
+    修复了因 gt_m_length=0 导致的占位符填充错误。
     """
-    # 按照句子长度排序 (如果需要的话，原始 mld_collate 做了这件事)
-    batch.sort(key=lambda x: x['sent_len'], reverse=True)
+    # 1. 准备主动作和GT动作的数据列表
+    motions = [torch.from_numpy(b['motion']).float() for b in batch]
+    lengths = [b['m_length'] for b in batch]
+    gt_motions = [torch.from_numpy(b['motion_style_gt']).float() for b in batch]
+    gt_lengths = [b['gt_m_length'] for b in batch]
     
-    # 使用与 mld_collate 相同的逻辑，但从字典中按 key 取值
+    # 2. 统一填充到批次内所有动作的最大长度
+    max_len = max(lengths + gt_lengths)
+
+    padded_motions = torch.zeros(len(motions), max_len, motions[0].shape[1])
+    for i, motion in enumerate(motions):
+        end = lengths[i]
+        padded_motions[i, :end] = motion
+        
+    padded_gt_motions = torch.zeros_like(padded_motions)
+    for i, gt_motion in enumerate(gt_motions):
+        end = gt_lengths[i]
+        # <-- [THE FIX] 只有当长度大于0时才进行填充 -->
+        if end > 0:
+            padded_gt_motions[i, :end] = gt_motion
+        
+    # 3. 高效生成掩码 (Masks)
+    mask = torch.arange(max_len).expand(len(lengths), max_len) < torch.tensor(lengths).unsqueeze(1)
+    gt_mask = torch.arange(max_len).expand(len(gt_lengths), max_len) < torch.tensor(gt_lengths).unsqueeze(1)
+    
+    # 4. 准备其余的数据
+    style_ids = [b.get('style_id', -1) for b in batch]
+    word_embs = collate_tensors([torch.from_numpy(b['word_embeddings']).float() for b in batch])
+    pos_ohot = collate_tensors([torch.from_numpy(b['pos_one_hots']).float() for b in batch])
+    
+    # 5. 构建最终的批次字典
     return {
-        "motion": collate_tensors([torch.tensor(b['motion']).float() for b in batch]),
+        "motion": padded_motions,
         "text": [b['caption'] for b in batch],
-        "length": [b['m_length'] for b in batch],
-        "word_embs": collate_tensors([torch.tensor(b['word_embeddings']).float() for b in batch]),
-        "pos_ohot": collate_tensors([torch.tensor(b['pos_one_hots']).float() for b in batch]),
-        "text_len": collate_tensors([torch.tensor(b['sent_len']) for b in batch]),
+        "length": lengths,
+        "mask": mask,
+        "word_embs": word_embs,
+        "pos_ohot": pos_ohot,
+        "text_len": torch.tensor([b['sent_len'] for b in batch]),
         "tokens": [b['tokens'] for b in batch],
-        "style_id": [b['style_id'] for b in batch],
-        "source": [b['source'] for b in batch],  # 保留来源信息
+        "style_id": style_ids,
+        "source": [b['source'] for b in batch],
+        "motion_style_gt": padded_gt_motions,
+        "gt_mask": gt_mask,
+        "gt_m_length": gt_lengths, 
     }

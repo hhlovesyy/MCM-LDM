@@ -106,31 +106,42 @@ class Encoder_TRANSFORMER(nn.Module):
         self.encoder = SkipTransformerEncoder(encoder_layer, num_layers,
                                               encoder_norm)
 
-    def forward(self, batch):
-        x, y, mask = batch["x"], batch["y"], batch["mask"]
-        bs, njoints, nfeats, nframes = x.shape
-        x = x.permute((3, 0, 1, 2)).reshape(nframes, bs, njoints * nfeats)
+    def forward(self, batch, return_all_layers: bool = False):  # 这个类的作用是将一个可变长度的动作序列（nframes）提炼、压缩成一个固定维度的统计表示，即高斯分布的均值 mu 和对数方差 logvar。
+        x, y, mask = batch["x"], batch["y"], batch["mask"] # x是torch.Size([128, 263, 1, 196])，y是torch.Size([128])，mask是torch.Size([128, 196])(mask的话，本来动作序列的部分是True，而填充的部分是False)
+        bs, njoints, nfeats, nframes = x.shape  # 这里面吃进来的njoints是263，nfeats是1，太怪了，不过他俩乘一起确实也是263，后面真炸了再回来改这个逻辑
+        x = x.permute((3, 0, 1, 2)).reshape(nframes, bs, njoints * nfeats) # torch.Size([196,128,263])
 
         # embedding of the skeleton
-        x = self.skelEmbedding(x)
+        x = self.skelEmbedding(x)  # torch.Size([196,128,512])，这个skelEmbedding是一个线性层，把263维度映射到了latent_dim（512）维度
 
         # Blank Y to 0's , no classes in our model, only learned token
         y = y - y
-        xseq = torch.cat((self.muQuery[y][None], self.sigmaQuery[y][None], x), axis=0)
+        xseq = torch.cat((self.muQuery[y][None], self.sigmaQuery[y][None], x), axis=0)  # torch.Size([198, 128, 512])，具体的技巧Gemini有进行总结，拼接两个可学习的向量，类似于BERT的[CLS]
 
         # add positional encoding
-        xseq = self.sequence_pos_encoder(xseq)
+        xseq = self.sequence_pos_encoder(xseq)  # torch.Size([198, 128, 512])
 
         # create a bigger mask, to allow attend to mu and sigma
-        muandsigmaMask = torch.ones((bs, 2), dtype=bool, device=x.device)
+        muandsigmaMask = torch.ones((bs, 2), dtype=bool, device=x.device)  # torch.Size([128, 2])
 
-        maskseq = torch.cat((muandsigmaMask, mask), axis=1)
+        maskseq = torch.cat((muandsigmaMask, mask), axis=1)  # torch.Size([128, 198])
 
-        final = self.encoder(xseq, src_key_padding_mask=~maskseq)
-        mu = final[0]
+        encoder_output = self.encoder(xseq, src_key_padding_mask=~maskseq, return_all_layers=return_all_layers)  # torch.Size([198, 128, 512])
+        
+        all_features = None
+        if return_all_layers:
+            final, all_features = encoder_output
+        else:
+            final = encoder_output
+
+        mu = final[0]  # torch.Size([128, 512])
         logvar = final[1]
 
-        return {"mu": mu}
+        return_dict = {"mu": mu, "logvar": logvar}
+        if return_all_layers and all_features is not None:
+            return_dict["all_features"] = all_features  # 每一层都是[198，128，512]
+
+        return return_dict
 
 
 class Decoder_TRANSFORMER(nn.Module):

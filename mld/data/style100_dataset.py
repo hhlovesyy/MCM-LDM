@@ -212,6 +212,17 @@ class Style100Dataset(data.Dataset):
             if style_name not in self.style_to_names:
                 self.style_to_names[style_name] = []
             self.style_to_names[style_name].append(name)
+
+        # --- [PLAN C - Diagnostic] 诊断只有一个样本的风格 ---
+        single_sample_styles = []
+        for style, names in self.style_to_names.items():
+            if len(names) < 2:
+                single_sample_styles.append(style)
+        if single_sample_styles:
+            logger.warning(f"Found {len(single_sample_styles)} styles with only one valid sample after filtering: {single_sample_styles}")
+        else:
+            logger.info("All styles have at least two valid samples, which is great for GT sampling.")
+        # -----------------------------------------------
         
         # 剔除坏样本
         new_name_list = []
@@ -257,8 +268,8 @@ class Style100Dataset(data.Dataset):
             original_style_name_for_prompt = self.id_to_style[name]
             final_caption = chosen_template.format(original_style_name_for_prompt)
 
-        if item < 5:  # 仅打印前5个样本以避免日志过多
-            print(f"[Debug] Sample {name}: Using caption: '{final_caption}'")
+        # if item < 5:  # 仅打印前5个样本以避免日志过多
+        #     print(f"[Debug] Sample {name}: Using caption: '{final_caption}'")
         
         # 不用glove，因为CLIP有tokenizer等的处理
         tokens = ["unk/OTHER"] * (self.max_text_len + 2)
@@ -283,6 +294,36 @@ class Style100Dataset(data.Dataset):
             logger.warning(f"NaN detected in motion sample {name}. Resampling...")
             return self.__getitem__(np.random.randint(0, len(self.name_list)))
 
+        # --- [PLAN C] 获取同风格的 Ground Truth 动作 ---
+        candidate_names = self.style_to_names[style_name]
+        gt_name = name
+        if len(candidate_names) > 1:
+            valid_candidates = [n for n in candidate_names if n != name]
+            while True:
+                if not valid_candidates or len(valid_candidates) == 0:  # 已经没有合理的样本了，选择自己得了
+                    gt_name = name
+                    # logger.warning(f"No valid GT candidates found for style '{style_name}'. Using the same sample as GT.")
+                    break
+                chosen_name = random.choice(valid_candidates)
+                gt_len_raw = self.data_dict[chosen_name]["length"]
+
+                if gt_len_raw >= m_length_cropped:
+                    gt_name = chosen_name
+                    break
+                else:
+                    valid_candidates.remove(chosen_name)
+        
+        gt_data = self.data_dict[gt_name]
+        gt_motion_raw, gt_m_length_raw = gt_data["motion"], gt_data["length"]
+        gt_idx = random.randint(0, gt_m_length_raw - m_length_cropped)
+        gt_motion_cropped = gt_motion_raw[gt_idx:gt_idx + m_length_cropped]
+        
+        gt_motion = (gt_motion_cropped - self.mean) / self.std
+        
+        if np.any(np.isnan(gt_motion)):
+            logger.warning(f"NaN detected in GT motion sample {gt_name}. Using original motion as fallback.")
+            gt_motion = motion # 使用原始动作作为备用，保证总有返回值
+
         return {
             "word_embeddings": word_embeddings,  # (22, 300)：zero
             "pos_one_hots": pos_one_hots,  # shape:(22, 15)： zero
@@ -292,5 +333,7 @@ class Style100Dataset(data.Dataset):
             "m_length": m_length_cropped,  # 176
             "tokens": "_".join(tokens), # 长度22，全是'unk/OTHER'，应该也是为了简化吧
             "style_id": style_id,  
-            "source": "style100"  # 来源标识
+            "source": "style100",  # 来源标识
+            "motion_style_gt": gt_motion, # <-- [PLAN C] 新增的键，同风格的另一个序列
+            "gt_m_length": m_length_cropped, # 新增的GT动作长度
         }

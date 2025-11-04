@@ -30,6 +30,8 @@ class MLDLosses(Metric):
             losses.append("align_loss")
             losses.append("align_loss_text") # text -> motion 方向
             losses.append("align_loss_motion") # motion -> text 方向
+            if self.cfg.LOSS.get('LAMBDA_STYLE_RECON', 0.0) > 0.0:
+                losses.append("style_recon_loss")
             # losses.append("x_loss")
             # losses.append("style_loss")
             if self.cfg.LOSS.LAMBDA_PRIOR != 0.0:
@@ -74,6 +76,10 @@ class MLDLosses(Metric):
                 self._losses_func[loss] = nn.CrossEntropyLoss()
                 # 从配置文件中读取 align_loss 的权重 lambda
                 self._params[loss] = self.cfg.LOSS.get('LAMBDA_ALIGN', 1.0)
+            elif loss.split('_')[0] == 'style' and loss.split('_')[1] == 'recon':
+                # 感知损失通常使用 L1 或 L2 loss。L1 (SmoothL1) 对异常值更鲁棒。
+                self._losses_func[loss] = nn.SmoothL1Loss(reduction='mean')
+                self._params[loss] = self.cfg.LOSS.LAMBDA_STYLE_RECON
             elif loss.split('_')[0] == 'x':
                 self._losses_func[loss] = nn.MSELoss(reduction='mean')
                 self._params[loss] = 1
@@ -192,6 +198,34 @@ class MLDLosses(Metric):
             # style loss
             # total += self._update_loss("style_loss", rs_set['gen_motion_feature'],
             #                                rs_set['gt_motion_feature'])
+                    
+            # --- [PLAN C - Step 3] 计算 style_recon_loss ---
+            weighted_style_recon_loss = torch.tensor(0.0, device=self.device)
+            # 只有当 mld.py 传递了这些键时，才进行计算
+            if 'gt_features' in rs_set and 'pred_features' in rs_set:
+                print(f"[DEBUG PROBE] --- Loss function received features for style_recon_loss. ---")
+                gt_features = rs_set['gt_features']
+                pred_features = rs_set['pred_features']
+                
+                # 初始化一个累加器
+                recon_loss = torch.tensor(0.0, device=self.device)
+                num_layers = len(gt_features)
+
+                # 逐层计算 L1 损失并累加
+                for i in range(num_layers):
+                    # 我们不需要应用掩码，因为在 mld.py 中，送入 teacher 的动作
+                    # 已经是去除了 padding 的，或者即使有 padding，L1 loss 对零填充区域的贡献也是零。
+                    # 为了安全，也可以在这里应用 rs_set['style_recon_mask']
+                    recon_loss += self._losses_func["style_recon_loss"](pred_features[i], gt_features[i])
+                
+                # 对所有层的损失取平均
+                recon_loss = recon_loss / num_layers
+                
+                # 更新 metric 状态并获取加权损失
+                # self._update_loss 内部会自动处理 detach 和加权
+                weighted_style_recon_loss = self._update_loss("style_recon_loss", recon_loss, torch.tensor(0.0, device=self.device))
+                total += weighted_style_recon_loss
+            # ------------------------------------------------
             if self.cfg.LOSS.LAMBDA_PRIOR != 0.0:
                 # loss - prior loss
                 total += self._update_loss("prior_loss", rs_set['noise_prior'],
@@ -222,6 +256,11 @@ class MLDLosses(Metric):
         log_dict['inst_weighted'] = weighted_inst_loss.detach()
         if 'weighted_align_loss' in locals():
             log_dict['align_weighted'] = weighted_align_loss.detach()
+        
+        # [新增] 将 style_recon_loss 也添加到日志
+        if 'recon_loss' in locals():
+            log_dict['style_recon_unweighted'] = recon_loss.detach()
+            log_dict['style_recon_weighted'] = weighted_style_recon_loss.detach()
 
         # 返回总损失和日志字典
         return total, log_dict

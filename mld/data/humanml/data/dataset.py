@@ -1687,7 +1687,9 @@ class Text2MotionDatasetV2(data.Dataset):
             "m_length": m_length,
             "tokens": "_".join(tokens),
             "style_id": -1,
-            "source": "humanml3d"  # <--- [新增] 来源标识
+            "source": "humanml3d",  # <--- [新增] 来源标识
+            "motion_style_gt": np.zeros_like(motion), # 使用一个形状匹配的零数组作为占位符
+            "gt_m_length": 0, # <-- 关键！长度为0，这将生成全False的mask
         }
         # return caption, motion, m_length
 

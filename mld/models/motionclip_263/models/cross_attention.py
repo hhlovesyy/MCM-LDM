@@ -41,27 +41,39 @@ class SkipTransformerEncoder(nn.Module):
     def forward(self, src,
                 mask: Optional[Tensor] = None,
                 src_key_padding_mask: Optional[Tensor] = None,
-                pos: Optional[Tensor] = None):
-        x = src
+                pos: Optional[Tensor] = None,
+                return_all_layers: bool = False): # 新增参数：是否返回特征层的输出，做感知损失用
+        x = src  # x.shape ：[198，128，512]，128是batch_size，输入的mask是None，src_key_padding_mask.shape：[128，198]，对于Batch里面的每个样本，前面全部都是False，后面全部都是True
 
+        all_features: List[Tensor] = [] if return_all_layers else None
         xs = []
         for module in self.input_blocks:
             x = module(x, src_mask=mask,
                            src_key_padding_mask=src_key_padding_mask, pos=pos)
             xs.append(x)
+            if return_all_layers:
+                all_features.append(x)
 
         x = self.middle_block(x, src_mask=mask,
                            src_key_padding_mask=src_key_padding_mask, pos=pos)
+        if return_all_layers:
+            all_features.append(x)
 
-        for (module, linear) in zip(self.output_blocks, self.linear_blocks):
+        for (module, linear) in zip(self.output_blocks, self.linear_blocks): # 【QUESTION】这个模拟的UNet结构是把downblock的1，2，3，4拼在了upblock的4，3，2，1上，将浅层特征（细节信息）和深层特征（全局语义）结合起来，有些模型是这样做的，也可以浅层拼浅层，深层拼深层，都可以？后面可以问问。
             x = torch.cat([x, xs.pop()], dim=-1)
             x = linear(x)
             x = module(x, src_mask=mask,
                            src_key_padding_mask=src_key_padding_mask, pos=pos)
+            if return_all_layers:
+                all_features.append(x)
 
         if self.norm is not None:
             x = self.norm(x)
-        return x
+
+        if return_all_layers:
+            return x, all_features
+        else:
+            return x
 
 class SkipTransformerDecoder(nn.Module):
     def __init__(self, decoder_layer, num_layers, norm=None):

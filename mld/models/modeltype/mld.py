@@ -228,20 +228,20 @@ class MLD(BaseModel):
                     else:
                         denoiser_base_params.append(param)
             
+            # [这一部分代码完全不变]
             lr_base = self.cfg.TRAIN.OPTIM.LR
+            # [修改] 我们将从配置文件中读取 clip 和 motionclip 的专属学习率
             lr_new = self.cfg.TRAIN.OPTIM.get('LR_NEW', lr_base * 5)
-            lr_finetune = self.cfg.TRAIN.OPTIM.get('LR_FINETUNE', lr_base * 0.1)
-            lr_finetune_clip = lr_base * 0.01
-            lr_finetune_motionclip = lr_base * 0.1
-            # peft 库在将 LoRA 应用到 clip_model 后，会自动将 CLIP 的原始参数的 requires_grad 属性设置为 False，而只将新增的 LoRA 参数的 requires_grad 保持为 True。
+            lr_clip = self.cfg.TRAIN.OPTIM.get('LR_CLIP', lr_base * 0.1) # 默认为 lr_base*0.1
+            lr_motionclip = self.cfg.TRAIN.OPTIM.get('LR_MOTIONCLIP', lr_base * 0.1)
+
             clip_trainable_params = list(filter(lambda p: p.requires_grad, self.clip_model.parameters()))
             param_groups = [
                 {'params': denoiser_base_params, 'lr': lr_base, 'name': 'denoiser_base'},
                 {'params': denoiser_new_params, 'lr': lr_new, 'name': 'denoiser_new'},
                 {'params': self.text_adapter.parameters(), 'lr': lr_new, 'name': 'text_adapter'},
-                {'params': clip_trainable_params, 'lr': lr_finetune_clip, 'name': 'clip_lora'},
-                # {'params': filter(lambda p: p.requires_grad, self.clip_model.parameters()), 'lr': lr_finetune_clip, 'name': 'clip_finetune'},
-                {'params': filter(lambda p: p.requires_grad, self.motionclip.parameters()), 'lr': lr_finetune_motionclip, 'name': 'motionclip_finetune'}
+                {'params': clip_trainable_params, 'lr': lr_clip, 'name': 'clip_lora'},
+                {'params': list(filter(lambda p: p.requires_grad, self.motionclip.parameters())), 'lr': lr_motionclip, 'name': 'motionclip_finetune'}
             ]
 
             optimizer = AdamW(param_groups)
@@ -249,7 +249,33 @@ class MLD(BaseModel):
             for group in optimizer.param_groups:
                 print(f"  - Group '{group['name']}': {len(group['params'])} params, LR: {group['lr']}")
             
-            return optimizer
+            print("INFO: Configuring Learning Rate Scheduler...")
+            try:
+                hml_size = len(self.datamodule.train_dataset.datasets[0].name_list)
+                style_size = len(self.datamodule.train_dataset.datasets[1].name_list)
+                total_size = hml_size + style_size
+                steps_per_epoch = len(self.datamodule.train_dataloader())
+            except Exception as e:
+                print(f"[Warning] Could not accurately determine steps_per_epoch. Falling back to an estimate. Error: {e}")
+                # 使用配置文件中的混合比例来估算
+                hml_ratio = self.cfg.DATASET.MIXED.BATCH_RATIO[0] / self.cfg.TRAIN.BATCH_SIZE
+                # 粗略估算，以 HumanML3D 作为瓶颈
+                steps_per_epoch = int((23384 * hml_ratio) / self.cfg.DATASET.MIXED.BATCH_RATIO[0])
+            total_training_steps = self.cfg.TRAIN.END_EPOCH * steps_per_epoch
+            
+            print(f"  - Steps per epoch (estimated): {steps_per_epoch}")
+            print(f"  - Total training steps for LR scheduler: {total_training_steps}")
+            # 2. 创建 CosineAnnealingLR 调度器
+            #    它会在 T_max 步内，将学习率从初始值平滑地衰减到 eta_min (默认为0)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_training_steps)# 3. 以 PyTorch Lightning 期望的字典格式返回
+            return {
+                'optimizer': optimizer,
+                'lr_scheduler': {
+                    'scheduler': scheduler,
+                    'interval': 'step',  # 关键：我们希望在每一步都更新学习率
+                    'frequency': 1
+                }
+            }
         else:
             raise NotImplementedError("Do not support other optimizer for now.")
 
@@ -389,11 +415,12 @@ class MLD(BaseModel):
             motion_seq = style_motion_raw.unsqueeze(-1).permute(0, 2, 3, 1)
 
             with torch.no_grad():
-                    motion_emb_features = self.motionclip.encoder({
+                raw_motion_emb = self.motionclip.encoder({
                     'x': motion_seq.float(),
                     'y': torch.zeros(bs, dtype=int, device=self.mld_device),
                     'mask': lengths_to_mask(style_lengths, device=self.mld_device)
                 })["mu"]
+                motion_emb_features = self.motion_emb_norm(raw_motion_emb)
 
             uncond_motion_emb = torch.zeros_like(motion_emb_features)
             motion_style_cond = torch.cat([uncond_motion_emb, motion_emb_features], dim=0).unsqueeze(1)
@@ -499,7 +526,7 @@ class MLD(BaseModel):
         noisy_latents = self.noise_scheduler.add_noise(latents.clone(), noise,
                                                        timesteps)  # torch.Size([32, 7, 256])
         # Predict the noise residual
-        noise_pred = self.denoiser(
+        full_batch_noise_pred = self.denoiser(
             sample=noisy_latents,
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
@@ -507,30 +534,27 @@ class MLD(BaseModel):
             style_text_feature=style_text_feature, 
             return_dict=False,
         )[0]  # torch.Size([32, 7, 256])
+        
         # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
+        noise_main = noise
+        noise_pred_main = full_batch_noise_pred
+        noise_prior = 0
+        noise_pred_prior = 0
+        
         if self.cfg.LOSS.LAMBDA_PRIOR != 0.0:
-            noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
-            noise, noise_prior = torch.chunk(noise, 2, dim=0)
-        else:  # 默认应该是走到这个逻辑里面
-            noise_pred_prior = 0
-            noise_prior = 0
-
-
-        n_set = {
-            "noise": noise,  # torch.Size([32, 7, 256])
-            "noise_prior": noise_prior,  # 0
-            "noise_pred": noise_pred,  # torch.Size([32, 7, 256])
-            "noise_pred_prior": noise_pred_prior, # 0
+            noise_pred_main, noise_pred_prior = torch.chunk(full_batch_noise_pred, 2, dim=0)
+            noise_main, noise_prior = torch.chunk(noise, 2, dim=0)
+            
+        return {
+            "noise": noise_main,
+            "noise_pred": noise_pred_main,
+            "noise_prior": noise_prior,
+            "noise_pred_prior": noise_pred_prior,
+            "noisy_latents": noisy_latents,
+            "timesteps": timesteps,
+            "full_batch_noise_pred": full_batch_noise_pred, # [关键] 传递未经切割的预测
         }
-
-        # 新增了style reconstruction相关的loss计算
-        if self.training and self.cfg.LOSS.get('LAMBDA_STYLE_RECON', 0.0) > 0.0:
-            print("Computing style reconstruction loss components...C1 Plan!")
-            is_text_guided_mask = torch.any(style_text_feature.squeeze(1) != 0, dim=-1)
-            n_set["is_text_guided_mask"] = is_text_guided_mask
-
-        return n_set
-
+    
     def train_vae_forward(self, batch):
         feats_ref = batch["motion"]
         lengths = batch["length"]
@@ -610,23 +634,25 @@ class MLD(BaseModel):
             # a. 只为这些样本提取动作风格
             motion_seq = feats_ref[motion_indices] * self.std + self.mean  # torch.Size([batch_size / 2, motion_len, 263])，motion_length对于一个batch来说应该填充到一样长了
             motion_seq[..., :3] = 0.0
+
             motion_seq = motion_seq.unsqueeze(-1).permute(0, 2, 3, 1) # torch.Size([batch_size / 2, 263, 1, motion_len])
             # 【QUESTION】这里有问题了！我发现motion_seq里面基本都是1和0，我需要把这个dump到一个文件里看看，一会你帮我补充一下代码
             lengths_motion = [lengths[i] for i, flag in enumerate(motion_indices) if flag]  # len(): batch_size / 2
 
-            motion_emb = self.motionclip.encoder({ # 【QUESTION】这里使用学生网络，可以学习是不是？
+            raw_motion_emb = self.motionclip.encoder({ 
                 'x': motion_seq,
                 'y': torch.zeros(motion_seq.shape[0], dtype=int, device=self.mld_device),
                 'mask': lengths_to_mask(lengths_motion, device=self.mld_device)
-            })["mu"].unsqueeze(1) # torch.Size([batch_size / 2, 1, 512])
+            })["mu"]
+            motion_emb = self.motion_emb_norm(raw_motion_emb).unsqueeze(1)  # # torch.Size([batch_size / 2, 1, 512])
             
             # b. 应用 CFG dropout
-            mask_uncond = torch.rand(motion_emb.shape[0], device=self.mld_device) < self.guidance_uncodp  # torch.Size([batch_size/2])，【QUESTION】几乎都是False，True非常少，应该没什么问题？
-            motion_emb[mask_uncond, ...] = 0  # 【QUESTION】这种写法是说mask_uncond是True的部分会变成0，其他部分不变么
+            mask_uncond = torch.rand(motion_emb.shape[0], device=self.mld_device) < self.guidance_uncodp  # torch.Size([batch_size/2])
+            motion_emb[mask_uncond, ...] = 0  
             
             # c. 将计算出的 embedding 填充回主张量的对应位置，这个逻辑对么？
             motion_style_cond[motion_indices] = motion_emb  # torch.Size([batch_size, 1, 512])
-            # 【QUESTION】debug的时候我发现motion_style_cond里面有两个字段，一个是T，一个是data，其中T看起来每个样本后一半都是0，但是data比较正常一些？前一半样本有值，后一半样本为0，这个data和T分别指的是什么？
+            
         # 找到所有需要“文本引导”的样本的索引
         text_indices = is_text_guided  # 前一半都是False，后一半都是True
         if text_indices.any():
@@ -675,8 +701,68 @@ class MLD(BaseModel):
 
         # 4. [核心] 打包所有条件，cond_emb：torch.Size([batch_size, 7, 256])，motion_style_cond：torch.Size([batch_size, 1, 512])， trans_cond：torch.Size([batch_size, 196, 3])
         multi_cond_emb = [cond_emb, motion_style_cond, trans_cond]
-        
+
         n_set = self._diffusion_process(z, multi_cond_emb, lengths, style_text_feature=text_style_cond) # 回顾：style_text_feature的shape是torch.Size([batch_size, 1, 512])
+        
+        # ==================以下代码块为感知损失相关的内容=================
+        start_step = self.cfg.LOSS.get('STYLE_RECON_START_STEP', 0)
+        interval = self.cfg.LOSS.get('STYLE_RECON_INTERVAL', 1)
+        should_compute_style_recon = (
+            self.training and
+            text_indices.any() and
+            self.global_step >= start_step and
+            (self.global_step - start_step) % interval == 0
+        )
+        if should_compute_style_recon:
+            print(f"[DEBUG PROBE] --- Computing style_recon_loss at global_step: {self.global_step} ---")
+            noisy_latents = n_set["noisy_latents"][text_indices] # torch.Size([batch_size / 2, 7, 256])
+            noise_pred = n_set["full_batch_noise_pred"][text_indices]  # torch.Size([batch_size / 2, 7, 256])
+            timesteps = n_set["timesteps"][text_indices] # torch.Size([batch_size / 2])
+            lengths_text = [lengths[i] for i, flag in enumerate(text_indices) if flag] # len(): batch_size / 2
+
+            # --- [THE FIX] 使用正确的公式反解 x_0_pred ---
+            # 1. 根据 timesteps 提取 alphas_cumprod
+            alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(timesteps.device)  # torch.Size([1000])
+            sqrt_alpha_prod = alphas_cumprod[timesteps].sqrt()
+            sqrt_one_minus_alpha_prod = (1 - alphas_cumprod[timesteps]).sqrt()
+
+            # 2. 为了正确的广播 (broadcasting), 调整形状
+            #    从 [batch_size/2] -> [batch_size/2, 1, 1]
+            sqrt_alpha_prod = sqrt_alpha_prod.view(-1, 1, 1)
+            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.view(-1, 1, 1)  # torch.Size([batch_size / 2, 1, 1])
+
+            # 3. 应用 DDPM 的反解公式
+            x_0_pred = (noisy_latents - sqrt_one_minus_alpha_prod * noise_pred) / sqrt_alpha_prod
+            # --- [FIX ENDS HERE] ---
+
+            # c. VAE 解码 (这一步开始需要计算梯度)
+            generated_motion = self.vae.decode(x_0_pred.permute(1,0,2), lengths_text)  # torch.Size([batch_size / 2, 196, 263])
+
+            # d. 准备 teacher 的输入
+            generated_motion_unnormalized = (generated_motion * self.std + self.mean).unsqueeze(-1).permute(0,2,3,1)  # torch.Size([batch_size / 2, 263, 1, 196])
+            generated_motion_unnormalized[:, :3, :, :] = 0.0  
+            
+            motion_style_gt_unnormalized = (batch['motion_style_gt'][text_indices] * self.std + self.mean).unsqueeze(-1).permute(0,2,3,1)
+            motion_style_gt_unnormalized[:, :3, :, :] = 0.0  
+            gt_lengths = [batch['gt_m_length'][i] for i, flag in enumerate(text_indices) if flag]
+
+            # e. 提取特征
+            with torch.no_grad():
+                gt_batch = { 'x': motion_style_gt_unnormalized, 'y': torch.zeros(motion_style_gt_unnormalized.shape[0], dtype=int, device=self.mld_device), 'mask': lengths_to_mask(gt_lengths, device=self.mld_device) }
+                teacher_output_gt = self.motionclip_teacher.encoder(gt_batch, return_all_layers=True)
+                gt_features = teacher_output_gt['all_features']
+                n_set['gt_features'] = gt_features
+            
+            pred_batch = { 'x': generated_motion_unnormalized, 'y': torch.zeros(generated_motion_unnormalized.shape[0], dtype=int, device=self.mld_device), 'mask': lengths_to_mask(lengths_text, device=self.mld_device) }
+            teacher_output_pred = self.motionclip_teacher.encoder(pred_batch, return_all_layers=True)
+            pred_features = teacher_output_pred['all_features']
+            n_set['pred_features'] = pred_features
+            
+            n_set['style_recon_mask'] = torch.ones(text_indices.sum(), dtype=torch.bool, device=self.mld_device)
+
+
+        # ==================以上代码块为感知损失相关的内容=================
+        
         # [核心修改] 将用于 align_loss 的张量加入返回字典
         if text_emb_for_align is not None:  # torch.Size([batch_size/2, 512])
             n_set['text_style_emb'] = text_emb_for_align
@@ -689,33 +775,6 @@ class MLD(BaseModel):
 
             # 3. 将筛选出的 style_ids 添加到 n_set 字典中
             n_set['style_ids'] = style_ids
-        # import os
-        # # 只在训练的第一次迭代时执行
-        # if self.global_step == 0:
-        #     print("\n[DEBUG] DUMPING TENSORS FOR THE FIRST BATCH...")
-            
-        #     # 准备保存路径
-        #     dump_dir = "debug_dumps"
-        #     os.makedirs(dump_dir, exist_ok=True)
-        #     dump_path = os.path.join(dump_dir, "tensors_first_batch.pt")
-
-        #     # 收集我们想检查的 tensors
-        #     tensors_to_dump = {
-        #         "motion_emb": motion_emb.detach().cpu(),
-        #         "gt_motion_emb_for_text": gt_motion_emb_for_text.detach().cpu(),
-        #         "text_features_for_denoiser": text_features.detach().cpu(), # 用于 denoiser 的
-        #         "text_emb_for_align": text_emb_for_align.detach().cpu(), # 用于 align_loss 的
-        #         "motion_seq_unnormalized": motion_seq.detach().cpu(),
-        #         "motion_seq_for_text_unnormalized": motion_seq_for_text.detach().cpu()
-        #     }
-            
-        #     # 保存到文件
-        #     torch.save(tensors_to_dump, dump_path)
-        #     print(f"[DEBUG] Tensors have been dumped to: {dump_path}")
-        #     print("[DEBUG] Exiting for analysis.")
-            
-        #     # 退出程序
-        #     exit()
         
         return {**n_set}
 
