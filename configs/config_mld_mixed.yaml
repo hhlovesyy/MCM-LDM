@@ -1,5 +1,5 @@
 
-NAME: DualMode_MLD_Finetune_v1_1104
+NAME: DualMode_MLD_Finetune_v1_1105
 # Debug 模式，设为 True 时会使用极少量数据，方便快速测试流程
 DEBUG: False
 ACCELERATOR: 'gpu'
@@ -16,7 +16,7 @@ TRAIN:
   # 数据加载器的工作线程数
   NUM_WORKERS: 8
   # 训练批次大小
-  BATCH_SIZE: 128
+  BATCH_SIZE: 256
   # 微调的总轮数
   END_EPOCH: 350
 
@@ -37,15 +37,15 @@ TRAIN:
     # 3. LR_FINETUNE (微调学习率): 用于 CLIP 和 MotionClip，必须非常小，以避免灾难性遗忘。
 
     # [推荐值] Denoiser 基础参数的学习率
-    LR: 2.0e-7  #1.0e-6
+    LR: 1.0e-6 
     
     # [推荐值] Denoiser 新增模块 (adaLN_modulation_text) 的学习率
-    LR_NEW: 1.0e-6  # 5.0e-6
+    LR_NEW: 5.0e-6  # 5.0e-6
 
     # [推荐值] 外部模型 (CLIP, MotionClip) 的微调学习率
     # LR_FINETUNE: 5.0e-7
-    LR_CLIP: 1.0e-7       # 从 5.0e-7 降低 5 倍
-    LR_MOTIONCLIP: 1.0e-7 # 从 5.0e-7 降低 5 倍
+    LR_CLIP: 5.0e-7      # 从 5.0e-7 降低 5 倍
+    LR_MOTIONCLIP: 5.0e-7 # 从 5.0e-7 降低 5 倍
 
 #####################################
 # 验证设置 (Validation Settings)
@@ -55,7 +55,7 @@ EVAL:
   # DATASETS: ['humanml3d']
   DATASETS: ['mixed']
   # 验证批次大小
-  BATCH_SIZE: 128
+  BATCH_SIZE: 256
   SPLIT: val # 固定为 'val'
 
 #####################################
@@ -73,7 +73,7 @@ DATASET:
   # [核心] 混合数据集的配置
   MIXED:
     # 比例: [HumanML3D, 100Style]。加起来最好等于 BATCH_SIZE
-    BATCH_RATIO: [64, 64] 
+    BATCH_RATIO: [128, 128] 
 
   # [核心] HumanML3D 数据集的配置
   HUMANML3D:
@@ -142,9 +142,9 @@ LOSS:
   # [新代码] 为我们的文本引导损失添加一个权重
   # LAMBDA_TEXT_STYLE: 1.5
   LAMBDA_ALIGN: 0.06  # 本来是1.0，现在用0.06，为了和inst loss做尺度上的对齐
-  LAMBDA_STYLE_RECON: 3.0  # 感知损失的最大权重,本来是10.0，效果比较差，改一下参数
-  STYLE_RECON_START_STEP: 0 # 5000 # 训练多少步之后，才开始计算感知损失.如果是resume的话可以是15000左右，但是如果是从某个pretrained权重开始的，那就要从0开始
-  STYLE_RECON_INTERVAL: 10 # 每隔多少步计算一次感知损失
+  LAMBDA_STYLE_RECON: 1.0  # 感知损失的最大权重,本来是10.0，效果比较差，改一下参数
+  STYLE_RECON_START_STEP: 500000 # 5000 # 训练多少步之后，才开始计算感知损失.如果是resume的话可以是15000左右，但是如果是从某个pretrained权重开始的，那就要从0开始
+  STYLE_RECON_INTERVAL: 1000 # 每隔多少步计算一次感知损失
   LAMBDA_LATENT: 1.0e-5
   LAMBDA_KL: 1.0e-4
   LAMBDA_REC: 1.0
@@ -158,22 +158,22 @@ TEST:
   CHECKPOINTS: '' # 微调后，将这里指向你最好的新 checkpoint
   DATASETS: ['humanml3d']
   SPLIT: test
-  BATCH_SIZE: 128
+  BATCH_SIZE: 256
 
 # DEMO 设置 (用于驱动 demo.py)
 #####################################
 DEMO:
   # [关键] 指定你要测试的、训练好的 checkpoint 文件！
-  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1104/checkpoints/best-epoch=93-val/total_loss=0.45.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
+  CHECKPOINT: "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/DualMode_MLD_Finetune_v1_1105/checkpoints/best-epoch=69-val/total_loss=0.34.ckpt" # 训练10个epoch后，这里可能是 epoch=9.ckpt
 
   # --- 模式一：文本引导 ---
   # [关键] 如果要使用文本引导，请在这里填入文本。
   # 如果留空 ("") ，则脚本会自动进入动作引导模式。
-  # STYLE_TEXT: "Arms out to side for balance - tilting side to side"
+  # STYLE_TEXT: "" # Arms out to side for balance - tilting side to side
   # STYLE_TEXT: "reach his left arm very high."
-  # STYLE_TEXT: "elder man, bow" 
+  STYLE_TEXT: "elder man, bow" 
   # STYLE_TEXT: "normal motion with the upper body tilted to the right"
-  STYLE_TEXT: "like a proud robot, big steps and kick"
+  # STYLE_TEXT: "like a proud robot, big steps and kick"
 
   # --- 模式二：动作引导 ---
   # 仅在 STYLE_TEXT 为空时生效

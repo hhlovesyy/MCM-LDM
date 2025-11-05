@@ -216,6 +216,21 @@ class MLD(BaseModel):
     
 
     def configure_optimizers(self):  # overriding pl.LightningModule method
+        # [DEBUG PROBE]
+        print("\n--- DENOISER GRAD STATUS CHECK ---")
+        total_params = 0
+        trainable_params = 0
+        for name, param in self.denoiser.named_parameters():
+            total_params += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+                # 打印出前5个可训练参数的名称
+                if trainable_params < 1000:
+                    print(f"  - Trainable: {name}")
+        print(f"  - Total params in denoiser: {total_params / 1e6:.2f} M")
+        print(f"  - Trainable params in denoiser: {trainable_params / 1e6:.2f} M")
+        print("--- END CHECK ---\n")
+        
         if self.cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
             print("Configuring differential learning rates in `configure_optimizers`...")
             denoiser_base_params = []
@@ -249,30 +264,26 @@ class MLD(BaseModel):
             for group in optimizer.param_groups:
                 print(f"  - Group '{group['name']}': {len(group['params'])} params, LR: {group['lr']}")
             
-            print("INFO: Configuring Learning Rate Scheduler...")
-            try:
-                hml_size = len(self.datamodule.train_dataset.datasets[0].name_list)
-                style_size = len(self.datamodule.train_dataset.datasets[1].name_list)
-                total_size = hml_size + style_size
-                steps_per_epoch = len(self.datamodule.train_dataloader())
-            except Exception as e:
-                print(f"[Warning] Could not accurately determine steps_per_epoch. Falling back to an estimate. Error: {e}")
-                # 使用配置文件中的混合比例来估算
-                hml_ratio = self.cfg.DATASET.MIXED.BATCH_RATIO[0] / self.cfg.TRAIN.BATCH_SIZE
-                # 粗略估算，以 HumanML3D 作为瓶颈
-                steps_per_epoch = int((23384 * hml_ratio) / self.cfg.DATASET.MIXED.BATCH_RATIO[0])
-            total_training_steps = self.cfg.TRAIN.END_EPOCH * steps_per_epoch
+            # --- [THE FINAL FIX: 使用智能的学习率调度器] ---
+            print("INFO: Configuring ReduceLROnPlateau Learning Rate Scheduler...")
+
+            # 创建一个 ReduceLROnPlateau 调度器
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode='min',         # 当监控的指标停止下降时，触发
+                factor=0.5,         # 学习率乘以 0.5 (降一半)
+                patience=10,        # [关键] 如果连续 10 个 epoch，val_loss 都没有进步，就降低学习率
+                min_lr=1e-8,        # 学习率的下限
+                verbose=True        # 在降低学习率时，在控制台打印一条消息
+            )
             
-            print(f"  - Steps per epoch (estimated): {steps_per_epoch}")
-            print(f"  - Total training steps for LR scheduler: {total_training_steps}")
-            # 2. 创建 CosineAnnealingLR 调度器
-            #    它会在 T_max 步内，将学习率从初始值平滑地衰减到 eta_min (默认为0)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_training_steps)# 3. 以 PyTorch Lightning 期望的字典格式返回
+            # 以 PyTorch Lightning 期望的格式返回
             return {
                 'optimizer': optimizer,
                 'lr_scheduler': {
                     'scheduler': scheduler,
-                    'interval': 'step',  # 关键：我们希望在每一步都更新学习率
+                    'monitor': 'val/total_loss', # [关键] 告诉调度器要监控哪个指标
+                    'interval': 'epoch',       # 在每个 epoch 结束时检查一次
                     'frequency': 1
                 }
             }
@@ -714,7 +725,7 @@ class MLD(BaseModel):
             (self.global_step - start_step) % interval == 0
         )
         if should_compute_style_recon:
-            print(f"[DEBUG PROBE] --- Computing style_recon_loss at global_step: {self.global_step} ---")
+            # print(f"[DEBUG PROBE] --- Computing style_recon_loss at global_step: {self.global_step} ---")
             noisy_latents = n_set["noisy_latents"][text_indices] # torch.Size([batch_size / 2, 7, 256])
             noise_pred = n_set["full_batch_noise_pred"][text_indices]  # torch.Size([batch_size / 2, 7, 256])
             timesteps = n_set["timesteps"][text_indices] # torch.Size([batch_size / 2])

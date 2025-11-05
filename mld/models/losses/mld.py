@@ -203,7 +203,7 @@ class MLDLosses(Metric):
             weighted_style_recon_loss = torch.tensor(0.0, device=self.device)
             # 只有当 mld.py 传递了这些键时，才进行计算
             if 'gt_features' in rs_set and 'pred_features' in rs_set:
-                print(f"[DEBUG PROBE] --- Loss function received features for style_recon_loss. ---")
+                # print(f"[DEBUG PROBE] --- Loss function received features for style_recon_loss. ---")
                 gt_features = rs_set['gt_features']
                 pred_features = rs_set['pred_features']
                 

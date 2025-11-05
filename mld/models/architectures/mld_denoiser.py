@@ -262,8 +262,8 @@ class MldDenoiser(nn.Module):
         # [新代码] 为轨迹条件添加一个专门的归一化层
         self.traj_norm = nn.LayerNorm(3) # 输入特征维度是 3 (x,y,z)
 
-
-
+        # # --- [尝试: 冻结主体，只训练 Adapter] 这个目前效果是很差的，记录在这不要再踩一样的坑---
+       
     def forward(self,
                 sample, # torch.Size([32, 7, 256])， 牢记32是batch_size
                 timestep, # torch.Size([32])

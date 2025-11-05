@@ -199,26 +199,19 @@ class MixedDataModule(pl.LightningDataModule):
         #     collate_fn=mld_collate_dict,
         #     pin_memory=True
         # )
-        logger.info("Creating MIXED validation dataloader with MixedBatchSampler...") 
-        val_dataset_sizes = [len(d) for d in self.val_dataset.datasets]
-        if any(size == 0 for size in val_dataset_sizes):
-            logger.warning("One of the validation datasets is empty. Returning an empty dataloader.")
+        if len(self.val_dataset) == 0:
+            logger.warning("Validation dataset is empty, returning empty dataloader.")
             return DataLoader([])
 
-        val_sampler = MixedBatchSampler(
-            dataset_sizes=val_dataset_sizes, 
-            batch_size=self.val_batch_size, # 使用驗證批次大小
-            batch_ratio=self.cfg.DATASET.MIXED.BATCH_RATIO # 使用與訓練時相同的混合比例
-        )
-        
         return DataLoader(
             self.val_dataset,
-            batch_sampler=val_sampler,
+            batch_size=self.val_batch_size, # 使用验证的批次大小
+            shuffle=False,                  # <-- 关键！确保验证顺序固定
             num_workers=self.num_workers,
-            collate_fn=mixed_collate_fn, 
+            collate_fn=mixed_collate_fn,    # <-- 依然使用 mixed_collate_fn，因为它能正确处理混合批次
             pin_memory=True
         )
-
+    
     def test_dataloader(self):
         logger.info("Test dataloader not implemented yet.")
         return []

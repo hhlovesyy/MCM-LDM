@@ -24,6 +24,36 @@ def main():
     # create logger
     logger = create_logger(cfg, phase="train")
 
+    # resume
+    if cfg.TRAIN.RESUME:
+        resume = cfg.TRAIN.RESUME
+        backcfg = cfg.TRAIN.copy()
+        if os.path.exists(resume):
+            file_list = sorted(os.listdir(resume), reverse=True)
+            for item in file_list:
+                if item.endswith(".yaml"):
+                    cfg = OmegaConf.load(os.path.join(resume, item))
+                    cfg.TRAIN = backcfg
+                    break
+            checkpoints = sorted(os.listdir(os.path.join(
+                resume, "checkpoints")),
+                                 key=lambda x: int(x[6:-5]),
+                                 reverse=True)
+            for checkpoint in checkpoints:
+                if "epoch=" in checkpoint:
+                    cfg.TRAIN.PRETRAINED = os.path.join(
+                        resume, "checkpoints", checkpoint)
+                    break
+            if os.path.exists(os.path.join(resume, "wandb")):
+                wandb_list = sorted(os.listdir(os.path.join(resume, "wandb")),
+                                    reverse=True)
+                for item in wandb_list:
+                    if "run-" in item:
+                        cfg.LOGGER.WANDB.RESUME_ID = item.split("-")[-1]
+
+        else:
+            raise ValueError("Resume path is not right.")
+    # set seed
     pl.seed_everything(cfg.SEED_VALUE)
 
     # gpu setting
@@ -89,6 +119,30 @@ def main():
         "gt_Accuracy": "Metrics/gt_accuracy",
     }
 
+    # # callbacks
+    # callbacks = [
+    #     pl.callbacks.RichProgressBar(),
+    #     ProgressLogger(metric_monitor=metric_monitor),
+    #     # ModelCheckpoint(dirpath=os.path.join(cfg.FOLDER_EXP,'checkpoints'),filename='latest-{epoch}',every_n_epochs=1,save_top_k=1,save_last=True,save_on_train_epoch_end=True),
+    #     ModelCheckpoint(
+    #         dirpath=os.path.join(cfg.FOLDER_EXP, "checkpoints"),
+    #         filename="{epoch}",
+    #         monitor="step",
+    #         mode="max",
+    #         every_n_epochs=cfg.LOGGER.SACE_CHECKPOINT_EPOCH,
+    #         save_top_k=-1,
+    #         save_last=False,
+    #         save_on_train_epoch_end=True,
+    #     ),
+    #     EarlyStopping(
+    #         monitor="val/total_loss", # [核心] 监控的指标
+    #         mode="min", # 希望它越小越好
+    #         patience=30, # [关键参数] 如果连续 30 个 epoch 损失都没有创新低，就停止
+    #         min_delta=0.001, # 认为损失下降了至少 0.001 才算是“有效下降”
+    #         verbose=True # 打印出早停的信息
+    #     )
+    # ]
+    # logger.info("Callbacks initialized")
 
     callbacks = []
 
@@ -107,7 +161,7 @@ def main():
         filename="best-{epoch}-{val/total_loss:.2f}", # 文件名包含 epoch 和 loss，方便识别
         monitor="val/total_loss", # 监控我们最关心的指标
         mode="min",               # 越小越好
-        save_top_k=2,             # 只保存最好的那 1 个
+        save_top_k=1,             # 只保存最好的那 1 个
         save_last=True,           # 同时保存 last.ckpt 以便断点续训
         every_n_epochs=1          # 每个 epoch 都检查一次
     )
@@ -141,12 +195,14 @@ def main():
         #strategy=ddp_strategy,
         # move_metrics_to_cpu=True,
         default_root_dir=cfg.FOLDER_EXP,
+        # log_every_n_steps=cfg.LOGGER.VAL_EVERY_STEPS,
         log_every_n_steps=30,
         deterministic=False,
-        detect_anomaly=False,
+        detect_anomaly=True,
         enable_progress_bar=True,
         logger=loggers,
         callbacks=callbacks,
+        #check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
         check_val_every_n_epoch=1,
         gradient_clip_val=1.0,
     )
@@ -169,75 +225,28 @@ def main():
                 vae_dict[name] = v
         model.vae.load_state_dict(vae_dict, strict=True)
 
-     # 2. 准备 checkpoint 路径变量，用于 trainer.fit
-    ckpt_path = None
-    
-    # 3. 核心逻辑：区分“从断点恢复”和“加载预训练权重”
-    if cfg.TRAIN.RESUME:
-        logger.info(f"Resuming training from checkpoint: {cfg.TRAIN.RESUME}")
-        if not os.path.isfile(cfg.TRAIN.RESUME):
-             raise ValueError(f"Resume path '{cfg.TRAIN.RESUME}' is not a valid file.")
-        ckpt_path = cfg.TRAIN.RESUME
-        
-    elif cfg.TRAIN.PRETRAINED:
-        logger.info(f"Loading weights from PRETRAINED checkpoint: {cfg.TRAIN.PRETRAINED}")
-        
-        state_dict = torch.load(cfg.TRAIN.PRETRAINED, map_location="cpu")["state_dict"]
-        
-        # --- [THE FIX: 手术式加载并生成详细报告] ---
+    if cfg.TRAIN.PRETRAINED:
+        logger.info("Loading pretrain mode from {}".format(
+            cfg.TRAIN.PRETRAINED))
+        logger.info("Attention! VAE will be recovered")
+        state_dict = torch.load(cfg.TRAIN.PRETRAINED,
+                                map_location="cpu")["state_dict"]
+        # remove mismatched and unused params
         from collections import OrderedDict
 
-        # a. 定义我们要加载的子模块和它们在 checkpoint 中的前缀
-        #    (模块名, 模型中的属性, checkpoint中的前缀)
-        modules_to_load = [
-            ("Denoiser", model.denoiser, "denoiser."),
-            ("MotionCLIP", model.motionclip, "motionclip."),
-            ("CLIP Model", model.clip_model, "clip_model."),
-            ("Text Adapter", model.text_adapter, "text_adapter."),
-            ("Text Norm", model.text_emb_norm, "text_emb_norm."),
-            ("Motion Norm", model.motion_emb_norm, "motion_emb_norm."),
-        ]
-        
-        all_loaded_keys = set()
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            if k not in ["denoiser.sequence_pos_encoding.pe"]:
+                new_state_dict[k] = v
+        model.load_state_dict(new_state_dict, strict=False)
 
-        logger.info("--- Starting Surgical Weight Loading ---")
-        for name, module, prefix in modules_to_load:
-            # 为当前模块创建一个专属的 state_dict
-            module_state_dict = OrderedDict()
-            for k, v in state_dict.items():
-                if k.startswith(prefix):
-                    # 移除前缀，得到与子模块匹配的 key
-                    new_key = k[len(prefix):]
-                    module_state_dict[new_key] = v
-            
-            if not module_state_dict:
-                logger.warning(f"  - No weights found for module '{name}' with prefix '{prefix}' in the checkpoint.")
-                continue
-
-            # 使用子模块自己的 load_state_dict，它会返回匹配信息
-            missing_keys, unexpected_keys = module.load_state_dict(module_state_dict, strict=False)
-            
-            # 记录我们已经尝试加载过的 key
-            all_loaded_keys.update(module_state_dict.keys())
-            
-            # 打印详细的日志报告
-            logger.info(f"  - Loading for module: '{name}'")
-            if missing_keys:
-                logger.warning(f"    - Missing keys in module (normal if structure changed): {missing_keys}")
-            if unexpected_keys:
-                logger.warning(f"    - Unexpected keys in checkpoint (normal if from older version): {unexpected_keys}")
-            if not missing_keys and not unexpected_keys:
-                logger.info(f"    - All keys matched perfectly!")
-
-        # 检查是否有任何 checkpoint 中的权重没有被分配到任何模块
-        unaccounted_keys = [k for k in state_dict.keys() if not any(k.startswith(p[2]) for p in modules_to_load) and not k.startswith("vae.")]
-        if unaccounted_keys:
-             logger.warning(f"Found keys in checkpoint that were not assigned to any module: {unaccounted_keys}")
-
-        logger.info("--- Surgical Weight Loading Complete ---")
-
-    # 4. 统一调用 trainer.fit
-    trainer.fit(model, datamodule=datasets[0], ckpt_path=ckpt_path)
+    # fitting
+    if cfg.TRAIN.RESUME:
+        trainer.fit(model,
+                    datamodule=datasets[0],
+                    ckpt_path=cfg.TRAIN.PRETRAINED)
+    else:
+        trainer.fit(model, datamodule=datasets[0])
 
     # checkpoint
     checkpoint_folder = trainer.checkpoint_callback.dirpath
