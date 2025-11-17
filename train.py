@@ -161,6 +161,32 @@ def main():
 
     vae_type = cfg.model.motion_vae.target.split(".")[-1].lower().replace(
         "vae", "")
+    
+    fintune_mode = True
+    # ==> VVVV START OF NEW CODE FOR FINETUNING VVVV
+    # Check if we are in finetune mode (not resuming, but a checkpoint is specified in TEST block)
+    if fintune_mode and not cfg.TRAIN.RESUME and cfg.TEST.CHECKPOINTS and os.path.exists(cfg.TEST.CHECKPOINTS):
+        logger.info(f"FINETUNE MODE: Loading weights from {cfg.TEST.CHECKPOINTS}")
+        state_dict = torch.load(cfg.TEST.CHECKPOINTS, map_location="cpu")
+        
+        # Handle checkpoints that might have a 'state_dict' key or be the dict itself
+        if 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+
+        # The original code removes sequence_pos_encoding.pe, let's do the same for consistency
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            if k not in ["denoiser.sequence_pos_encoding.pe"]:
+                new_state_dict[k] = v
+
+        # Load with strict=False to allow for our new modules (like physics_encoder)
+        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+        logger.info(f"Weights loaded for finetuning. Missing keys: {missing_keys}")
+        logger.info(f"Unexpected keys in checkpoint: {unexpected_keys}")
+
+    # ==> ^^^^ END OF NEW CODE FOR FINETUNING ^^^^
+        
     # strict load vae model
     if cfg.TRAIN.PRETRAINED_VAE:
         logger.info("Loading pretrain vae from {}".format(

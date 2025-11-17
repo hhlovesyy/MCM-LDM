@@ -195,3 +195,38 @@ def a2m_collate(batch):
         "length": lenbatchTensor
     }
     return adapted_batch
+
+
+def physimos_collate(batch):
+    """
+    Collate function for the PhysiMoS100StyleDataset.
+    Takes a list of dictionaries and collates them into a batch dictionary.
+    """
+    # Filter out any samples that might have failed to load
+    notnone_batches = [b for b in batch if b is not None]
+    if not notnone_batches:
+        return {} # Return empty dict if batch is empty
+
+    # It's good practice to sort by length for potential PackedSequence usage
+    notnone_batches.sort(key=lambda x: x["length"], reverse=True)
+
+    batch_dict = {}
+
+    # Collate all tensors, padding them to the max length in the batch
+    batch_dict["motion_after"] = collate_tensors([b["motion_after"] for b in notnone_batches])
+    batch_dict["motion_before"] = collate_tensors([b["motion_before"] for b in notnone_batches])
+    
+    batch_dict["phys_params"] = collate_tensors([b["phys_params"] for b in notnone_batches])
+    batch_dict["scene_cat"] = collate_tensors([b["scene_cat"] for b in notnone_batches])
+    
+    # Collate lengths into a tensor
+    lengths = [b["length"] for b in notnone_batches]
+    batch_dict["length"] = torch.tensor(lengths, dtype=torch.long)
+    
+    # Store captions as a list for debugging purposes
+    batch_dict["caption"] = [b["caption"] for b in notnone_batches]
+    
+    # Automatically generate the mask based on lengths
+    batch_dict["mask"] = lengths_to_mask(batch_dict["length"])
+
+    return batch_dict

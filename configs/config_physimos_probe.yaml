@@ -1,0 +1,126 @@
+# configs/config_physimos_probe.yaml
+# This config is for the PhysiMoS technical probe, fine-tuning MCM-LDM.
+# This is a full config file, not using 'defaults', to avoid any key conflicts.
+
+####################################
+# The following are general settings
+####################################
+NAME: "PhysiMoS_Probe_Finetune_v1" #<-- 1. MODIFIED
+FOLDER_EXP: "experiments/physimos_probe"   #<-- 2. NEW
+DEBUG: False
+ACCELERATOR: 'gpu'
+DEVICE: [0]
+
+#####################################
+# The following are training settings
+#####################################
+TRAIN:
+  STAGE: diffusion
+  DATASETS: ['PHYSIMOS100STYLE'] #<-- 3. MODIFIED
+  NUM_WORKERS: 4 #<-- Can increase if IO is a bottleneck
+  BATCH_SIZE: 128 #<-- 4. MODIFIED
+  END_EPOCH: 100 #<-- 5. MODIFIED
+
+  RESUME: '' 
+  PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt'
+  OPTIM:
+    TYPE: AdamW
+    LR: 1e-4
+  ABLATION:
+    SKIP_CONNECT: True
+    PE_TYPE: mld
+    DIFF_PE_TYPE: mld
+
+#####################################
+# The following are validation settings
+#####################################
+EVAL:
+  DATASETS: ['PHYSIMOS100STYLE'] #<-- 6. MODIFIED (Good practice to eval on the same dist)
+  BATCH_SIZE: 32
+  SPLIT: test
+
+#####################################
+# The following are testing settings
+#####################################
+TEST:
+  CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' #<-- 7. [CRITICAL] UPDATE THIS PATH
+  DATASETS: ['PHYSIMOS100STYLE']
+  SPLIT: test
+  BATCH_SIZE: 128
+  MEAN: False
+  NUM_SAMPLES: 1
+  FACT: 1
+
+#####################################
+# The following are basic datasets settings
+#####################################
+DATASET:
+  SPLIT_DIR: './datasets/100StyleDataset'
+  JOINT_TYPE: 'humanml3d'
+  SAMPLER:
+    MAX_LEN: 720  # 用这个新的应该会覆盖原来的，100Style数据集的分布会比较广泛一点，长数据比较多
+    MIN_LEN: 40
+  # ==> 8. ADDED NEW DATASET CONFIGURATION
+  PHYSIMOS100STYLE:
+    ROOT: "./datasets/100StyleDataset"
+    UNIT_LEN: 4
+    SCENE_MAPPING_PATH: "./datasets/100StyleDataset/scenes.json"
+    STYLE_SUBSET:
+      - "old"
+      - "depressed"
+      - "crouched"
+      - "elated"
+      - "proud"
+      - "skip"
+      - "robot"
+      - "stiff"
+      - "heavyset"
+
+#####################################
+# The following are metric settings
+#####################################
+METRIC:
+  TYPE: ['TemosMetric', 'TM2TMetrics'] # Keep for now, can be commented out if they cause issues
+
+#####################################
+# The following are training losses settings
+#####################################
+LOSS:
+  TYPE: mld
+  LAMBDA_LATENT: 1.0e-5
+  LAMBDA_KL: 1.0e-4
+  LAMBDA_REC: 1.0
+  LAMBDA_GEN: 1.0
+  LAMBDA_CROSS: 1.0
+  LAMBDA_CYCLE: 0.0
+  LAMBDA_PRIOR: 0.0
+  DIST_SYNC_ON_STEP: False
+
+#####################################
+# The following are basic model settings
+#####################################
+model:
+  vae: true
+  model_type: mld
+  condition: 'text' # This will be effectively ignored by our model changes later
+  latent_dim: [7, 256]
+  ff_size: 1024
+  num_layers: 9
+  num_head: 4
+  droupout: 0.1
+  activation: gelu
+  guidance_scale: 5
+  guidance_uncondp: 0.25
+
+#####################################
+# The following are loggers settings
+#####################################
+LOGGER:
+  SACE_CHECKPOINT_EPOCH: 5 #<-- 9. MODIFIED
+  LOG_EVERY_STEPS: 1
+  VAL_EVERY_STEPS: 20 #<-- 10. MODIFIED
+  TENSORBOARD: True
+  WANDB:
+    PROJECT: 'mld-physimos-probe' #<-- 11. MODIFIED
+    OFFLINE: True
+    RESUME_ID: null

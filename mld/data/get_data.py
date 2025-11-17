@@ -3,6 +3,7 @@ from os.path import join as pjoin
 import numpy as np
 from .humanml.utils.word_vectorizer import WordVectorizer
 from .HumanML3D import HumanML3DDataModule
+from .physimos_dataset import PhysiMoS100StyleDataset
 from .utils import *
 
 
@@ -54,6 +55,8 @@ def get_collate_fn(name, phase="train"):
         return mld_collate
     elif name.lower() in ["humanact12", 'uestc']:
         return a2m_collate
+    elif name.lower() in ["physimos100style"]:
+        return physimos_collate
     # else:
     #     return all_collate
     # if phase == "test":
@@ -127,6 +130,85 @@ def get_datasets(cfg, logger=None, phase="train"):
                 translation=cfg.DATASET.HUMANACT12.TRANSLATION)
             cfg.DATASET.NCLASSES = dataset.nclasses
             datasets.append(dataset)
+        elif dataset_name.lower() == "physimos100style":
+            cfg_ds = cfg.DATASET.PHYSIMOS100STYLE # 从配置中读取我们数据集的专属设置
+            data_root = cfg_ds.ROOT
+            
+            # get mean and std, 我们可以复用 humanml3d 的
+            mean, std = get_mean_std(phase, cfg, "humanml3d")
+            
+            # get collect_fn
+            collate_fn = get_collate_fn(dataset_name, phase)
+
+            # Determine the correct split file to use
+            if phase == 'train':
+                split_file = pjoin(cfg.DATASET.SPLIT_DIR, 'train.txt')
+            else: # for val/test
+                split_file = pjoin(cfg.DATASET.SPLIT_DIR, 'test.txt')
+
+            # Directly instantiate our custom Dataset
+            our_dataset = PhysiMoS100StyleDataset(
+                mean=mean,
+                std=std,
+                split_file=split_file,
+                motion_dir=pjoin(data_root, "new_joint_vecs"),
+                max_motion_length=cfg.DATASET.SAMPLER.MAX_LEN,
+                min_motion_length=cfg.DATASET.SAMPLER.MIN_LEN,
+                unit_length=cfg_ds.UNIT_LEN,
+                style_dict_path=pjoin(data_root, "Style_name_dict.txt"),
+                scene_mapping_path=cfg_ds.SCENE_MAPPING_PATH,
+                # Use .get() for safety in case the key doesn't exist in the yaml
+                style_subset=cfg_ds.get("STYLE_SUBSET", None) 
+            )
+
+            # A simple wrapper class to mimic the Pytorch Lightning DataModule interface
+            # that train.py expects.
+            class SimpleDataModule:
+                def __init__(self, train_dataset, val_dataset, mean_val, std_val):
+                    self.train_dataset = train_dataset
+                    self.val_dataset = val_dataset
+                    # Make sure essential attributes are available
+                    self.nfeats = getattr(train_dataset, 'nfeats', 0)
+                    self.njoints = getattr(train_dataset, 'njoints', self.nfeats // 22) 
+                    self.mean = mean_val
+                    self.std = std_val
+
+                def train_dataloader(self):
+                    return torch.utils.data.DataLoader(
+                        self.train_dataset,
+                        batch_size=cfg.TRAIN.BATCH_SIZE,
+                        shuffle=True,
+                        num_workers=cfg.TRAIN.NUM_WORKERS,
+                        collate_fn=collate_fn,
+                        pin_memory=True
+                    )
+                
+                # We also need a validation dataloader
+                def val_dataloader(self):
+                    return torch.utils.data.DataLoader(
+                        self.val_dataset,
+                        batch_size=cfg.EVAL.BATCH_SIZE,
+                        shuffle=False,
+                        num_workers=cfg.TRAIN.NUM_WORKERS,
+                        collate_fn=collate_fn,
+                        pin_memory=True
+                    )
+
+            # We need a validation set too. For our probe, we can just reuse the same
+            # dataset instance. Pytorch Lightning will handle it.
+            # In a real scenario, you'd create another instance with a 'val.txt' split.
+            train_phase_dataset = our_dataset
+            val_phase_dataset = PhysiMoS100StyleDataset(
+                mean=mean, std=std, split_file=pjoin(cfg.DATASET.SPLIT_DIR, 'val.txt'), # using test set for validation
+                motion_dir=pjoin(data_root, "new_joint_vecs"),
+                max_motion_length=cfg.DATASET.SAMPLER.MAX_LEN,
+                min_motion_length=cfg.DATASET.SAMPLER.MIN_LEN,
+                unit_length=cfg_ds.UNIT_LEN,
+                style_dict_path=pjoin(data_root, "Style_name_dict.txt"),
+                scene_mapping_path=cfg_ds.SCENE_MAPPING_PATH,
+                style_subset=cfg_ds.get("STYLE_SUBSET", None) 
+            )
+            datasets.append(SimpleDataModule(train_phase_dataset, val_phase_dataset, mean, std))
         else:
             raise NotImplementedError
     cfg.DATASET.NFEATS = datasets[0].nfeats

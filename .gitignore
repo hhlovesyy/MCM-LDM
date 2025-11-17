@@ -45,3 +45,5 @@ AddingCodes/
 # 操作系统生成的文件
 .DS_Store
 Thumbs.db
+debug_dumps/tensors_first_batch.pt
+style_translator_dataset.pt
