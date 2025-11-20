@@ -7,15 +7,17 @@ import logging
 import json
 import collections
 
-# Initialize a logger for this module
+# 初始化日志模块
 logger = logging.getLogger(__name__)
 
 class PhysiMoS100StyleDataset(data.Dataset):
     """
-    A Dataset class for the PhysiMoS project's technical probe.
-    - Loads motions from the 100Style dataset.
-    - Generates "pseudo" physical parameters and scene categories based on a mapping file.
-    - Follows the self-reconstruction proxy: motion_before = motion_after.
+    PhysiMoS 项目技术探针专用 Dataset 类。
+    功能：
+    1. 加载 100Style 数据集动作文件。
+    2. 基于 JSON 映射文件，生成"伪"物理参数和场景类别。
+    3. 实现物理参数的噪声注入，防止过拟合。
+    4. 遵循 Self-Reconstruction (自重建) 代理任务逻辑。
     """
     def __init__(
         self,
@@ -27,71 +29,84 @@ class PhysiMoS100StyleDataset(data.Dataset):
         min_motion_length,
         unit_length,
         style_dict_path,
-        scene_mapping_path, # Path to the new scenes.json file
-        style_subset=None,    # Optional: A list of style names for a mini-dataset probe
-        **kwargs,             # Gracefully accept and ignore other dataset params
+        scene_mapping_path,   # 新增的 scenes.json 路径
+        style_subset=None,    # 可选：用于快速测试的小样本子集
+        phys_noise_scale=0.05, # 新增：物理参数的噪声强度，防止死记硬背
+        **kwargs,             # 优雅地忽略其他无关参数
     ):
         self.max_motion_length = max_motion_length
         self.min_motion_length = min_motion_length
         self.unit_length = unit_length
         self.mean = mean
         self.std = std
+        self.phys_noise_scale = phys_noise_scale  # 保存噪声系数
 
-        # --- 1. Load scene and physics mappings from the JSON file ---
+        # --- 1. 加载场景和物理参数映射 (JSON) ---
         with open(scene_mapping_path, 'r') as f:
             scene_data = json.load(f)
         self.style_to_phys = scene_data["style_mapping"]
-        self.scene_categories = scene_data["scene_categories"]
-        self.scene_to_id = {name: i for i, name in enumerate(self.scene_categories)}
-        self.num_scenes = len(self.scene_categories)
-        self.phys_params_dim = len(scene_data["physical_parameters_desc"])
-        logger.info(f"PhysiMoS: Loaded scene mapping for {len(self.style_to_phys)} styles across {self.num_scenes} scenes.")
-        logger.info(f"PhysiMoS: Physical parameter dimension is {self.phys_params_dim}.")
+        # self.scene_categories = scene_data["scene_categories"]
+        # # 构建 场景名 -> ID 的映射字典
+        # self.scene_to_id = {name: i for i, name in enumerate(self.scene_categories)}
+        # self.num_scenes = len(self.scene_categories)
 
-        # --- 2. Load file ID to style name mapping ---
+        self.scene_categories = ["Windy"] 
+        self.scene_to_id = {"Windy": 0}
+        self.num_scenes = 1 # 只有一个场景类别，即“有风”，看一下模型有没有希望从物理参数中学到东西
+
+        self.phys_params_dim = len(scene_data["physical_parameters_desc"])
+        
+        logger.info(f"PhysiMoS: 已加载场景映射，包含 {len(self.style_to_phys)} 种风格，归属于 {self.num_scenes} 类场景。")
+        logger.info(f"PhysiMoS: 物理参数维度为 {self.phys_params_dim}。噪声强度设置为: {self.phys_noise_scale}")
+
+        # --- 2. 加载 文件ID -> 风格名 的映射 ---
         self.id_to_style = {}
         with open(style_dict_path, 'r') as f:
             for line in f.readlines():
                 parts = line.strip().split()
                 if len(parts) >= 2:
                     file_id = parts[0]
+                    # 处理风格名格式：转小写，去空格，取下划线前缀
                     style_name_key = parts[1].split('_')[0].lower().replace(" ", "")
                     self.id_to_style[file_id] = style_name_key
         
-        split_name = split_file.split('/')[-1].split('.')[0].upper() # e.g., 'TRAIN' or 'TEST'
+        # 获取当前划分的名称 (TRAIN/TEST) 用于日志
+        split_name = split_file.split('/')[-1].split('.')[0].upper()
         logger.info(f"--- [DIAGNOSTIC REPORT FOR {split_name} SPLIT] ---")
 
-        # --- 3. Load IDs from the dataset split file ---
+        # --- 3. 读取数据集 Split 文件中的 ID 列表 ---
         id_list = []
         with open(split_file, "r") as f:
             for line in f.readlines():
                 id_list.append(line.strip())
-        logger.info(f"1. Total file IDs found in '{split_name}.txt': {len(id_list)}")
+        logger.info(f"1. '{split_name}.txt' 中发现总文件 ID 数: {len(id_list)}")
 
-        # --- 4. Define known broken styles to exclude ---
+        # --- 4. 定义已知的损坏或需要排除的风格 (黑名单) ---
         styles_to_exclude = { "whirlarms", "widelegs", "wigglehips", "wildarms", "wildlegs", "zombie" }
 
-        # --- 5. [Core Logic] Load and filter data ---
+        # --- 5. [核心逻辑] 数据加载与过滤 ---
         self.data_dict = {}
         self.name_list = []
         
-        # Determine which styles to load
+        # 确定需要加载哪些风格
         valid_styles_from_json = set(self.style_to_phys.keys())
         if style_subset:
-            # If a subset is provided for the probe, use the intersection of both sets
+            # 如果是在做探针测试(Probe Mode)，取交集
             selected_styles = set(style_subset).intersection(valid_styles_from_json)
-            logger.info(f"[PROBE MODE] Loading a mini-dataset with {len(selected_styles)} styles: {selected_styles}")
+            logger.info(f"[PROBE MODE] 仅加载 {len(selected_styles)} 种指定风格: {selected_styles}")
         else:
             selected_styles = valid_styles_from_json
         
+        # 统计拒绝加载的原因，用于诊断
         rejection_reasons = collections.defaultdict(int)
+        
         for name in id_list:
             style_name = self.id_to_style.get(name)
             
-            # Filtering criteria:
-            # 1. Style name must exist
-            # 2. Must not be in the exclusion list
-            # 3. Must be one of the selected styles for loading
+            # 过滤条件:
+            # 1. 必须有风格名
+            # 2. 不能在黑名单中
+            # 3. 必须在 selected_styles 范围内
             if not style_name or style_name in styles_to_exclude or style_name not in selected_styles:
                 rejection_reasons['unselected_style'] += 1
                 continue
@@ -100,12 +115,12 @@ class PhysiMoS100StyleDataset(data.Dataset):
                 motion_path = pjoin(motion_dir, name + ".npy")
                 motion = np.load(motion_path)
 
-                # 4. Filter by motion length
+                # 4. 长度过滤
                 if not (self.min_motion_length <= len(motion) < self.max_motion_length):
                     rejection_reasons['invalid_length'] += 1
                     continue
                 
-                # If all checks pass, add to our dictionary
+                # 所有检查通过，存入内存
                 self.data_dict[name] = {
                     "motion": motion,
                     "length": len(motion),
@@ -116,24 +131,23 @@ class PhysiMoS100StyleDataset(data.Dataset):
                 rejection_reasons['file_not_found_or_corrupt'] += 1
                 continue
         
-        # 3. Print the report
+        # --- 打印详细的诊断报告 ---
         total_rejected = sum(rejection_reasons.values())
         total_processed = len(id_list)
         pass_rate = (len(self.name_list) / total_processed) * 100 if total_processed > 0 else 0
 
-        logger.info(f"2. Total samples processed: {total_processed}")
-        logger.info(f"   - Samples REJECTED: {total_rejected}")
-        logger.info(f"     - Reason 'Unselected Style': {rejection_reasons['unselected_style']}")
-        logger.info(f"     - Reason 'Invalid Length (not in [{self.min_motion_length}, {self.max_motion_length}))': {rejection_reasons['invalid_length']}")
-        logger.info(f"     - Reason 'File Not Found/Corrupt': {rejection_reasons['file_not_found_or_corrupt']}")
-        logger.info(f"   - Samples ACCEPTED: {len(self.name_list)}")
-        logger.info(f"3. Pass Rate for this split: {pass_rate:.2f}%")
-        logger.info(f"--- [END OF DIAGNOSTIC REPORT FOR {split_name} SPLIT] ---")
+        logger.info(f"2. 处理样本总数: {total_processed}")
+        logger.info(f"   - 被拒绝样本数: {total_rejected}")
+        logger.info(f"     - 原因 '非选定风格': {rejection_reasons['unselected_style']}")
+        logger.info(f"     - 原因 '长度不符': {rejection_reasons['invalid_length']}")
+        logger.info(f"     - 原因 '文件缺失/损坏': {rejection_reasons['file_not_found_or_corrupt']}")
+        logger.info(f"   - 成功加载样本数: {len(self.name_list)}")
+        logger.info(f"3. 通过率: {pass_rate:.2f}%")
+        logger.info(f"--- [END OF REPORT] ---")
 
         if not self.name_list:
-            raise ValueError(f"PhysiMoS ({split_name}): No valid samples were loaded.")
+            raise ValueError(f"PhysiMoS ({split_name}): 未加载到任何有效样本，请检查路径或配置！")
         
-        logger.info(f"PhysiMoS: Successfully loaded {len(self.name_list)} motion samples.")
         self.nfeats = self.data_dict[self.name_list[0]]['motion'].shape[1]
 
     def __len__(self):
@@ -145,44 +159,223 @@ class PhysiMoS100StyleDataset(data.Dataset):
         
         motion, m_length, style_name = data["motion"], data["length"], data["style_name"]
 
-        # --- Step 1: Get the physics and scene conditions for this style ---
+        # --- 步骤 1: 获取对应的物理参数和场景标签 ---
         phys_data = self.style_to_phys[style_name]
         scene_name = phys_data["scene_category"]
-        phys_params = phys_data["physical_parameters"]
+        raw_phys_params = phys_data["physical_parameters"]
 
-        # Convert scene name to a one-hot vector
+        # 处理物理参数：转 Tensor 并注入噪声
+        # [重要] 这里的噪声是为了防止模型单纯记住 "这个数值组合 = 这个动作"
+        # 训练时加噪声，推理时(Evaluation)通常不加，但在探针阶段为了鲁棒性可以一直加，或者在这里判断 self.train
+        phys_params_tensor = torch.tensor(raw_phys_params, dtype=torch.float32)
+        if self.phys_noise_scale > 0:
+            noise = torch.randn_like(phys_params_tensor) * self.phys_noise_scale
+            phys_params_tensor = phys_params_tensor + noise
+            # 可选：如果是归一化参数，可能需要 clamp 到 0-1 之间，视具体物理定义而定
+            # phys_params_tensor = torch.clamp(phys_params_tensor, 0.0, 1.0)
+
+        # 处理场景标签：转 One-Hot
         scene_id = self.scene_to_id[scene_name]
         scene_cat_one_hot = np.zeros(self.num_scenes, dtype=np.float32)
         scene_cat_one_hot[scene_id] = 1.0
 
-        # --- Step 2: Crop the motion randomly and standardize ---
+        # --- 步骤 2: 随机裁剪与标准化 ---
+        # 计算裁剪后的长度（必须是 unit_length 的整数倍，适应 VAE/Transformer 的窗口）
         m_length_cropped = (m_length // self.unit_length) * self.unit_length
         
-        # Robustness: ensure cropped length is at least one unit
+        # 鲁棒性修复：如果原始长度恰好等于 unit_length，避免 randint(0,0) 报错
         if m_length_cropped < self.unit_length:
+             # 理论上前面 init 已经过滤了过短的，但为了双重保险
             m_length_cropped = self.unit_length
-        
-        idx = random.randint(0, m_length - m_length_cropped)
+
+        if m_length > m_length_cropped:
+            idx = random.randint(0, m_length - m_length_cropped)
+        else:
+            idx = 0
+            
         motion_cropped = motion[idx:idx + m_length_cropped]
         
+        # 标准化 (Standardization)
         motion_normalized = (motion_cropped - self.mean) / self.std
 
-        # In case of rare NaN values after normalization, resample.
+        # NaN 检测：如果标准化后出现 NaN，递归重试另一个样本
         if np.any(np.isnan(motion_normalized)):
             logger.warning(f"NaN detected in motion sample {name}. Resampling...")
             return self.__getitem__(np.random.randint(0, len(self.name_list)))
 
-        # --- Step 3: Create the self-reconstruction pair ---
-        # As discussed, `motion_before` is simply a copy of `motion_after` for our probe.
+        # --- 步骤 3: 构建输入与目标 (Input & Target) ---
+        # 目前是自重建任务 (Self-Reconstruction)
         motion_after = motion_normalized
-        motion_before = motion_after.copy()
+        motion_before = motion_after.copy() # Deep copy
 
-        # --- Step 4: Assemble and return the data dictionary ---
+        # 这里的 motion_before 是作为 Condition 输入给模型的 Content
+        # 未来我们可能在这里做 mask (随机遮挡) 或者 zero-out，强迫模型关注 phys_params
+
+        # --- 步骤 4: 返回字典 ---
         return {
-            "motion_after": torch.from_numpy(motion_after).float(),
-            "motion_before": torch.from_numpy(motion_before).float(),
+            "motion_after": torch.from_numpy(motion_after).float(),   # Ground Truth (Target)
+            "motion_before": torch.from_numpy(motion_before).float(), # Input Condition (Content)
             "length": m_length_cropped,
-            "phys_params": torch.from_numpy(np.array(phys_params, dtype=np.float32)),
-            "scene_cat": torch.from_numpy(scene_cat_one_hot),
-            "caption": f"Style: {style_name}, Scene: {scene_name}",  # Included for easier debugging
+            "phys_params": phys_params_tensor,                        # Input Condition (Physics)
+            "scene_cat": torch.from_numpy(scene_cat_one_hot),         # Input Condition (Scene)
+            "caption": f"Style: {style_name}, Scene: {scene_name}",   # 调试用文本
+        }
+    
+
+
+import os
+class PhysicsDataset(data.Dataset):
+    def __init__(
+        self,
+        mean,
+        std,
+        split_file, # 虽然我们可能不需要split文件，但为了兼容接口保留
+        motion_dir,
+        json_dir,
+        max_motion_length=196, # 训练时裁剪的最大长度
+        min_motion_length=40,
+        unit_length=4,
+        max_wind_force=330000.0, # 【关键】根据你的数据统计设定，用于归一化
+        **kwargs,
+    ):
+        self.mean = mean
+        self.std = std
+        self.max_motion_length = max_motion_length
+        self.min_motion_length = min_motion_length
+        self.unit_length = unit_length
+        self.max_wind_force = max_wind_force
+        
+        self.motion_dir = motion_dir
+        self.json_dir = json_dir
+
+        # --- 1. 定义场景 (方向) ---
+        # 只要文件名包含这些关键词，就归为该类
+        # self.scene_categories = ["Front", "Back", "Left", "Right", "FrontLeft", "FrontRight", "BackLeft", "BackRight"]
+        self.scene_categories = ["Windy"]
+        self.scene_to_id = {name: i for i, name in enumerate(self.scene_categories)}
+        self.num_scenes = len(self.scene_categories)
+
+        # --- 2. 扫描文件 ---
+        self.data_list = []
+        
+        # 遍历 motion_dir 下的所有 npy
+        all_files = [f for f in os.listdir(motion_dir) if f.endswith('.npy')]
+        
+        logger.info(f"Scanning {len(all_files)} files in {motion_dir}...")
+        
+        for fname in all_files:
+            # 解析文件名，例如: W_0p0_Back_300k_0035.npy
+            # 我们假设文件名里一定包含方向关键词
+            # found_scene = None
+            found_scene = "Windy"  # 这句加上是为了让所有的都是Windy，先这样看看效果
+            # for scene_name in self.scene_categories:
+            #     if scene_name in fname: # Case sensitive? 文件名通常是大写开头
+            #         found_scene = scene_name
+            #         break
+            
+            # if found_scene is None:
+            #     # 如果有些文件没有方向标记，可以选择跳过或归为默认
+            #     print(f"Skipping {fname}: No direction found in filename.")
+            #     continue
+                
+            self.data_list.append({
+                "motion_path": pjoin(motion_dir, fname),
+                "json_path": pjoin(json_dir, fname.replace(".npy", ".json")),
+                "scene_name": found_scene,
+                "name": fname
+            })
+
+        logger.info(f"PhysicsDataset: Loaded {len(self.data_list)} valid samples.")
+        
+    def __len__(self):
+        return len(self.data_list)
+
+    def __getitem__(self, item):
+        data_item = self.data_list[item]
+        
+        # --- A. 加载动作数据 ---
+        motion = np.load(data_item["motion_path"]) # (Total_Frames, 263)
+        total_frames = motion.shape[0]
+        
+        # --- B. 随机裁剪 (Random Crop) ---
+        # 确保裁剪长度是 unit_length 的倍数 (VAE requirement)
+        # 策略：如果有足够长度，随机切一段；否则取全部
+        
+        target_len = self.max_motion_length
+        # 确保 target_len 是 4 的倍数
+        target_len = (target_len // self.unit_length) * self.unit_length
+        
+        if total_frames > target_len:
+            # 随机选择起始点
+            max_start = total_frames - target_len
+            start_idx = random.randint(0, max_start)
+            motion_crop = motion[start_idx : start_idx + target_len]
+        else:
+            # 如果太短，就裁剪掉尾部多余的帧使其符合 unit_length
+            valid_len = (total_frames // self.unit_length) * self.unit_length
+            if valid_len < self.unit_length: valid_len = self.unit_length # 至少留一点
+            motion_crop = motion[:valid_len]
+            
+        # --- C. 动作归一化 (Motion Normalization) ---
+        motion_norm = (motion_crop - self.mean) / self.std
+        
+        # --- D. 加载物理参数 (Physics Condition) ---
+        with open(data_item["json_path"], 'r') as f:
+            meta = json.load(f)
+            
+        # 提取 wind_force
+        # JSON format: "parameters": {"wind_force": {"x": ..., "y": ..., "z": ...}}
+        wf = meta["parameters"]["wind_force"]  # TODO:后面应该要改成一长串的物理参数，暂时只有wind_force
+        # raw_x = wf['x']
+        # raw_y = wf['y']
+        # raw_z = wf['z']
+        
+        # # 转换到 HumanML3D (Y-up) 坐标系
+        # wind_vec = np.array([raw_x, raw_y, raw_z], dtype=np.float32)
+        
+        # # 计算风力大小 (Magnitude)
+        # wind_mag = np.linalg.norm(wind_vec)
+        
+        # # [物理归一化]
+        # # 将向量除以最大风力，使其落在 [-1, 1] 之间
+        # # 将大小除以最大风力，使其落在 [0, 1] 之间
+        # wind_vec_norm = wind_vec / self.max_wind_force
+        # wind_mag_norm = wind_mag / self.max_wind_force
+        
+        # # 拼装物理特征向量: [Global_X, Global_Y, Global_Z, Magnitude] -> 4维
+        # # 即使我们把方向作为 Scene 了，保留物理向量依然重要，因为它包含了精确的角度偏移
+        # phys_params = np.concatenate([wind_vec_norm, [wind_mag_norm]])
+        raw_x = wf['x'] / self.max_wind_force
+        raw_y = wf['y'] / self.max_wind_force
+        
+        # 计算模长 (归一化)
+        mag = np.sqrt(wf['x']**2 + wf['y']**2) / self.max_wind_force
+        
+        # 拼装 3 维向量: [UE5_X, UE5_Y, Strength]
+        phys_params = np.array([raw_x, raw_y, mag], dtype=np.float32)
+        phys_params = torch.from_numpy(phys_params).float()
+
+        # --- E. 场景 One-Hot ---
+        # scene_id = self.scene_to_id[data_item["scene_name"]]
+        scene_cat = torch.zeros(self.num_scenes).float()
+        # scene_cat[scene_id] = 1.0
+        scene_cat[0] = 1.0 # 依旧先尝试一个场景类别，看看效果，争取让模型能学到物理参数
+        
+        # --- F. 构建 Input/Target ---
+        # Target: 归一化后的动作
+        motion_after = torch.from_numpy(motion_norm).float()
+        
+        # Input (Content): 
+        # 策略：如果是训练，我们可以让 Input = Target (然后依赖 masking)
+        # 或者，如果未来你有“无风状态”的动作作为 Input，那是最好的。
+        # 暂时我们用 Self-Reconstruction 模式
+        motion_before = motion_after.clone()
+
+        return {
+            "motion_after": motion_after,   # Ground Truth
+            "motion_before": motion_before, # Input Content
+            "length": len(motion_after),
+            "phys_params": phys_params,     # Condition (Vector)
+            "scene_cat": scene_cat,         # Condition (Category)
+            "caption": f"Wind: {data_item['scene_name']}, Mag: {mag:.0f}" # Debug info
         }

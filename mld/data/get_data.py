@@ -3,8 +3,12 @@ from os.path import join as pjoin
 import numpy as np
 from .humanml.utils.word_vectorizer import WordVectorizer
 from .HumanML3D import HumanML3DDataModule
-from .physimos_dataset import PhysiMoS100StyleDataset
+from .physimos_dataset import PhysiMoS100StyleDataset, PhysicsDataset
 from .utils import *
+from mld.data.humanml.scripts.motion_process import (process_file,
+                                                     recover_from_ric,
+                                                     extract_features)
+from pytorch_lightning import LightningDataModule
 
 
 def get_mean_std(phase, cfg, dataset_name):
@@ -147,31 +151,96 @@ def get_datasets(cfg, logger=None, phase="train"):
                 split_file = pjoin(cfg.DATASET.SPLIT_DIR, 'test.txt')
 
             # Directly instantiate our custom Dataset
-            our_dataset = PhysiMoS100StyleDataset(
-                mean=mean,
-                std=std,
-                split_file=split_file,
-                motion_dir=pjoin(data_root, "new_joint_vecs"),
-                max_motion_length=cfg.DATASET.SAMPLER.MAX_LEN,
-                min_motion_length=cfg.DATASET.SAMPLER.MIN_LEN,
-                unit_length=cfg_ds.UNIT_LEN,
-                style_dict_path=pjoin(data_root, "Style_name_dict.txt"),
-                scene_mapping_path=cfg_ds.SCENE_MAPPING_PATH,
-                # Use .get() for safety in case the key doesn't exist in the yaml
-                style_subset=cfg_ds.get("STYLE_SUBSET", None) 
+            # our_dataset = PhysiMoS100StyleDataset(
+            #     mean=mean,
+            #     std=std,
+            #     split_file=split_file,
+            #     motion_dir=pjoin(data_root, "new_joint_vecs"),
+            #     max_motion_length=cfg.DATASET.SAMPLER.MAX_LEN,
+            #     min_motion_length=cfg.DATASET.SAMPLER.MIN_LEN,
+            #     unit_length=cfg_ds.UNIT_LEN,
+            #     style_dict_path=pjoin(data_root, "Style_name_dict.txt"),
+            #     scene_mapping_path=cfg_ds.SCENE_MAPPING_PATH,
+            #     # Use .get() for safety in case the key doesn't exist in the yaml
+            #     style_subset=cfg_ds.get("STYLE_SUBSET", None) 
+            # )
+            
+            # mean = np.load("/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/Mean.npy")
+            # std = np.load("/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/Std.npy")
+            mean = np.load('/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Mean.npy')
+            std = np.load('/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Std.npy')
+            our_dataset = PhysicsDataset(
+                mean = mean,
+                std = std,
+                split_file=None,
+                motion_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/new_joint_vecs",
+                json_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/json_files"
             )
 
+
+        
             # A simple wrapper class to mimic the Pytorch Lightning DataModule interface
             # that train.py expects.
-            class SimpleDataModule:
+            class SimpleDataModule(LightningDataModule):
                 def __init__(self, train_dataset, val_dataset, mean_val, std_val):
+                    super().__init__()
                     self.train_dataset = train_dataset
                     self.val_dataset = val_dataset
                     # Make sure essential attributes are available
-                    self.nfeats = getattr(train_dataset, 'nfeats', 0)
-                    self.njoints = getattr(train_dataset, 'njoints', self.nfeats // 22) 
+                    self.nfeats = 263 # getattr(train_dataset, 'nfeats', 0)
+                    self.njoints = 22 # 固定22就行，容易一点
                     self.mean = mean_val
                     self.std = std_val
+                
+                def feats2joints(self, features):
+                    mean = torch.tensor(self.mean).to(features)
+                    std = torch.tensor(self.std).to(features)
+                    features = features * std + mean
+                    return recover_from_ric(features, self.njoints)
+
+                def joints2feats(self, features):
+                    # chuli (bs, frame, 22, 3)
+
+                    # batch里面逐个动作处理
+                    feature_list = []
+                    for i in range(features.shape[0]):
+                        feature = extract_features(features[i,...])
+
+                        # 复制最后一帧
+                        last_frame = feature[-1].copy()
+                        feature = np.concatenate((feature, np.expand_dims(last_frame, axis=0)), axis=0)
+
+                        feature_list.append(feature)
+                    features = np.array(feature_list)
+                    
+
+                    # mean = self.hparams.mean
+                    # std = self.hparams.std
+                    # features = (features - mean) / std
+                    return features
+
+                def renorm4t2m(self, features):
+                    # renorm to t2m norms for using t2m evaluators
+                    ori_mean = torch.tensor(self.hparams.mean).to(features)
+                    ori_std = torch.tensor(self.hparams.std).to(features)
+                    eval_mean = torch.tensor(self.hparams.mean_eval).to(features)
+                    eval_std = torch.tensor(self.hparams.std_eval).to(features)
+                    features = features * ori_std + ori_mean
+                    features = (features - eval_mean) / eval_std
+                    return features
+
+                def mm_mode(self, mm_on=True):
+                    # random select samples for mm
+                    if mm_on:
+                        self.is_mm = True
+                        self.name_list = self.test_dataset.name_list
+                        self.mm_list = np.random.choice(self.name_list,
+                                                        self.cfg.TEST.MM_NUM_SAMPLES,
+                                                        replace=False)
+                        self.test_dataset.name_list = self.mm_list
+                    else:
+                        self.is_mm = False
+                        self.test_dataset.name_list = self.name_list
 
                 def train_dataloader(self):
                     return torch.utils.data.DataLoader(
@@ -198,16 +267,25 @@ def get_datasets(cfg, logger=None, phase="train"):
             # dataset instance. Pytorch Lightning will handle it.
             # In a real scenario, you'd create another instance with a 'val.txt' split.
             train_phase_dataset = our_dataset
-            val_phase_dataset = PhysiMoS100StyleDataset(
-                mean=mean, std=std, split_file=pjoin(cfg.DATASET.SPLIT_DIR, 'val.txt'), # using test set for validation
-                motion_dir=pjoin(data_root, "new_joint_vecs"),
-                max_motion_length=cfg.DATASET.SAMPLER.MAX_LEN,
-                min_motion_length=cfg.DATASET.SAMPLER.MIN_LEN,
-                unit_length=cfg_ds.UNIT_LEN,
-                style_dict_path=pjoin(data_root, "Style_name_dict.txt"),
-                scene_mapping_path=cfg_ds.SCENE_MAPPING_PATH,
-                style_subset=cfg_ds.get("STYLE_SUBSET", None) 
+            # val_phase_dataset = PhysiMoS100StyleDataset(
+            #     mean=mean, std=std, split_file=pjoin(cfg.DATASET.SPLIT_DIR, 'val.txt'), # using test set for validation
+            #     motion_dir=pjoin(data_root, "new_joint_vecs"),
+            #     max_motion_length=cfg.DATASET.SAMPLER.MAX_LEN,
+            #     min_motion_length=cfg.DATASET.SAMPLER.MIN_LEN,
+            #     unit_length=cfg_ds.UNIT_LEN,
+            #     style_dict_path=pjoin(data_root, "Style_name_dict.txt"),
+            #     scene_mapping_path=cfg_ds.SCENE_MAPPING_PATH,
+            #     style_subset=cfg_ds.get("STYLE_SUBSET", None) 
+            # )
+
+            val_phase_dataset = PhysicsDataset(
+                mean = mean,
+                std = std,
+                split_file=None,
+                motion_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/new_joint_vecs",
+                json_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/json_files"
             )
+
             datasets.append(SimpleDataModule(train_phase_dataset, val_phase_dataset, mean, std))
         else:
             raise NotImplementedError

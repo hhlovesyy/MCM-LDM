@@ -153,6 +153,13 @@ def parse_args(phase="train"):
             help="output seperate or combined npy file",
         )
 
+        group.add_argument(
+            "--physics_json",
+            type=str,
+            required=False, # Make it optional
+            help="Path to the JSON file describing the physics.",
+        )
+
     if phase == "render":
         group.add_argument(
             "--cfg",
@@ -244,6 +251,8 @@ def parse_args(phase="train"):
         cfg.TEST.FOLDER = params.out_dir if params.dir else cfg.TEST.FOLDER
         cfg.DEMO.REPLICATION = params.replication
         cfg.DEMO.OUTALL = params.allinone
+        # and in the assignment part
+        cfg.DEMO.PHYSICS_JSON = params.physics_json
 
     if phase == "render":
         if params.npy:

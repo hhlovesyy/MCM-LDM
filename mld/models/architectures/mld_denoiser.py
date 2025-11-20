@@ -40,7 +40,8 @@ class TransEncoder(nn.Module):
     def forward(self, x, lengths):
         # 
         if lengths is None:
-            lengths = [len(feature) for feature in features]
+            # Fallback for fixed length batches
+            lengths = [x.shape[1]] * x.shape[0]
 
         device = x.device
 
@@ -74,21 +75,33 @@ class TransEncoder(nn.Module):
         return dist
 
 
-
-
-
-
-
-
-
-
-
-
 # adaln-zero in dit
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
+# --- 3. [PhysiMoS 核心] 新增 PhysicsAdapter ---
+# 这是一个轻量级的适配器，用于将物理嵌入注入到 DiTBlock 中。
+# 关键点：Zero Initialization。
+class PhysicsAdapter(nn.Module):
+    def __init__(self, hidden_size, act_layer=nn.SiLU):
+        super().__init__()
+        self.act = act_layer()
+        self.linear = nn.Linear(hidden_size, hidden_size) 
+        
+        # [Zero-Init 魔法]
+        # 初始化为 0，确保训练初期物理分支输出全为 0。
+        nn.init.zeros_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
+
+    def forward(self, x, phys_emb):
+        # phys_emb: [Batch, Dim]
+        # x: [Batch, Seq, Dim]
+        
+        # 简单的门控加法： x = x + ZeroLinear(Act(Phys))
+        # 注意：这里的 phys_emb 需要广播到序列长度
+        gate = self.linear(self.act(phys_emb)) # [Batch, Dim]
+        return gate.unsqueeze(1) # [Batch, 1, Dim], ready to broadcast add
 
 class DiTBlock(nn.Module):
     """
@@ -116,6 +129,64 @@ class DiTBlock(nn.Module):
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        return x
+    
+
+# --- 4. [PhysiMoS 修复] DiTBlock_Phys ---
+# 我们继承原版 DiTBlock 的逻辑，但稍作修改以接纳物理信息。
+# 这样我们可以加载原版权重（除了新增的 adapter）。
+class DiTBlock_Phys(nn.Module):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        
+        # [保留原版 AdaLN] 
+        # 这样做的好处是，我们可以加载预训练权重。
+        # 即使我们在推理时把 style 设为 null，我们也希望保留这个结构，
+        # 或者我们可以微调这个模块来适应新的“物理风格”。
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+        )
+        self.adaLN_modulation_trans = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+        )
+        
+        # [新增] 物理适配器
+        self.phys_adapter_attn = PhysicsAdapter(hidden_size)
+        self.phys_adapter_mlp = PhysicsAdapter(hidden_size)
+
+    def forward(self, x, style_emb, trans_emb, phys_emb):
+        """
+        x: [Batch, Seq, Dim] (Batch First here for internal computation)
+        style_emb: [Batch, Dim] (Original Style or Null)
+        trans_emb: [Batch, Dim] (Trajectory Info)
+        phys_emb: [Batch, Dim] (New Physics Info from SCPAEncoder)
+        """
+        # 1. 原版 Style Modulation
+        shift_msa, scale_msa, gate_msa = self.adaLN_modulation(style_emb).chunk(3, dim=1)
+        shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(trans_emb).chunk(3, dim=1)
+        
+        # 2. 计算 Physics Gate (Zero-Init)
+        phys_gate_attn = self.phys_adapter_attn(x, phys_emb)
+        phys_gate_mlp = self.phys_adapter_mlp(x, phys_emb)
+
+        # 3. 注入 (Attention Block)
+        # 公式: x = x + StyleGate * Attn(...) + PhysGate
+        # 注意：这里我们把物理影响作为一个额外的残差项加进去。
+        x_attn = self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_msa.unsqueeze(1) * x_attn + phys_gate_attn
+        
+        # 4. 注入 (MLP Block)
+        x_mlp = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        x = x + gate_mlp.unsqueeze(1) * x_mlp + phys_gate_mlp
+        
         return x
 
 class MldDenoiser(nn.Module):
@@ -257,6 +328,139 @@ class MldDenoiser(nn.Module):
        
 
         return (sample, )        
+
+
+class MldDenoiserNew(nn.Module):
+    """
+    PhysiMoS 修复版 Denoiser。
+    核心策略：复用原版架构，通过 Adapter 注入物理信息。
+    """
+    def __init__(self,
+                 nfeats: int = 263,
+                 latent_dim: list = [1, 256],
+                 num_layers: int = 6,
+                 num_heads: int = 4,
+                 position_embedding: str = "learned",
+                 **kwargs) -> None:
+        super().__init__()
+        self.latent_dim = latent_dim[-1]
+        # 1. Time Embedding (保持原版)
+        self.time_proj = Timesteps(self.latent_dim, True, 0)
+        self.time_embedding = TimestepEmbedding(self.latent_dim, self.latent_dim)
+        # 2. Condition Projections (保持原版以加载权重)
+        # 即使我们可能不用 style，保留这个层可以避免加载权重报错，或者我们可以用它把 Time 映射进去作为 Null Style。
+        self.emb_proj_st = nn.Sequential(nn.ReLU(), nn.Linear(512, self.latent_dim)) # 假设原 MotionCLIP 维数是 512
+
+        # 3. Trajectory Encoder (恢复原版)
+        self.trans_Encoder = TransEncoder(d_model=self.latent_dim, num_heads=4)
+        
+        # 4. Positional Encodings (保持原版)
+        self.query_pos = build_position_encoding(self.latent_dim, position_embedding=position_embedding)
+
+        # 5. Blocks (使用修复版 DiTBlock_Phys)
+        self.blocks = nn.ModuleList([
+            DiTBlock_Phys(hidden_size=self.latent_dim, num_heads=num_heads) 
+            for _ in range(num_layers)
+        ])
+
+        # 6. Style Remover / Content Process (保留原版逻辑)
+        # 原版在这里做了很复杂的操作：IN -> TransEnc -> Linear
+        # 我们必须保留这个逻辑，因为 Content 的 Latent Feature 分布是经过这些层调整的。
+        self.IN = nn.InstanceNorm1d(256, affine=True) # text_encoded_dim 假定 256
+        seqTransEncoderLayer = nn.TransformerEncoderLayer(d_model=self.latent_dim, nhead=4)
+        self.seqTransEncoder = nn.TransformerEncoder(seqTransEncoderLayer, num_layers=1)
+        self.pe_content = build_position_encoding(self.latent_dim, position_embedding=position_embedding)
+        # 原版从 7*256 -> 6*256，这一步我们保留
+        self.linear = nn.Linear(7*256, 6*256)
+    
+    # 【NOTE：这个函数跟原版的整体数据流依旧有一些不同的地方，如果有报错的话需要回来看一下】
+    def forward(self, sample, timestep, encoder_hidden_states, lengths=None, **kwargs):
+        """
+        严格复刻原版 forward 的数据流，仅在 Block 调用时注入 Physics。
+        """
+        # [复刻] 1. 初始 Permute: [B, S, D] -> [S, B, D]
+        sample = sample.permute(1, 0, 2) # torch.Size([7, bs, 256])
+
+        # [复刻] 2. Time Embedding 处理
+        # 这里保持 sample.shape[1] 作为 batch size，完全正确
+        timesteps = timestep.expand(sample.shape[1]).clone()
+        time_emb = self.time_proj(timesteps)
+        time_emb = time_emb.to(dtype=sample.dtype)
+        # [1, B, D]
+        time_emb = self.time_embedding(time_emb).unsqueeze(0) # torch.Size([1, bs, 256])
+
+        # [解包条件]
+        # encoder_hidden_states 列表顺序由 mld.py 决定，假设为:
+        # [0]: Content [S, B, D]
+        # [1]: Physics [B, 1, D] (这是你的 SCPAEncoder 输出)
+        # [2]: Trajectory [B, S, 3] (这是 Dataset 的 raw trajectory)
+        content_emb = encoder_hidden_states[0].permute(1, 0, 2) # torch.Size([7, bs, 256])
+        physics_emb = encoder_hidden_states[1].squeeze(1)       # torch.Size([bs, 256])
+        trans_cond = encoder_hidden_states[2]                   # torch.Size([bs, motion_seq_len, 3])
+
+        # [复刻] 3. Content 处理 (Style Remover logic)
+        # 这部分逻辑非常绕，但必须保留，否则 Content 就废了
+        content_emb_latent = content_emb
+        content_emb_latent = self.IN(content_emb_latent.permute(1,2,0)).permute(2,0,1)
+        content_emb_latent = content_emb_latent + time_emb # [S, B, D] + [1, B, D] -> Broadcast OK
+        content_emb_latent = self.pe_content(content_emb_latent)
+        content_emb_latent = self.seqTransEncoder(content_emb_latent).permute(1,0,2)
+        content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256)
+        content_emb_latent = content_emb_latent.permute(1,0,2) # torch.Size([6, bs, 256])
+
+        # [复刻] 4. 拼接 Content + Sample
+        # [S_content, B, D] + [S_sample, B, D] -> [S_tot, B, D]
+        xseq = torch.cat((content_emb_latent, sample), axis=0) # torch.Size([13, bs, 256])
+
+        # [修改] 5. 准备 Block 需要的条件
+        
+        # A. Trajectory (使用恢复的 TransEncoder)
+        # 输出 [B, D] -> squeeze 后 [B, D] (原版逻辑)
+        trans_emb = self.trans_Encoder(trans_cond, lengths)
+        trans_emb = trans_emb + time_emb.squeeze(0) # [B, D] + [B, D]
+        trans_emb = trans_emb.squeeze() # torch.Size([bs, 256])
+
+        # B. Style 替代品
+        # 原版是 style_emb + time_emb。我们没有 style_emb。
+        # 策略：直接把 time_emb 作为 style 输入。
+        # 这样 AdaLN 接收到的就是单纯的时间信号，这在 Diffusion 中是合法的。
+        style_emb_latent = time_emb.squeeze(0) # torch.Size([bs, 256])
+
+        # [复刻] 6. 进 Block 前的最后准备
+        # 添加 PE 并 Permute 回 [B, S, D] (因为 DiTBlock 内部期望 Batch First)
+        xseq = self.query_pos(xseq).permute(1,0,2)  # torch.Size([bs, 13, 256])
+        
+        # [核心修改] 7. 循环 DiT Blocks (注入 Physics)
+        for block in self.blocks:
+            # 传入: Feature, Style(Time), Trajectory, Physics
+            xseq = block(xseq, style_emb_latent, trans_emb, physics_emb)
+            
+        # [复刻] 8. 切片与返回
+        # xseq 目前是 [B, S_tot, D]。
+        # 我们要切掉前面的 Content 部分。content_emb_latent.shape[0] 是 Batch (因为在上面permute过)
+        # 等等，让我们看第 3 步最后：content_emb_latent.permute(1,0,2) -> [S, B, D]
+        # 所以 content_emb_latent.shape[0] 是 Sequence Length。
+        # 这里必须用 shape[0] 切片，对应的是 Sequence 维度。
+        # 注意：xseq 是 [B, S, D]，切片 xseq[:, S_cont:, :] 是对的。 torch.Size([bs, 13, 256])
+        sample = xseq[:, content_emb_latent.shape[0]:, :]  # torch.Size([bs, 7, 256])
+        
+        # 原版没有再 permute 回去吗？
+        # 检查原版 return (sample, )。
+        # 原版 forward 第一行 permute(1,0,2) 变成了 [S, B, D]。
+        # 这里的 sample 是 [B, S, D]。
+        # 通常 model 的输出应该和输入形状一致。
+        # 如果输入是 [B, S, D] (Dataset loader 出来通常是这个)，那么这里返回 [B, S, D] 是对的。
+        # **但是在原版代码里**：
+        #   输入 `sample` (Batch First) -> permute -> Seq First
+        #   Output `sample` (Batch First because of the slice)
+        #   所以原版代码输入输出形状是**不一致**的吗？或者外部调用者处理了？
+        #   让我们看 `mld.py` 的 `_diffusion_process`。通常计算 Loss 时需要 shape 匹配。
+        #   既然你给的原版代码最后没有 permute，那我们也别加，保持原样。
+        #   (如果有报错，我们在 mld.py 里修)
+
+        return (sample, ) # torch.Size([bs, 7, 256])
+
+
 
 
 class EmbedAction(nn.Module):

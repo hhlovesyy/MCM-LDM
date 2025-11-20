@@ -155,38 +155,14 @@ def main():
         enable_progress_bar=True,
         logger=loggers,
         callbacks=callbacks,
-        check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
+        # check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
+        check_val_every_n_epoch=1
     )
     logger.info("Trainer initialized")
 
     vae_type = cfg.model.motion_vae.target.split(".")[-1].lower().replace(
         "vae", "")
     
-    fintune_mode = True
-    # ==> VVVV START OF NEW CODE FOR FINETUNING VVVV
-    # Check if we are in finetune mode (not resuming, but a checkpoint is specified in TEST block)
-    if fintune_mode and not cfg.TRAIN.RESUME and cfg.TEST.CHECKPOINTS and os.path.exists(cfg.TEST.CHECKPOINTS):
-        logger.info(f"FINETUNE MODE: Loading weights from {cfg.TEST.CHECKPOINTS}")
-        state_dict = torch.load(cfg.TEST.CHECKPOINTS, map_location="cpu")
-        
-        # Handle checkpoints that might have a 'state_dict' key or be the dict itself
-        if 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
-
-        # The original code removes sequence_pos_encoding.pe, let's do the same for consistency
-        from collections import OrderedDict
-        new_state_dict = OrderedDict()
-        for k, v in state_dict.items():
-            if k not in ["denoiser.sequence_pos_encoding.pe"]:
-                new_state_dict[k] = v
-
-        # Load with strict=False to allow for our new modules (like physics_encoder)
-        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
-        logger.info(f"Weights loaded for finetuning. Missing keys: {missing_keys}")
-        logger.info(f"Unexpected keys in checkpoint: {unexpected_keys}")
-
-    # ==> ^^^^ END OF NEW CODE FOR FINETUNING ^^^^
-        
     # strict load vae model
     if cfg.TRAIN.PRETRAINED_VAE:
         logger.info("Loading pretrain vae from {}".format(
@@ -202,20 +178,84 @@ def main():
                 vae_dict[name] = v
         model.vae.load_state_dict(vae_dict, strict=True)
 
+    # 2. 加载 Denoiser 权重 (Stage 2 - 核心)
     if cfg.TRAIN.PRETRAINED:
-        logger.info("Loading pretrain mode from {}".format(
-            cfg.TRAIN.PRETRAINED))
-        logger.info("Attention! VAE will be recovered")
-        state_dict = torch.load(cfg.TRAIN.PRETRAINED,
-                                map_location="cpu")["state_dict"]
-        # remove mismatched and unused params
+        logger.info(f"[Loader] Loading Denoiser from {cfg.TRAIN.PRETRAINED}")
+        
+        # 读取 Checkpoint
+        ckpt = torch.load(cfg.TRAIN.PRETRAINED, map_location="cpu")
+        if "state_dict" in ckpt:
+            state_dict = ckpt["state_dict"]
+        else:
+            state_dict = ckpt # 有些ckpt直接就是dict
+            
+        # [智能前缀处理] 
+        # 问题：denoiser.ckpt 里的键是 "blocks.0..." 还是 "denoiser.blocks.0..."?
+        # 我们的 model 是 MLD 类，它的 denoiser 在 model.denoiser 下。
+        # 所以我们需要让所有键都以 "denoiser." 开头。
+        
         from collections import OrderedDict
-
         new_state_dict = OrderedDict()
+        
+        # 侦测 Checkpoint 里的前缀格式
+        keys_list = list(state_dict.keys())
+        has_denoiser_prefix = any(k.startswith("denoiser.") for k in keys_list)
+        
+        logger.info(f"[Loader] Detected 'denoiser.' prefix in checkpoint? {has_denoiser_prefix}")
+
         for k, v in state_dict.items():
-            if k not in ["denoiser.sequence_pos_encoding.pe"]:
-                new_state_dict[k] = v
+            # 过滤掉不兼容的旧位置编码 (Sequence Length 可能不同)
+            if "sequence_pos_encoding.pe" in k:
+                continue
+                
+            if has_denoiser_prefix:
+                # 格式匹配：直接用
+                if k.startswith("denoiser."):
+                    new_state_dict[k] = v
+            else:
+                # 格式不匹配：假设 checkpoint 里全是 denoiser 的参数，手动加上前缀
+                # 例如: "blocks.0.attn..." -> "denoiser.blocks.0.attn..."
+                new_key = f"denoiser.{k}"
+                new_state_dict[new_key] = v
+
+        # [手动诊断] 计算 Missing / Unexpected Keys
+        model_keys = set(model.state_dict().keys())
+        ckpt_keys = set(new_state_dict.keys())
+        
+        missing_keys = list(model_keys - ckpt_keys)
+        unexpected_keys = list(ckpt_keys - model_keys)
+        
+        # 打印详细报告
+        logger.info(f"====== Weight Loading Report ======")
+        logger.info(f"Keys in Model: {len(model_keys)} | Keys in Ckpt: {len(ckpt_keys)}")
+        logger.info(f"MISSING Keys (Init Randomly): {len(missing_keys)}")
+        
+        # 关键检查：Physics Encoder 是否在 missing 列表里？(应该在)
+        phys_missing = any("physics_encoder" in k for k in missing_keys)
+        logger.info(f"  - Physics Encoder is missing (Expected)? {phys_missing}")
+        
+        logger.info(f"UNEXPECTED Keys (Ignored): {len(unexpected_keys)}")
+        # 打印部分 Unexpected 以便排查
+        for k in sorted(unexpected_keys)[:5]: logger.info(f"  - UNEXP: {k}")
+        logger.info(f"===================================")
+
+        # 执行加载
         model.load_state_dict(new_state_dict, strict=False)
+        
+        # [安全验证] 验证主干网络是否加载成功
+        # 检查第一层 Attention 的权重是否存在于 missing_keys 中
+        backbone_key = "denoiser.blocks.0.attn.qkv.weight"
+        if backbone_key in missing_keys:
+            logger.error(f"!!! CRITICAL FAILURE !!! Backbone key '{backbone_key}' was NOT loaded.")
+            logger.error("Your model is running with RANDOM weights. Please check 'num_layers' in yaml or key prefixes.")
+            # 在这里抛出异常，阻止无效训练
+            raise RuntimeError("Denoiser backbone weights failed to load.")
+        else:
+            logger.info(">>> SUCCESS: Denoiser backbone loaded. Ready for fine-tuning.")
+
+    # =========================================================
+    # [PhysiMoS] 强化版权重加载逻辑 - 结束
+    # =========================================================
 
     # fitting
     if cfg.TRAIN.RESUME:

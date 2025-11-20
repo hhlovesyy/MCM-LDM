@@ -221,7 +221,7 @@ class MldVae(nn.Module):
         output[~mask.T] = 0
         # Pytorch Transformer: [Sequence, Batch size, ...]
         feats = output.permute(1, 0, 2)
-        return feats
+        return feats # torch.Size([1, 38, 263])
 
 
 

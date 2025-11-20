@@ -40,7 +40,7 @@ from datasets.utils.common.quaternion import *
 from datasets.utils.paramUtil import *
 # import evaluate.utils.rotation_conversions as geometry
 
-
+from mld.models.architectures.scpa_encoder import SCPAEncoder
 
 
 
@@ -76,26 +76,34 @@ class MLD(BaseModel):
 
         parameters = read_yaml_to_dict("configs/motionclip_config/motionclip_params_263.yaml")
         parameters["device"] = 'cuda:{}'.format(cfg["DEVICE"][0])        
-        self.motionclip = get_model_and_data(parameters, split='vald')
-        print("load motion clip-xyz-263")
-        print("Restore weights..")
-        checkpointpath = "checkpoints/motionclip_checkpoint/motionclip.pth.tar"
-        state_dict = torch.load(checkpointpath, map_location=parameters["device"])
-        load_model_wo_clip(self.motionclip, state_dict)
+        # self.motionclip = get_model_and_data(parameters, split='vald')
+        # print("load motion clip-xyz-263")
+        # print("Restore weights..")
+        # checkpointpath = "checkpoints/motionclip_checkpoint/motionclip.pth.tar"
+        # state_dict = torch.load(checkpointpath, map_location=parameters["device"])
+        # load_model_wo_clip(self.motionclip, state_dict)
 
-        self.mean = torch.tensor(self.datamodule.hparams.mean).to(parameters["device"])
-        self.std = torch.tensor(self.datamodule.hparams.std).to(parameters["device"])
+        self.mean = torch.tensor(self.datamodule.mean).to(parameters["device"])
+        self.std = torch.tensor(self.datamodule.std).to(parameters["device"])
 
-        #don't train motionclip
-        self.motionclip.training = False
-        for p in self.motionclip.parameters():
-            p.requires_grad = False
+        # #don't train motionclip
+        # self.motionclip.training = False
+        # for p in self.motionclip.parameters():
+        #     p.requires_grad = False
 
+        self.motionclip = None
 
-
-
-
-
+        # [PhysiMoS 修改] 2. 实例化 Physics Encoder
+        # 假设 cfg 中有相关配置，如果没有，我们使用硬编码默认值（探针阶段为了稳）
+        # 实际上你应该在 configs/model.yaml 里加这部分，或者像下面这样动态注入：
+        print("[PhysiMoS] Initializing SCPAEncoder...")
+        self.physics_encoder = SCPAEncoder(
+            scene_cat_dim=1,      # 对应你的 heavy, light 等 5 类
+            phys_params_dim=3,    # 对应 mass, strength 等 4 个参数
+            d_model=self.latent_dim[-1], # 256
+            n_head=4,
+            n_layers=1
+        )
 
         self.vae = instantiate_from_config(cfg.model.motion_vae)
         # Don't train the motion encoder and decoder
@@ -110,15 +118,35 @@ class MLD(BaseModel):
         self.noise_scheduler = instantiate_from_config(
             cfg.model.noise_scheduler)
 
+        # [PhysiMoS 修改] 4. 精细化冻结参数 (Surgical Freezing)
+        # 目标：冻结 VAE, Denoiser 主干。只训练 PhysicsAdapter 和 SCPAEncoder。
+        
+        # A. 冻结 Denoiser 所有参数
+        for name, param in self.denoiser.named_parameters():
+            param.requires_grad = False
+        
+        # B. 解冻 Physics Adapter (我们在 mld_denoiser.py 里新加的模块)
+        trainable_params = []
+        print("[PhysiMoS] Unfreezing Physics Adapters and Encoder...")
+        for name, param in self.denoiser.named_parameters():
+            if "phys_adapter" in name: # 只要名字里带这个，就训练
+                param.requires_grad = True
+                trainable_params.append(param)
+                # print(f"  - Unfrozen: {name}")
+        
+        # C. 解冻 Physics Encoder (全量训练)
+        for param in self.physics_encoder.parameters():
+            param.requires_grad = True
+            trainable_params.append(param)
 
-        self._get_t2m_evaluator(cfg)
+        # self._get_t2m_evaluator(cfg)
 
+        # D. Optimizer 只传入可训练参数
         if cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
-            self.optimizer = AdamW(lr=cfg.TRAIN.OPTIM.LR,
-                                   params=self.parameters())
+            self.optimizer = AdamW(lr=cfg.TRAIN.OPTIM.LR, params=trainable_params)
+            print(f"[PhysiMoS] Optimizer initialized with {len(trainable_params)} tensor groups.")
         else:
-            raise NotImplementedError(
-                "Do not support other optimizer for now.")
+            raise NotImplementedError("Do not support other optimizer for now.")
 
         if cfg.LOSS.TYPE == "mld":
             self._losses = MetricCollection({
@@ -229,93 +257,92 @@ class MLD(BaseModel):
         return z
     
 # test
-    def forward(self, batch):
-
+    def forward(self, batch, return_attn=False):
+        # [PhysiMoS 修改] 重写 Inference 逻辑
+        
+        # 1. 准备数据
         lengths = batch["length"]
-        # style
-        motion = batch["style_motion"].clone()
-        motion[...,:3] = 0
-
-
-        # content
-        content_motion = batch['content_motion']
-        content_motion = (content_motion - self.mean.to(content_motion.device))/self.std.to(content_motion.device)
-
-        # trajectory
+        # Content Motion (Input Condition)
+        # 记得：batch['motion_before'] 是我们在 dataset 里造的 input
+        content_motion = batch['motion_before'].to(self.device) # torch.Size([1, 38, 263])
+        
+        # Trajectory Condition (Input)
+        # 使用 content motion 的轨迹作为输入
         trans_motion = content_motion.clone()
-        # 
-        content_motion[...,:3] = 0
+        trans_cond = trans_motion[...,:3] # [B, S, 3]
 
+        # Physics Condition (Input)
+        phys_params = batch['phys_params'].to(self.device) # torch.Size([1, 4])
+        scene_cat = batch['scene_cat'].to(self.device)
 
-        scale = batch["tag_scale"]
-        lengths1 = [content_motion.shape[1]]* content_motion.shape[0]
+        scale = batch.get("tag_scale", 1.0) # 默认 scale
         
         if self.cfg.TEST.COUNT_TIME:
             self.starttime = time.time()
             
-        if self.stage in ['diffusion', 'vae_diffusion']:\
-            #add style text in test
+        if self.stage in ['diffusion', 'vae_diffusion']:
             
-            
-            # content motion
+            # 2. 编码 Content
+            # 注意：这里需要 VAE encode。原来的代码逻辑是 encode -> repeat(uncond)
+            # 我们的 VAE 被冻结了，直接用。
             with torch.no_grad():
-                z, dist_m = self.vae.encode(content_motion.float(), lengths1)
-            uncond_tokens = torch.cat([z, z], dim = 1).permute(1,0,2)
-            motion_emb_content = uncond_tokens
+                # 注意：VAE encode 期望输入是 Normalized 过的吗？是的。Dataset 已经 normalized 了。
+                z_content, dist_m = self.vae.encode(content_motion.float(), lengths) # torch.Size([7, 1, 256])
+            
+            # [重要] 原版这里为了 classifier-free guidance 做了 concat([z, z])
+            # 我们也照做，虽然物理部分可能不需要 unconditional，但为了维度对齐
+            motion_emb_content = z_content.permute(1,0,2) # torch.Size([1, 7, 256])
 
-            # style motion
-            lengths11 = [motion.shape[1]]* motion.shape[0]
+            # 3. 编码 Physics (替代 Style)
+            # 我们用 SCPAEncoder 提取特征
+            physics_emb, attn_weights = self.physics_encoder(scene_cat, phys_params, need_weights=True) 
+            
+            # Classifier-Free Guidance 准备
+            # Uncond Condition: 物理参数全零，或者用一个特殊的 learnable token？
+            # 简单起见，我们这里造一个全零的物理嵌入作为 uncond
+            uncond_physics_emb = torch.zeros_like(physics_emb)
+            
+            # 如果做 CFG，需要把 condition 翻倍 (cond, uncond)
+            # 这里我们在 _diffusion_reverse 里处理翻倍逻辑吗？
+            # 原版 _diffusion_reverse 里：latents 翻倍，encoder_hidden_states 不翻倍？
+            # 不，原版代码有点乱。通常做法是把 encoder_hidden_states 也在外边翻倍。
+            # 让我们看 _diffusion_reverse: 
+            #   noise_pred = self.denoiser(..., encoder_hidden_states, ...)
+            #   noise_pred.chunk(2)
+            # 这意味着 denoiser 一次性处理了 (cond_batch + uncond_batch)。
+            # 所以我们需要在这里把 condition 翻倍。
+            
+            # Check mld_denoiser's forward: 它接收的 hidden_states 是 List。
+            # 它内部不做翻倍。所以我们要传进去双倍的 batch。
+            
+            motion_emb_content = torch.cat([motion_emb_content, motion_emb_content], dim=0) # [2B, S, D]
+            physics_emb = torch.cat([uncond_physics_emb, physics_emb], dim=0) # [2B, 1, D]
+            trans_cond = torch.cat([trans_cond, trans_cond], dim=0) # [2B, S, 3]
 
-# for motion input (bs,60,22,3)->(bs,22,3,60)
-            # motion_seq = feats_ref*std + mean
-            motion_seq = motion.unsqueeze(-1).permute(0,2,3,1)
+            # 4. 组装条件
+            multi_cond_emb = [motion_emb_content, physics_emb, trans_cond]
 
-
-            motion_emb = self.motionclip.encoder({'x': motion_seq.float(),
-                            'y': torch.zeros(motion_seq.shape[0], dtype=int, device=motion_seq.device),
-                            'mask': lengths_to_mask(lengths11, device=motion_seq.device)})["mu"]
-            motion_emb = motion_emb.unsqueeze(1)
-
-            # cfree
-            uncond_motion_emb = torch.zeros(motion_emb.shape).to(motion_seq.device)
-            motion_emb = torch.cat([uncond_motion_emb, motion_emb], dim=0)
-
-            # gendurations = torch.ones((12, 1), dtype=int) * 100
-            # generation = self.motionclip.generate(motion_emb.permute(1,0,2), gendurations,
-            #                     is_amass=True,
-            #                     is_clip_features=True)
-            # fff = generation['output_xyz']
-            # fff = fff.permute(0,3,1,2)
-            # fff = fff.cpu().numpy()
-            # np.save("eee.npy",fff)
-
-            # trajectory
-            trans_cond = trans_motion[...,:3]
-            uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
-
-            # three conditions
-            multi_cond_emb = [motion_emb_content, motion_emb, uncond_trans]
-
-
+            # 5. 逆向扩散采样
             z = self._diffusion_reverse(multi_cond_emb, lengths, scale)
 
         elif self.stage in ['vae']:
-            motions = batch['motion']
+            motions = batch['motion_after'] # Ground Truth
             z, dist_m = self.vae.encode(motions, lengths)
 
         with torch.no_grad():
             feats_rst = self.vae.decode(z, lengths)
-            # feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
 
         joints = self.feats2joints(feats_rst.detach().cpu())
-
-        return remove_padding(joints, lengths)
+        joints = remove_padding(joints, lengths)
+        if return_attn:
+            return joints, attn_weights
+        return joints
     
-
-
+    
     def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None):
         # init latents
-        bsz = encoder_hidden_states[0].shape[0]
+        # 注意：encoder_hidden_states[0] 已经是翻倍后的 batch (2B)，如果开了 CFG
+        bsz = encoder_hidden_states[0].shape[0] # Batch dimension is 1 for content [S, B, D]
         if self.do_classifier_free_guidance:
             bsz = bsz // 2
 
@@ -323,49 +350,36 @@ class MLD(BaseModel):
             (bsz, self.latent_dim[0], self.latent_dim[-1]),
             device=encoder_hidden_states[0].device,
             dtype=torch.float,
-        )
+        )  # torch.Size([1, 7, 256])
 
-        # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
-        # set timesteps
-        self.scheduler.set_timesteps(
-            self.cfg.model.scheduler.num_inference_timesteps)
+        self.scheduler.set_timesteps(self.cfg.model.scheduler.num_inference_timesteps)
         timesteps = self.scheduler.timesteps.to(encoder_hidden_states[0].device)
-        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
-        # eta (η) is only used with the DDIMScheduler, and between [0, 1]
+        
         extra_step_kwargs = {}
-        if "eta" in set(
-                inspect.signature(self.scheduler.step).parameters.keys()):
+        if "eta" in set(inspect.signature(self.scheduler.step).parameters.keys()):
             extra_step_kwargs["eta"] = self.cfg.model.scheduler.eta
         
-
         # reverse
         for i, t in enumerate(timesteps):
-            # if i // 10 ==0:
-            #     latent_feature.append()
-            # expand the latents if we are doing classifier free guidance
-            latent_model_input = (torch.cat(
-                [latents] *
-                2) if self.do_classifier_free_guidance else latents)
-            lengths_reverse = (lengths * 2 if self.do_classifier_free_guidance
-                               else lengths)
-            # latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-            # predict the noise residual
+            latent_model_input = (torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents)
+            lengths_reverse = (lengths * 2 if self.do_classifier_free_guidance else lengths)
+            
+            # [重要] Denoiser Forward
             noise_pred = self.denoiser(
                 sample=latent_model_input,
                 timestep=t,
                 encoder_hidden_states=encoder_hidden_states,
                 lengths=lengths_reverse,
-            )[0]
-            # perform guidance
+            )[0]  # torch.Size([2, 7, 256])
+            
             if self.do_classifier_free_guidance:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + scale * (
-                    noise_pred_text - noise_pred_uncond)
-            latents = self.scheduler.step(noise_pred, t, latents,
-                                              **extra_step_kwargs).prev_sample
+                noise_pred = noise_pred_uncond + scale * (noise_pred_text - noise_pred_uncond) # torch.Size([1, 7, 256])
+            
+            latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
-        latents = latents.permute(1, 0, 2)
+        latents = latents.permute(1, 0, 2) # torch.Size([7, 1, 256])
         return latents
 
 
@@ -379,23 +393,23 @@ class MLD(BaseModel):
         # our latent   [batch_size, n_token=1 or 5 or 10, latent_dim=256]
         # sd  latent   [batch_size, [n_token0=64,n_token1=64], latent_dim=4]
         # [n_token, batch_size, latent_dim] -> [batch_size, n_token, latent_dim]
-        latents = latents.permute(1, 0, 2)
+        latents = latents.permute(1, 0, 2)  # torch.Size([bs, 7, 256])
 
         # Sample noise that we'll add to the latents
         # [batch_size, n_token, latent_dim]
         noise = torch.randn_like(latents)
-        bsz = latents.shape[0]
+        bsz = latents.shape[0] # bs
         # Sample a random timestep for each motion
         timesteps = torch.randint(
             0,
             self.noise_scheduler.config.num_train_timesteps,
             (bsz, ),
             device=latents.device,
-        )
+        )  # torch.Size([bs])
         timesteps = timesteps.long()
         # Add noise to the latents according to the noise magnitude at each timestep
         noisy_latents = self.noise_scheduler.add_noise(latents.clone(), noise,
-                                                       timesteps)
+                                                       timesteps)  # torch.Size([bs, 7, 256])
         # Predict the noise residual
         noise_pred = self.denoiser(
             sample=noisy_latents,
@@ -403,7 +417,7 @@ class MLD(BaseModel):
             encoder_hidden_states=encoder_hidden_states,
             lengths=lengths,
             return_dict=False,
-        )[0]
+        )[0]  # torch.Size([bs, 7, 256])
         # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
         if self.cfg.LOSS.LAMBDA_PRIOR != 0.0:
             noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
@@ -462,38 +476,74 @@ class MLD(BaseModel):
         }
         return rs_set
 # train
+    # [PhysiMoS 修改] 核心训练逻辑
     def train_diffusion_forward(self, batch):
-        feats_ref = batch["motion"]
-        feats_content = batch["motion"].clone()
-        feats_content[...,:3] = 0.0
-        lengths = batch["length"]
+        # 1. 获取数据
+        # feats_ref (Target): motion_after
+        feats_ref = batch["motion_after"]  # torch.Size([bs, motion_seq_len, 263])
         
-        # content condition
+        # feats_content (Input): motion_before
+        # dataset 已经帮我们处理好了 motion_before = motion_after (或被 mask)
+        feats_content = batch["motion_before"] # torch.Size([bs, motion_seq_len, 263])
+        
+        # Physics Input
+        phys_params = batch["phys_params"] # torch.Size([bs, 4])
+        scene_cat = batch["scene_cat"] # torch.Size([bs, 5])
+
+        lengths = batch["length"] # torch.Size([bs])
+
+        # ============================================================
+        # [PhysiMoS 核心修复] 破坏捷径 (Shortcut Breaking)
+        # ============================================================
+        # 我们以 50% 的概率，把输入的内容动作 (feats_content) 全部抹零。
+        # 此时，模型为了恢复 feats_ref，就只能依赖 physics_emb 了！
+        # 这会强迫 Attention 机制去寻找正确的物理参数。
+        
+        # 生成一个与 Batch Size 相同的随机掩码
+        # True 表示保留内容，False 表示抹除内容
+        keep_prob = 0.5  # 50% 的概率保留内容，50% 的概率抹除
+        mask_content = torch.rand(feats_ref.shape[0], device=feats_ref.device) < keep_prob
+        
+        # 扩展掩码维度以便广播: [B] -> [B, 1, 1]
+        mask_content = mask_content.unsqueeze(1).unsqueeze(2)
+        
+        # 应用掩码：被 mask 的样本，内容变成全 0
+        feats_content = feats_content * mask_content
+        # ============================================================
+        
+        # 2. 编码 Content (通过 VAE)
         with torch.no_grad():
-            z, dist = self.vae.encode(feats_ref, lengths)
-            z_content, dist = self.vae.encode(feats_content, lengths)
-            cond_emb = z_content.permute(1,0,2)            
-        # style condition
-        motion_seq = feats_ref*self.std + self.mean
-        motion_seq[...,:3]=0.0
-        motion_seq = motion_seq.unsqueeze(-1).permute(0,2,3,1)
-        motion_emb = self.motionclip.encoder({'x': motion_seq,
-                        'y': torch.zeros(motion_seq.shape[0], dtype=int, device='cuda:{}'.format(self.cfg["DEVICE"][0])),
-                        'mask': lengths_to_mask(lengths, device='cuda:{}'.format(self.cfg["DEVICE"][0]))})["mu"]
-        motion_emb = motion_emb.unsqueeze(1)
-        mask_uncond = torch.rand(motion_emb.shape[0]) < self.guidance_uncodp
-        motion_emb[mask_uncond, ...] = 0
+            # Target Latent (z) - 我们要预测的目标
+            z, dist = self.vae.encode(feats_ref, lengths)  # z:torch.Size([7, bs, 256])
+            
+            # Condition Latent (z_content) - 给模型的提示
+            # 这里我们直接编码 motion_before。
+            z_content, dist_c = self.vae.encode(feats_content, lengths)
+            cond_emb = z_content.permute(1,0,2) # torch.Size([bs, 7, 256])
+
+        # 3. 编码 Physics (New Style)
+        # 调用我们的 SCPAEncoder
+        # 注意：我们在 init 里把这个模块放进了 optimizer，所以这里有梯度
+        physics_emb = self.physics_encoder(scene_cat, phys_params) # torch.Size([bs, 1, 256])
         
+        # 随机 Drop (CFG Training)
+        # 10% 的概率把 physics_emb 置零，强迫模型学会 unconditionally (或者只依赖 content) 生成
+        if self.guidance_uncodp > 0:
+            mask_uncond = torch.rand(physics_emb.shape[0], device=physics_emb.device) < self.guidance_uncodp
+            physics_emb[mask_uncond] = 0 # Zero out physics condition
 
+        # 4. Trajectory Condition
+        # 使用 content motion 的前3维 (root position/velocity)
+        # dataset 里的 motion 已经是 normalized 的 feature，前3维通常是 root velocity/height
+        # [注意] 原版是 batch["motion"][...,:3]，我们也取 content 的前3维
+        trans_cond = feats_content[...,:3] # torch.Size([bs, motion_seq_len, 3])
 
-        # trans condition
-        trans_cond = batch["motion"][...,:3]
+        # 5. 打包所有条件
+        # 顺序必须和 mld_denoiser.py 里的解包顺序一致：
+        # [0]: Content——torch.Size([bs, 7, 256]), [1]: Physics —— torch.Size([bs, 1, 256]), [2]: Trajectory——torch.Size([bs, motion_seq_len, 3])
+        multi_cond_emb = [cond_emb, physics_emb, trans_cond]
 
-        # three condition
-        multi_cond_emb = [cond_emb, motion_emb, trans_cond]
-
-
-        # diffusion process return with noise and noise_pred
+        # 6. 进入扩散过程计算 Loss
         n_set = self._diffusion_process(z, multi_cond_emb, lengths)
         return {**n_set}
 
@@ -710,74 +760,80 @@ class MLD(BaseModel):
                 raise ValueError(
                     "Loss is None, this happend with torchmetrics > 0.7")
 
-        # Compute the metrics - currently evaluate results from text to motion
-        if split in ["val", "test"]:
-            # use t2m evaluators
-            rs_set = self.t2m_eval(batch)
+        # # Compute the metrics - currently evaluate results from text to motion
+        # if split in ["val", "test"]:
+        #     # use t2m evaluators
+        #     rs_set = self.t2m_eval(batch)
 
-            # MultiModality evaluation sperately
-            if self.trainer.datamodule.is_mm:
-                metrics_dicts = ['MMMetrics']
-            else:
-                metrics_dicts = self.metrics_dict
-            # metric = 'TemosMetric' 'TM2TMetrics'
-            for metric in metrics_dicts:
-                if metric == "TemosMetric":
-                    phase = split if split != "val" else "eval"
-                    if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
-                    ) not in [
-                            "humanml3d",
-                            "kit",
-                    ]:
-                        raise TypeError(
-                            "APE and AVE metrics only support humanml3d and kit datasets now"
-                        )
+        #     # MultiModality evaluation sperately
+        #     if self.trainer.datamodule.is_mm:
+        #         metrics_dicts = ['MMMetrics']
+        #     else:
+        #         metrics_dicts = self.metrics_dict
+        #     # metric = 'TemosMetric' 'TM2TMetrics'
+        #     for metric in metrics_dicts:
+        #         if metric == "TemosMetric":
+        #             phase = split if split != "val" else "eval"
+        #             if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
+        #             ) not in [
+        #                     "humanml3d",
+        #                     "kit",
+        #             ]:
+        #                 raise TypeError(
+        #                     "APE and AVE metrics only support humanml3d and kit datasets now"
+        #                 )
 
-                    getattr(self, metric).update(rs_set["joints_rst"],
-                                                 rs_set["joints_ref"],
-                                                 batch["length"])
-                elif metric == "TM2TMetrics":
-                    getattr(self, metric).update(
-                        # lat_t, latent encoded from diffusion-based text
-                        # lat_rm, latent encoded from reconstructed motion
-                        # lat_m, latent encoded from gt motion
-                        # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
-                        rs_set["lat_t"],
-                        rs_set["lat_rm"],
-                        rs_set["lat_m"],
-                        batch["length"],
-                    )
-                elif metric == "UncondMetrics":
-                    getattr(self, metric).update(
-                        recmotion_embeddings=rs_set["lat_rm"],
-                        gtmotion_embeddings=rs_set["lat_m"],
-                        lengths=batch["length"],
-                    )
-                elif metric == "MRMetrics":
-                    getattr(self, metric).update(rs_set["joints_rst"],
-                                                 rs_set["joints_ref"],
-                                                 batch["length"])
-                elif metric == "MMMetrics":
-                    getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
-                                                 batch["length"])
-                elif metric == "HUMANACTMetrics":
-                    getattr(self, metric).update(rs_set["m_action"],
-                                                 rs_set["joints_eval_rst"],
-                                                 rs_set["joints_eval_ref"],
-                                                 rs_set["m_lens"])
-                elif metric == "UESTCMetrics":
-                    # the stgcn model expects rotations only
-                    getattr(self, metric).update(
-                        rs_set["m_action"],
-                        rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
-                                             25).permute(0, 3, 2, 1)[:, :-1],
-                        rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
-                                             25).permute(0, 3, 2, 1)[:, :-1],
-                        rs_set["m_lens"])
-                else:
-                    raise TypeError(f"Not support this metric {metric}")
+        #             getattr(self, metric).update(rs_set["joints_rst"],
+        #                                          rs_set["joints_ref"],
+        #                                          batch["length"])
+        #         elif metric == "TM2TMetrics":
+        #             getattr(self, metric).update(
+        #                 # lat_t, latent encoded from diffusion-based text
+        #                 # lat_rm, latent encoded from reconstructed motion
+        #                 # lat_m, latent encoded from gt motion
+        #                 # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
+        #                 rs_set["lat_t"],
+        #                 rs_set["lat_rm"],
+        #                 rs_set["lat_m"],
+        #                 batch["length"],
+        #             )
+        #         elif metric == "UncondMetrics":
+        #             getattr(self, metric).update(
+        #                 recmotion_embeddings=rs_set["lat_rm"],
+        #                 gtmotion_embeddings=rs_set["lat_m"],
+        #                 lengths=batch["length"],
+        #             )
+        #         elif metric == "MRMetrics":
+        #             getattr(self, metric).update(rs_set["joints_rst"],
+        #                                          rs_set["joints_ref"],
+        #                                          batch["length"])
+        #         elif metric == "MMMetrics":
+        #             getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
+        #                                          batch["length"])
+        #         elif metric == "HUMANACTMetrics":
+        #             getattr(self, metric).update(rs_set["m_action"],
+        #                                          rs_set["joints_eval_rst"],
+        #                                          rs_set["joints_eval_ref"],
+        #                                          rs_set["m_lens"])
+        #         elif metric == "UESTCMetrics":
+        #             # the stgcn model expects rotations only
+        #             getattr(self, metric).update(
+        #                 rs_set["m_action"],
+        #                 rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
+        #                                      25).permute(0, 3, 2, 1)[:, :-1],
+        #                 rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
+        #                                      25).permute(0, 3, 2, 1)[:, :-1],
+        #                 rs_set["m_lens"])
+        #         else:
+        #             raise TypeError(f"Not support this metric {metric}")
 
-        # return forward output rather than loss during test
-        if split in ["test"]:
-            return rs_set["joints_rst"], batch["length"]
+        # # return forward output rather than loss during test
+        # if split in ["test"]:
+        #     return rs_set["joints_rst"], batch["length"]
+            
+        # ==============================================
+        # [PhysiMoS 修复] 显式记录日志到 TensorBoard
+        # ==============================================
+        # 记录总 Loss
+        self.log(f"losses/{split}/total", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss

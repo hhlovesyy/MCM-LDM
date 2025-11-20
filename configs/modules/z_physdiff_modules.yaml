@@ -1,0 +1,29 @@
+# configs/modules/z_physdiff_modules.yaml
+# This file defines the NEW modules for PhysiDiff.
+# The 'z_' prefix ensures it is loaded LAST, thus OVERRIDING defaults.
+
+# 1. Override the denoiser definition
+denoiser:
+  target: mld.models.architectures.mld_denoiser.MldDenoiserNew
+  params:
+    latent_dim: ${model.latent_dim}
+    nfeats: ${DATASET.NFEATS}
+    num_layers: ${model.num_layers}
+    num_heads: ${model.num_head}
+    ff_size: ${model.ff_size}
+    dropout: ${model.dropout}
+    position_embedding: 'learned'
+
+# 2. Define our new physics encoder
+physics_encoder:
+  target: mld.models.architectures.scpa_encoder.SCPAEncoder
+  params:
+    # We will pass these values directly from mld.py, 
+    # but defining them here is good practice.
+    scene_cat_dim: 8
+    phys_params_dim: 4
+    d_model: 256  # ${model.latent_dim[-1]} # Use the model's latent dim for consistency，直接写死了256，这样比较方便
+    n_head: ${model.num_head}
+    n_layers: 1 # Start with 1 layer for the probe
+    ff_dim: ${model.ff_size}
+    dropout: ${model.dropout}  # 这里的model指的是configs/config_physimos_probe.yaml这里的model字段，因为OmegaConf会把所有的配置进行合并操作，之前有分析过
