@@ -28,7 +28,7 @@ path_config = {
     "pretrained_denoiser": "checkpoints/denoiser_checkpoint/denoiser.ckpt",
     
     # 你的微调权重 (灵魂 - 163MB那个)
-    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Probe_Finetune_v1/checkpoints/epoch=299.ckpt" 
+    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2/checkpoints/epoch=399.ckpt" 
 }
 
 def plot_attention(attn_weights, scene_name, save_path):
@@ -298,7 +298,12 @@ def main():
         with torch.no_grad():
             # model(batch) 调用 MLD.forward()
             # 返回的是 joints (由 VAE decode 后的结果)
-            joints, attn_weights = model(batch, return_attn=True)
+            result = model(batch, return_attn=True)
+            if isinstance(result, tuple):
+                joints, attn_weights = result
+            else:
+                joints = result
+                attn_weights = None
             
         motion_output = joints[0].detach().cpu().numpy()
         content_name = Path(content_filename).stem
@@ -316,7 +321,11 @@ def main():
         with open(physics_json_file, 'r') as f:
             current_scene_name = json.load(f)["scene_category"]
 
-        plot_attention(final_attn, current_scene_name, str(attpath))
+        # 如果 attn_weights 是 None，就跳过画图
+        if attn_weights is not None:
+            plot_attention(final_attn, current_scene_name, str(attpath))
+        else:
+            print("Note: MLP encoder does not produce attention maps.")
 
         count += 1
         

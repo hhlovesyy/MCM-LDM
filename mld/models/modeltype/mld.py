@@ -40,7 +40,7 @@ from datasets.utils.common.quaternion import *
 from datasets.utils.paramUtil import *
 # import evaluate.utils.rotation_conversions as geometry
 
-from mld.models.architectures.scpa_encoder import SCPAEncoder
+from mld.models.architectures.scpa_encoder import SCPAEncoder, SCPAEncoderSimple
 
 
 
@@ -97,12 +97,16 @@ class MLD(BaseModel):
         # 假设 cfg 中有相关配置，如果没有，我们使用硬编码默认值（探针阶段为了稳）
         # 实际上你应该在 configs/model.yaml 里加这部分，或者像下面这样动态注入：
         print("[PhysiMoS] Initializing SCPAEncoder...")
-        self.physics_encoder = SCPAEncoder(
-            scene_cat_dim=1,      # 对应你的 heavy, light 等 5 类
-            phys_params_dim=3,    # 对应 mass, strength 等 4 个参数
-            d_model=self.latent_dim[-1], # 256
-            n_head=4,
-            n_layers=1
+        # self.physics_encoder = SCPAEncoder(
+        #     scene_cat_dim=1,      # 对应你的 heavy, light 等 5 类
+        #     phys_params_dim=3,    # 对应 mass, strength 等 4 个参数
+        #     d_model=self.latent_dim[-1], # 256
+        #     n_head=4,
+        #     n_layers=1
+        # )
+        self.physics_encoder = SCPAEncoderSimple(
+            scene_cat_dim=1, 
+            phys_params_dim=3,
         )
 
         self.vae = instantiate_from_config(cfg.model.motion_vae)

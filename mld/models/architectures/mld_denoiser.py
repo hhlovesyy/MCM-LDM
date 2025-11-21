@@ -84,24 +84,44 @@ def modulate(x, shift, scale):
 # 这是一个轻量级的适配器，用于将物理嵌入注入到 DiTBlock 中。
 # 关键点：Zero Initialization。
 class PhysicsAdapter(nn.Module):
+    """
+    [升级版] Physics-AdaLN 适配器
+    输入: 物理嵌入 (Batch, Dim)
+    输出: 用于调制特征的 Scale 和 Shift
+    """
     def __init__(self, hidden_size, act_layer=nn.SiLU):
         super().__init__()
         self.act = act_layer()
-        self.linear = nn.Linear(hidden_size, hidden_size) 
         
-        # [Zero-Init 魔法]
-        # 初始化为 0，确保训练初期物理分支输出全为 0。
+        # 映射到 2 倍维度 (Scale + Shift)
+        self.linear = nn.Linear(hidden_size, 2 * hidden_size) 
+        
+        # [Zero-Init 策略]
+        # 初始化为 0，意味着 Scale=0, Shift=0
+        # 实际使用时我们会让 Scale = 1 + 0 = 1 (保持原样)，Shift = 0
         nn.init.zeros_(self.linear.weight)
         nn.init.zeros_(self.linear.bias)
 
     def forward(self, x, phys_emb):
-        # phys_emb: [Batch, Dim]
-        # x: [Batch, Seq, Dim]
+        """
+        x: [Batch, Seq, Dim] (特征图)
+        phys_emb: [Batch, Dim] (物理参数)
+        """
+        # 1. 计算调制参数
+        # phys_emb 经过激活后映射
+        style = self.linear(self.act(phys_emb)) # [Batch, 2 * Dim]
         
-        # 简单的门控加法： x = x + ZeroLinear(Act(Phys))
-        # 注意：这里的 phys_emb 需要广播到序列长度
-        gate = self.linear(self.act(phys_emb)) # [Batch, Dim]
-        return gate.unsqueeze(1) # [Batch, 1, Dim], ready to broadcast add
+        # 2. 拆分 Scale (gamma) 和 Shift (beta)
+        gamma, beta = style.chunk(2, dim=1) # [Batch, Dim] each
+        
+        # 3. 扩展维度以便广播: [Batch, 1, Dim]
+        gamma = gamma.unsqueeze(1)
+        beta = beta.unsqueeze(1)
+        
+        # 4. 执行 AdaLN 调制
+        # 公式: x * (1 + gamma) + beta
+        # 这里的 x 应该是经过 LayerNorm 之后的，我们在 Block 里处理
+        return gamma, beta
 
 class DiTBlock(nn.Module):
     """
@@ -173,19 +193,33 @@ class DiTBlock_Phys(nn.Module):
         shift_msa, scale_msa, gate_msa = self.adaLN_modulation(style_emb).chunk(3, dim=1)
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(trans_emb).chunk(3, dim=1)
         
-        # 2. 计算 Physics Gate (Zero-Init)
-        phys_gate_attn = self.phys_adapter_attn(x, phys_emb)
-        phys_gate_mlp = self.phys_adapter_mlp(x, phys_emb)
+        # 2. [核心修改] 物理调制参数 (Scale & Shift)
+        p_scale1, p_shift1 = self.phys_adapter_attn(x, phys_emb)
+        p_scale2, p_shift2 = self.phys_adapter_mlp(x, phys_emb)
 
-        # 3. 注入 (Attention Block)
-        # 公式: x = x + StyleGate * Attn(...) + PhysGate
-        # 注意：这里我们把物理影响作为一个额外的残差项加进去。
-        x_attn = self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        x = x + gate_msa.unsqueeze(1) * x_attn + phys_gate_attn
+        # 3. 混合调制逻辑
+        # 我们希望物理影响也是全局的。
+        # 原版逻辑: modulate(norm(x), shift, scale)
+        # 新版逻辑: 我们在原版 modulate 的基础上，再叠一层物理 modulate
+        # --- Block 1: Attention ---
+        x_norm1 = self.norm1(x)
+        # 先应用原版 Time/Style 调制
+        x_mod1 = modulate(x_norm1, shift_msa, scale_msa)
+        # [新增] 再应用物理调制: x * (1 + p_scale) + p_shift
+        x_mod1 = x_mod1 * (1 + p_scale1) + p_shift1
+
+        # 计算 Attention 并加残差 (gate_msa 控制原版权重的门控，依然保留)
+        x = x + gate_msa.unsqueeze(1) * self.attn(x_mod1)
         
-        # 4. 注入 (MLP Block)
-        x_mlp = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        x = x + gate_mlp.unsqueeze(1) * x_mlp + phys_gate_mlp
+        # --- Block 2: MLP ---
+        x_norm2 = self.norm2(x)
+        # 先应用原版 Time/Trajectory 调制
+        x_mod2 = modulate(x_norm2, shift_mlp, scale_mlp)
+        # [新增] 再应用物理调制
+        x_mod2 = x_mod2 * (1 + p_scale2) + p_shift2
+
+        # 计算 MLP 并加残差
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(x_mod2)
         
         return x
 

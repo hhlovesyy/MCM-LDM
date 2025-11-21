@@ -128,7 +128,59 @@ class SCPAEncoder(nn.Module):
             return final_emb, all_attn_weights
         
         return final_emb
+    
+class SCPAEncoderSimple(nn.Module):
+    """
+    [简化版] 物理参数编码器
+    不再使用 Attention 机制，而是将物理参数视为一个整体向量进行映射。
+    这能强迫模型同时考虑 X, Y 和 Strength，避免出现“只关注某个轴”的情况。
+    """
+    def __init__(self, scene_cat_dim: int, phys_params_dim: int,
+                 d_model: int = 256, **kwargs): # kwargs 吸收多余参数
+        super().__init__()
+        
+        self.d_model = d_model
+        
+        # 1. 场景映射 (虽然我们现在只有1个场景，但保留结构)
+        self.scene_embedding = nn.Linear(scene_cat_dim, d_model)
+        
+        # 2. 物理参数映射 (核心修改)
+        # 输入: [Batch, 3] -> 输出: [Batch, d_model]
+        self.phys_mlp = nn.Sequential(
+            nn.Linear(phys_params_dim, 512),
+            nn.SiLU(),
+            nn.Linear(512, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model)
+        )
+        
+        # 3. 融合层
+        self.fusion = nn.Linear(d_model * 2, d_model)
+        self.output_norm = nn.LayerNorm(d_model)
 
+    def forward(self, scene_cat: torch.Tensor, phys_params: torch.Tensor, need_weights: bool = False):
+        """
+        返回:
+        - final_emb: [Batch, 1, d_model] (为了兼容接口，保持 3 维)
+        - weights: None (MLP 没有 Attention 权重)
+        """
+        # 1. 处理场景
+        scene_emb = self.scene_embedding(scene_cat) # [B, D]
+        
+        # 2. 处理物理 (整体映射)
+        phys_emb = self.phys_mlp(phys_params) # [B, D]
+        
+        # 3. 简单融合 (Concat + Linear)
+        # 让模型自己去学习 Scene 和 Physics 的关系
+        combined = torch.cat([scene_emb, phys_emb], dim=1) # [B, 2D]
+        x = self.fusion(combined) # [B, D]
+        
+        x = self.output_norm(x)
+        
+        if need_weights:
+            # 调整维度以适配 Denoiser 接口: [B, 1, D]
+            return x.unsqueeze(1), None
+        return x.unsqueeze(1)
 
 # --- 单元测试 Main 函数 ---
 if __name__ == '__main__':

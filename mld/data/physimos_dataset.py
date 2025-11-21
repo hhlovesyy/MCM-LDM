@@ -277,6 +277,26 @@ class PhysicsDataset(data.Dataset):
             #     # 如果有些文件没有方向标记，可以选择跳过或归为默认
             #     print(f"Skipping {fname}: No direction found in filename.")
             #     continue
+
+            # [新增] 读取 json 预检查风力大小,因为0k的数据有一些问题，比如Right的0k实际上是左挡风
+            json_path = pjoin(json_dir, fname.replace(".npy", ".json"))
+            try:
+                with open(json_path, 'r') as f:
+                    meta = json.load(f)
+                wf = meta["parameters"]["wind_force"]
+                # 计算模长
+                mag = np.sqrt(wf['x']**2 + wf['y']**2 + wf['z']**2)
+                
+                # [核心修改] 阈值过滤
+                # 如果风力小于 1000 (几乎无风)，直接跳过，不作为训练数据
+                if mag < 100.0:
+                    print(json_path + f" Skipping due to low wind force: {mag:.2f}")
+                    continue 
+                    
+            except Exception as e:
+                # 如果读取出错，也跳过
+                print(f"Error reading {json_path}: {e}. Skipping.")
+                continue
                 
             self.data_list.append({
                 "motion_path": pjoin(motion_dir, fname),
