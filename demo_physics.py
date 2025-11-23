@@ -28,7 +28,7 @@ path_config = {
     "pretrained_denoiser": "checkpoints/denoiser_checkpoint/denoiser.ckpt",
     
     # 你的微调权重 (灵魂 - 163MB那个)
-    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2/checkpoints/epoch=399.ckpt" 
+    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2_1122/checkpoints/epoch=1999.ckpt" 
 }
 
 def plot_attention(attn_weights, scene_name, save_path):

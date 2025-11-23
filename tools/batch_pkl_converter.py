@@ -5,13 +5,13 @@ import os
 
 # --- 配置参数 ---
 # 1. 输入文件夹 (包含所有要转换的 .npy 文件)
-INPUT_DIR = "/root/autodl-tmp/MyRepository/MCM-LDM/results/demo_outputs/PhysiMoS_Finetune_v2/RightWindy" 
+INPUT_DIR = "/root/autodl-tmp/MyRepository/MCM-LDM/results/demo_outputs/PhysiMoS_Finetune_v2_1122/fitInput" 
 # 2. 输出文件夹 (将存放生成的 .pkl 文件)
 OUTPUT_DIR = "visual_pkl" 
 # 3. 文件名前缀 (用于对比，例如 'right_', 'left_', 'test_')
-FILE_PREFIX = "RightWindy" 
+FILE_PREFIX = "" 
 # 4. 默认的文本描述 (可以根据需要修改，但为了批量处理统一设定)
-DEFAULT_TEXT_DESCRIPTION = "RightWindy_motion_show" 
+DEFAULT_TEXT_DESCRIPTION = "" 
 # ------------------
 
 

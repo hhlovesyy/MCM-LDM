@@ -505,7 +505,7 @@ class MLD(BaseModel):
         
         # 生成一个与 Batch Size 相同的随机掩码
         # True 表示保留内容，False 表示抹除内容
-        keep_prob = 0.5  # 50% 的概率保留内容，50% 的概率抹除
+        keep_prob = 0.8  # 50% 的概率保留内容，50% 的概率抹除
         mask_content = torch.rand(feats_ref.shape[0], device=feats_ref.device) < keep_prob
         
         # 扩展掩码维度以便广播: [B] -> [B, 1, 1]
