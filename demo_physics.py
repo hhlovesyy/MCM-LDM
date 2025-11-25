@@ -28,7 +28,7 @@ path_config = {
     "pretrained_denoiser": "checkpoints/denoiser_checkpoint/denoiser.ckpt",
     
     # 你的微调权重 (灵魂 - 163MB那个)
-    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2_1122/checkpoints/epoch=1999.ckpt" 
+    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2_1125/checkpoints/epoch=649.ckpt" 
 }
 
 def plot_attention(attn_weights, scene_name, save_path):
@@ -42,10 +42,10 @@ def plot_attention(attn_weights, scene_name, save_path):
     data = attn_weights[0].squeeze().cpu().numpy() 
     
     # 2. 定义标签 (对应 scenes.json 里的 physical_parameters_desc)
-    labels = ["WindX", "WindY", "WindStrength"]
+    labels = ["WindX", "WindY", "WindStrength", "CeilingHeight"]
     
     # 3. 绘图
-    plt.figure(figsize=(8, 3))
+    plt.figure(figsize=(8, 4))
     # 把它变成 (1, 4) 矩阵方便画热力图
     sns.heatmap(data.reshape(1, -1), annot=True, cmap="Reds", 
                 xticklabels=labels, yticklabels=[scene_name],
@@ -73,49 +73,80 @@ def plot_attention(attn_weights, scene_name, save_path):
 #     scene_cat[scene_idx] = 1.0
 #     return torch.tensor(phys_params).float(), scene_cat.float()
     
-# [替换] 原来的 load_physics_from_json 替换为这个：
-def parse_inference_json(json_path):
-    """ 
-    直接从测试 JSON 解析推理条件 
-    Input JSON Example: { "scene_category": "Right", "physical_parameters": [1.0, 0.0, 0.0, 1.0] }
+# # [替换] 原来的 load_physics_from_json 替换为这个：
+# def parse_inference_json(json_path):
+#     """ 
+#     直接从测试 JSON 解析推理条件 
+#     Input JSON Example: { "scene_category": "Right", "physical_parameters": [1.0, 0.0, 0.0, 1.0] }
+#     """
+#     with open(json_path, 'r') as f:
+#         data = json.load(f)
+        
+#     # 1. 解析场景 One-Hot,这个是多个场景的情况，把前后左右风认为是不同的场景
+#     # scene_name = data["scene_category"]
+#     # if scene_name not in SCENE_CATEGORIES:
+#     #     raise ValueError(f"Scene '{scene_name}' not found in SCENE_CATEGORIES list!")
+    
+#     # scene_idx = SCENE_CATEGORIES.index(scene_name)
+#     # scene_cat = torch.zeros(len(SCENE_CATEGORIES))
+#     # scene_cat[scene_idx] = 1.0
+        
+#     # [修改] 不再检查 json 里的具体方向，或者强制忽略它
+#     # 无论 json 里写的是 "Right" 还是 "Left"，我们都生成 "Windy" 的 One-Hot
+#     scene_cat = torch.zeros(1)
+#     scene_cat[0] = 1.0
+    
+#     # [核心修复] 增加坐标系转换逻辑
+#     raw_params = data["physical_parameters"] # 假设是 [x, y, z, mag] (UE5 Z-up)
+    
+#     raw_x = raw_params[0]
+#     raw_y = raw_params[1] # UE5 Right/Left axis
+#     # raw_z = raw_params[2] # UE5 Up/Down axis
+#     mag   = raw_params[2]
+
+#     # # 对应 Dataset 里的逻辑: wind_vec = np.array([raw_x, raw_z, -raw_y])
+#     # # HumanML3D (Y-up)
+#     # new_x = raw_x
+#     # new_y = raw_z        # 原来的 Z 变成了 Y (垂直)
+#     # new_z = -1.0 * raw_y # 原来的 Y 变成了 -Z (深度/侧向)
+
+#     # 重新组装
+#     phys_params = torch.tensor([raw_x, raw_y, mag]).float()
+    
+    
+#     return phys_params, scene_cat
+
+def parse_inference_json(json_path, max_wind=330000.0, max_height=220.0):
+    """
+    [纯物理驱动版]
+    直接从 JSON 解析 physical_parameters 列表，并归一化。
     """
     with open(json_path, 'r') as f:
         data = json.load(f)
         
-    # 1. 解析场景 One-Hot,这个是多个场景的情况，把前后左右风认为是不同的场景
-    # scene_name = data["scene_category"]
-    # if scene_name not in SCENE_CATEGORIES:
-    #     raise ValueError(f"Scene '{scene_name}' not found in SCENE_CATEGORIES list!")
+    params = data.get("physical_parameters", {})
     
-    # scene_idx = SCENE_CATEGORIES.index(scene_name)
-    # scene_cat = torch.zeros(len(SCENE_CATEGORIES))
-    # scene_cat[scene_idx] = 1.0
+    # 初始化 4 维向量
+    phys_vec = torch.zeros(4)
+    
+    # 填充风力
+    if "wind_force" in params:
+        wf = params["wind_force"]
+        wind_vec_xy = np.array([wf.get('x', 0), wf.get('y', 0)])
+        mag = np.linalg.norm(wind_vec_xy)
+        phys_vec[0] = wf.get('x', 0) / max_wind
+        phys_vec[1] = wf.get('y', 0) / max_wind
+        phys_vec[2] = mag / max_wind
         
-    # [修改] 不再检查 json 里的具体方向，或者强制忽略它
-    # 无论 json 里写的是 "Right" 还是 "Left"，我们都生成 "Windy" 的 One-Hot
-    scene_cat = torch.zeros(1)
-    scene_cat[0] = 1.0
-    
-    # [核心修复] 增加坐标系转换逻辑
-    raw_params = data["physical_parameters"] # 假设是 [x, y, z, mag] (UE5 Z-up)
-    
-    raw_x = raw_params[0]
-    raw_y = raw_params[1] # UE5 Right/Left axis
-    # raw_z = raw_params[2] # UE5 Up/Down axis
-    mag   = raw_params[2]
+    # 填充天花板
+    if "ceiling_height" in params:
+        ch = params["ceiling_height"]
+        phys_vec[3] = max(0, 1.0 - (ch / max_height))
 
-    # # 对应 Dataset 里的逻辑: wind_vec = np.array([raw_x, raw_z, -raw_y])
-    # # HumanML3D (Y-up)
-    # new_x = raw_x
-    # new_y = raw_z        # 原来的 Z 变成了 Y (垂直)
-    # new_z = -1.0 * raw_y # 原来的 Y 变成了 -Z (深度/侧向)
-
-    # 重新组装
-    phys_params = torch.tensor([raw_x, raw_y, mag]).float()
+    # 生成一个虚拟的 scene_cat
+    scene_cat = torch.ones(1)
     
-    
-    return phys_params, scene_cat
-
+    return phys_vec.float(), scene_cat.float()
 
 def manual_check_keys(model, state_dict, module_name="Module"):
     """ 手动检查关键权重是否存在，不依赖 load_state_dict 返回值 """
@@ -318,8 +349,9 @@ def main():
             final_attn = attn_weights
         # 获取当前测试的 Scene Name (用于图表标题)
         # 我们从 physics_json_file 读取的
-        with open(physics_json_file, 'r') as f:
-            current_scene_name = json.load(f)["scene_category"]
+        # with open(physics_json_file, 'r') as f:
+        #     current_scene_name = json.load(f)["scene_category"]
+        current_scene_name = "Varsapura"
 
         # 如果 attn_weights 是 None，就跳过画图
         if attn_weights is not None:

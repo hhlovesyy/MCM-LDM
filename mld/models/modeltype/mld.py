@@ -104,10 +104,7 @@ class MLD(BaseModel):
         #     n_head=4,
         #     n_layers=1
         # )
-        self.physics_encoder = SCPAEncoderSimple(
-            scene_cat_dim=1, 
-            phys_params_dim=3,
-        )
+        self.physics_encoder = instantiate_from_config(cfg.model.physics_encoder)
 
         self.vae = instantiate_from_config(cfg.model.motion_vae)
         # Don't train the motion encoder and decoder
@@ -277,7 +274,7 @@ class MLD(BaseModel):
 
         # Physics Condition (Input)
         phys_params = batch['phys_params'].to(self.device) # torch.Size([1, 4])
-        scene_cat = batch['scene_cat'].to(self.device)
+        scene_cat = batch['scene_cat'].to(self.device)  # [1.0]
 
         scale = batch.get("tag_scale", 1.0) # 默认 scale
         
@@ -299,7 +296,7 @@ class MLD(BaseModel):
 
             # 3. 编码 Physics (替代 Style)
             # 我们用 SCPAEncoder 提取特征
-            physics_emb, attn_weights = self.physics_encoder(scene_cat, phys_params, need_weights=True) 
+            physics_emb, attn_weights = self.physics_encoder(phys_params, scene_cat, need_weights=True) 
             
             # Classifier-Free Guidance 准备
             # Uncond Condition: 物理参数全零，或者用一个特殊的 learnable token？
@@ -492,7 +489,7 @@ class MLD(BaseModel):
         
         # Physics Input
         phys_params = batch["phys_params"] # torch.Size([bs, 4])
-        scene_cat = batch["scene_cat"] # torch.Size([bs, 5])
+        scene_cat = batch["scene_cat"] # torch.Size([bs, 1])
 
         lengths = batch["length"] # torch.Size([bs])
 
@@ -528,7 +525,7 @@ class MLD(BaseModel):
         # 3. 编码 Physics (New Style)
         # 调用我们的 SCPAEncoder
         # 注意：我们在 init 里把这个模块放进了 optimizer，所以这里有梯度
-        physics_emb = self.physics_encoder(scene_cat, phys_params) # torch.Size([bs, 1, 256])
+        physics_emb = self.physics_encoder(phys_params, scene_cat) # torch.Size([bs, 1, 256])
         
         # 随机 Drop (CFG Training)
         # 10% 的概率把 physics_emb 置零，强迫模型学会 unconditionally (或者只依赖 content) 生成

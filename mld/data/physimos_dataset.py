@@ -236,6 +236,7 @@ class PhysicsDataset(data.Dataset):
         min_motion_length=40,
         unit_length=4,
         max_wind_force=330000.0, # 【关键】根据你的数据统计设定，用于归一化
+        max_ceiling_height=220.0,
         **kwargs,
     ):
         self.mean = mean
@@ -244,68 +245,23 @@ class PhysicsDataset(data.Dataset):
         self.min_motion_length = min_motion_length
         self.unit_length = unit_length
         self.max_wind_force = max_wind_force
+        self.max_ceiling_height = max_ceiling_height
+
+        self.phys_dim = 4 # [wind_x, wind_y, wind_mag, ceiling_height]
         
         self.motion_dir = motion_dir
         self.json_dir = json_dir
 
-        # --- 1. 定义场景 (方向) ---
-        # 只要文件名包含这些关键词，就归为该类
-        # self.scene_categories = ["Front", "Back", "Left", "Right", "FrontLeft", "FrontRight", "BackLeft", "BackRight"]
-        self.scene_categories = ["Windy"]
-        self.scene_to_id = {name: i for i, name in enumerate(self.scene_categories)}
-        self.num_scenes = len(self.scene_categories)
-
-        # --- 2. 扫描文件 ---
+        self.phys_dim = 4 # [wind_x, wind_y, wind_mag, ceiling_height]
         self.data_list = []
+        all_json_files = [f for f in os.listdir(json_dir) if f.endswith('.json')]
         
-        # 遍历 motion_dir 下的所有 npy
-        all_files = [f for f in os.listdir(motion_dir) if f.endswith('.npy')]
+        for fname in all_json_files:
+            motion_path = pjoin(motion_dir, fname.replace(".json", ".npy"))
+            if os.path.exists(motion_path):
+                self.data_list.append({"motion_path": motion_path, "json_path": pjoin(json_dir, fname)})
         
-        logger.info(f"Scanning {len(all_files)} files in {motion_dir}...")
-        
-        for fname in all_files:
-            # 解析文件名，例如: W_0p0_Back_300k_0035.npy
-            # 我们假设文件名里一定包含方向关键词
-            # found_scene = None
-            found_scene = "Windy"  # 这句加上是为了让所有的都是Windy，先这样看看效果
-            # for scene_name in self.scene_categories:
-            #     if scene_name in fname: # Case sensitive? 文件名通常是大写开头
-            #         found_scene = scene_name
-            #         break
-            
-            # if found_scene is None:
-            #     # 如果有些文件没有方向标记，可以选择跳过或归为默认
-            #     print(f"Skipping {fname}: No direction found in filename.")
-            #     continue
-
-            # [新增] 读取 json 预检查风力大小,因为0k的数据有一些问题，比如Right的0k实际上是左挡风
-            json_path = pjoin(json_dir, fname.replace(".npy", ".json"))
-            try:
-                with open(json_path, 'r') as f:
-                    meta = json.load(f)
-                wf = meta["parameters"]["wind_force"]
-                # 计算模长
-                mag = np.sqrt(wf['x']**2 + wf['y']**2 + wf['z']**2)
-                
-                # [核心修改] 阈值过滤
-                # 如果风力小于 1000 (几乎无风)，直接跳过，不作为训练数据
-                if mag < 100.0:
-                    print(json_path + f" Skipping due to low wind force: {mag:.2f}")
-                    continue 
-                    
-            except Exception as e:
-                # 如果读取出错，也跳过
-                print(f"Error reading {json_path}: {e}. Skipping.")
-                continue
-                
-            self.data_list.append({
-                "motion_path": pjoin(motion_dir, fname),
-                "json_path": pjoin(json_dir, fname.replace(".npy", ".json")),
-                "scene_name": found_scene,
-                "name": fname
-            })
-
-        logger.info(f"PhysicsDataset: Loaded {len(self.data_list)} valid samples.")
+        logger.info(f"PhysicsDataset: Loaded {len(self.data_list)} total samples.")
         
     def __len__(self):
         return len(self.data_list)
@@ -342,60 +298,39 @@ class PhysicsDataset(data.Dataset):
         # --- D. 加载物理参数 (Physics Condition) ---
         with open(data_item["json_path"], 'r') as f:
             meta = json.load(f)
+        
+        phys_params_np = np.zeros(self.phys_dim, dtype=np.float32)
+        params = meta.get("parameters", {})
+        
+        # 处理风力
+        if "wind_force" in params:
+            wf = params["wind_force"]
+            wind_vec = np.array([wf.get('x', 0), wf.get('y', 0)])
+            mag = np.linalg.norm(wind_vec)
+            phys_params_np[0] = wf.get('x', 0) / self.max_wind_force
+            phys_params_np[1] = wf.get('y', 0) / self.max_wind_force
+            phys_params_np[2] = mag / self.max_wind_force
             
-        # 提取 wind_force
-        # JSON format: "parameters": {"wind_force": {"x": ..., "y": ..., "z": ...}}
-        wf = meta["parameters"]["wind_force"]  # TODO:后面应该要改成一长串的物理参数，暂时只有wind_force
-        # raw_x = wf['x']
-        # raw_y = wf['y']
-        # raw_z = wf['z']
-        
-        # # 转换到 HumanML3D (Y-up) 坐标系
-        # wind_vec = np.array([raw_x, raw_y, raw_z], dtype=np.float32)
-        
-        # # 计算风力大小 (Magnitude)
-        # wind_mag = np.linalg.norm(wind_vec)
-        
-        # # [物理归一化]
-        # # 将向量除以最大风力，使其落在 [-1, 1] 之间
-        # # 将大小除以最大风力，使其落在 [0, 1] 之间
-        # wind_vec_norm = wind_vec / self.max_wind_force
-        # wind_mag_norm = wind_mag / self.max_wind_force
-        
-        # # 拼装物理特征向量: [Global_X, Global_Y, Global_Z, Magnitude] -> 4维
-        # # 即使我们把方向作为 Scene 了，保留物理向量依然重要，因为它包含了精确的角度偏移
-        # phys_params = np.concatenate([wind_vec_norm, [wind_mag_norm]])
-        raw_x = wf['x'] / self.max_wind_force
-        raw_y = wf['y'] / self.max_wind_force
-        
-        # 计算模长 (归一化)
-        mag = np.sqrt(wf['x']**2 + wf['y']**2) / self.max_wind_force
-        
-        # 拼装 3 维向量: [UE5_X, UE5_Y, Strength]
-        phys_params = np.array([raw_x, raw_y, mag], dtype=np.float32)
-        phys_params = torch.from_numpy(phys_params).float()
+        # 处理天花板
+        if "ceiling_height" in params:
+            ch = params["ceiling_height"]
+            # 值越低 -> 特征值越高 (1.0)
+            phys_params_np[3] = max(0, 1.0 - (ch / self.max_ceiling_height))
 
-        # --- E. 场景 One-Hot ---
-        # scene_id = self.scene_to_id[data_item["scene_name"]]
-        scene_cat = torch.zeros(self.num_scenes).float()
-        # scene_cat[scene_id] = 1.0
-        scene_cat[0] = 1.0 # 依旧先尝试一个场景类别，看看效果，争取让模型能学到物理参数
-        
-        # --- F. 构建 Input/Target ---
-        # Target: 归一化后的动作
+        phys_params = torch.from_numpy(phys_params_np).float()
+
+        # [修改] 生成一个虚拟的、长度为1的 scene_cat，以匹配 mld.py 的接口
+        scene_cat = torch.ones(1).float()
+
         motion_after = torch.from_numpy(motion_norm).float()
-        
-        # Input (Content): 
-        # 策略：如果是训练，我们可以让 Input = Target (然后依赖 masking)
-        # 或者，如果未来你有“无风状态”的动作作为 Input，那是最好的。
-        # 暂时我们用 Self-Reconstruction 模式
         motion_before = motion_after.clone()
 
+        dummy_caption = "Varsapura"
         return {
-            "motion_after": motion_after,   # Ground Truth
-            "motion_before": motion_before, # Input Content
+            "motion_after": motion_after,
+            "motion_before": motion_before,
             "length": len(motion_after),
-            "phys_params": phys_params,     # Condition (Vector)
-            "scene_cat": scene_cat,         # Condition (Category)
-            "caption": f"Wind: {data_item['scene_name']}, Mag: {mag:.0f}" # Debug info
+            "phys_params": phys_params,
+            "scene_cat": scene_cat, # 喂一个虚拟值
+            "caption": dummy_caption,
         }

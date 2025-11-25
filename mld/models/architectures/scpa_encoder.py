@@ -129,6 +129,64 @@ class SCPAEncoder(nn.Module):
         
         return final_emb
     
+
+class SCPAEncoder1125(nn.Module):
+    """
+    [最终版] 纯物理参数注意力编码器 (Scene-Agnostic)
+    不再接收场景标签，而是用一个可学习的全局Query去理解物理参数序列。
+    """
+    def __init__(self, phys_params_dim: int, d_model: int = 256, 
+                 n_head: int = 4, n_layers: int = 1, **kwargs): # 吸收多余的 scene_cat_dim
+        super().__init__()
+        
+        self.d_model = d_model
+        self.phys_params_dim = phys_params_dim
+        
+        # --- Embeddings ---
+        self.phys_value_embedding = nn.Linear(1, d_model)
+        self.phys_type_embedding = nn.Embedding(phys_params_dim, d_model)
+        
+        # [核心修改] 可学习的全局令牌
+        self.physics_query_token = nn.Parameter(torch.randn(1, 1, d_model))
+        
+        # --- Transformer Blocks ---
+        self.layers = nn.ModuleList([
+            SCPAEncoderBlock(d_model, n_head, 1024, 0.1) 
+            for _ in range(n_layers)
+        ])
+        
+        self.output_norm = nn.LayerNorm(d_model)
+
+    def forward(self, phys_params: torch.Tensor, scene_cat: torch.Tensor = None, need_weights: bool = False):
+        # [核心修改] scene_cat 变为可选参数，但我们不再使用它
+        batch_size = phys_params.shape[0]  # torch.Size([16, 4])
+
+        # A. 构建 Memory (同之前)
+        phys_params_seq = phys_params.unsqueeze(-1)  # torch.Size([16, 4, 1])
+        phys_value_emb = self.phys_value_embedding(phys_params_seq) # torch.Size([16, 4, 256])
+        param_indices = torch.arange(self.phys_params_dim, device=phys_params.device) # tensor([0, 1, 2, 3], device='cuda:0')
+        phys_type_emb = self.phys_type_embedding(param_indices).unsqueeze(0).expand(batch_size, -1, -1) # torch.Size([16, 4, 256])
+        memory = phys_value_emb + phys_type_emb
+
+        # B. 构建 Query (新逻辑)
+        query = self.physics_query_token.expand(batch_size, -1, -1) # torch.Size([16, 1, 256])
+
+        # C. 通过 Transformer
+        all_attn_weights = []
+        x = query
+        for layer in self.layers:
+            x, weights = layer(x, memory, need_weights=need_weights)  # x:torch.Size([16, 1, 256]), weights:0
+            if need_weights:
+                all_attn_weights.append(weights)
+
+        # D. 输出
+        final_emb = self.output_norm(x)
+        
+        weights_tuple = all_attn_weights[0] if (need_weights and all_attn_weights) else None
+        if need_weights:
+            return final_emb, weights_tuple
+        return final_emb
+
 class SCPAEncoderSimple(nn.Module):
     """
     [简化版] 物理参数编码器

@@ -16,11 +16,11 @@ denoiser:
 
 # 2. Define our new physics encoder
 physics_encoder:
-  target: mld.models.architectures.scpa_encoder.SCPAEncoder
+  target: mld.models.architectures.scpa_encoder.SCPAEncoder1125
   params:
     # We will pass these values directly from mld.py, 
     # but defining them here is good practice.
-    scene_cat_dim: 8
+    scene_cat_dim: 1
     phys_params_dim: 4
     d_model: 256  # ${model.latent_dim[-1]} # Use the model's latent dim for consistency，直接写死了256，这样比较方便
     n_head: ${model.num_head}

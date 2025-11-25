@@ -5,7 +5,7 @@
 ####################################
 # The following are general settings
 ####################################
-NAME: "PhysiMoS_Finetune_v2_1122" #<-- 1. MODIFIED
+NAME: "PhysiMoS_Finetune_v2_1125" #<-- 1. MODIFIED
 FOLDER_EXP: "experiments/physimos_probe"   #<-- 2. NEW
 DEBUG: False
 ACCELERATOR: 'gpu'
@@ -113,6 +113,9 @@ model:
   activation: gelu
   guidance_scale: 5
   guidance_uncondp: 0.25
+  scene_cat_dim: 1
+  # [修改] 物理向量的长度是 4: [wind_x, wind_y, wind_mag, ceiling_height]
+  phys_params_dim: 4 
 
 #####################################
 # The following are loggers settings
