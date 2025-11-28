@@ -97,7 +97,7 @@ class MLDLosses(Metric):
                 self._params[loss] = cfg.LOSS.LAMBDA_JOINT
 
     def update(self, rs_set):
-        total: float = 0.0
+        total: float = 0.0 # loss的计算会进入到这里
         # Compute the losses
         # Compute instance loss
         if self.stage in ["vae", "vae_diffusion"]:

@@ -379,7 +379,7 @@ class MLD(BaseModel):
         # our latent   [batch_size, n_token=1 or 5 or 10, latent_dim=256]
         # sd  latent   [batch_size, [n_token0=64,n_token1=64], latent_dim=4]
         # [n_token, batch_size, latent_dim] -> [batch_size, n_token, latent_dim]
-        latents = latents.permute(1, 0, 2)
+        latents = latents.permute(1, 0, 2) # torch.Size([32, 7, 256])
 
         # Sample noise that we'll add to the latents
         # [batch_size, n_token, latent_dim]
@@ -392,10 +392,10 @@ class MLD(BaseModel):
             (bsz, ),
             device=latents.device,
         )
-        timesteps = timesteps.long()
+        timesteps = timesteps.long()  # torch.Size([32])
         # Add noise to the latents according to the noise magnitude at each timestep
         noisy_latents = self.noise_scheduler.add_noise(latents.clone(), noise,
-                                                       timesteps)
+                                                       timesteps)  # torch.Size([32, 7, 256])
         # Predict the noise residual
         noise_pred = self.denoiser(
             sample=noisy_latents,
@@ -403,7 +403,7 @@ class MLD(BaseModel):
             encoder_hidden_states=encoder_hidden_states,
             lengths=lengths,
             return_dict=False,
-        )[0]
+        )[0] # torch.Size([32, 7, 256])
         # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
         if self.cfg.LOSS.LAMBDA_PRIOR != 0.0:
             noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
@@ -414,9 +414,9 @@ class MLD(BaseModel):
 
 
         n_set = {
-            "noise": noise,
+            "noise": noise, # torch.Size([32, 7, 256])
             "noise_prior": noise_prior,
-            "noise_pred": noise_pred,
+            "noise_pred": noise_pred, # torch.Size([32, 7, 256])
             "noise_pred_prior": noise_pred_prior,
         }
 
@@ -463,38 +463,38 @@ class MLD(BaseModel):
         return rs_set
 # train
     def train_diffusion_forward(self, batch):
-        feats_ref = batch["motion"]
-        feats_content = batch["motion"].clone()
+        feats_ref = batch["motion"] # torch.Size([32, 40, 263])
+        feats_content = batch["motion"].clone() # torch.Size([32, 40, 263])
         feats_content[...,:3] = 0.0
         lengths = batch["length"]
         
         # content condition
         with torch.no_grad():
-            z, dist = self.vae.encode(feats_ref, lengths)
+            z, dist = self.vae.encode(feats_ref, lengths) # z:torch.Size([7, 32, 256]), dist: torch.Size([7, 32, 256])
             z_content, dist = self.vae.encode(feats_content, lengths)
-            cond_emb = z_content.permute(1,0,2)            
+            cond_emb = z_content.permute(1,0,2)  # torch.Size([32, 7, 256])          
         # style condition
-        motion_seq = feats_ref*self.std + self.mean
+        motion_seq = feats_ref*self.std + self.mean  # 【QUESTION】看起来风格有做一步反归一化处理，而content并没有被反归一化，是这样么？
         motion_seq[...,:3]=0.0
-        motion_seq = motion_seq.unsqueeze(-1).permute(0,2,3,1)
+        motion_seq = motion_seq.unsqueeze(-1).permute(0,2,3,1) # torch.Size([32, 263, 1, 40])
         motion_emb = self.motionclip.encoder({'x': motion_seq,
                         'y': torch.zeros(motion_seq.shape[0], dtype=int, device='cuda:{}'.format(self.cfg["DEVICE"][0])),
-                        'mask': lengths_to_mask(lengths, device='cuda:{}'.format(self.cfg["DEVICE"][0]))})["mu"]
-        motion_emb = motion_emb.unsqueeze(1)
-        mask_uncond = torch.rand(motion_emb.shape[0]) < self.guidance_uncodp
+                        'mask': lengths_to_mask(lengths, device='cuda:{}'.format(self.cfg["DEVICE"][0]))})["mu"] # 一个style被提取成了512维的tensor，torch.Size([32, 512])
+        motion_emb = motion_emb.unsqueeze(1) # torch.Size([32, 1, 512])
+        mask_uncond = torch.rand(motion_emb.shape[0]) < self.guidance_uncodp # [F,F,...,F,T,F,T,...]
         motion_emb[mask_uncond, ...] = 0
         
 
 
         # trans condition
-        trans_cond = batch["motion"][...,:3]
+        trans_cond = batch["motion"][...,:3]  # torch.Size([32, 40, 3])
 
         # three condition
-        multi_cond_emb = [cond_emb, motion_emb, trans_cond]
+        multi_cond_emb = [cond_emb, motion_emb, trans_cond] # 复习一下： cond_emb：内容（torch.Size([32, 7, 256])），motion_emb：风格（torch.Size([32, 1, 512])），trans_cond：轨迹（torch.Size([32, 40, 3])）
 
 
         # diffusion process return with noise and noise_pred
-        n_set = self._diffusion_process(z, multi_cond_emb, lengths)
+        n_set = self._diffusion_process(z, multi_cond_emb, lengths) # 返回的n_set是一个字段，包含计算loss的时候pytorch_lightning所关心的内容
         return {**n_set}
 
 

@@ -111,12 +111,12 @@ class DiTBlock(nn.Module):
             nn.Linear(hidden_size, 3 * hidden_size, bias=True)
         )
 
-    def forward(self, x, c, t):
-        shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1)
-        shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1)
+    def forward(self, x, c, t): # x: torch.Size([32, 13, 256])， c（这里指的是风格，即条件）: torch.Size([32, 256])， t: torch.Size([32, 256])
+        shift_msa, scale_msa, gate_msa = self.adaLN_modulation(c).chunk(3, dim=1) # 每个都是torch.Size([32, 256])的tensor
+        shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(t).chunk(3, dim=1) # 每个都是torch.Size([32, 256])的tensor
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        return x
+        return x # torch.Size([32, 13, 256])
 
 class MldDenoiser(nn.Module):
 
@@ -212,48 +212,48 @@ class MldDenoiser(nn.Module):
                 lengths=None,
                 **kwargs):
 
-        sample = sample.permute(1, 0, 2)
+        sample = sample.permute(1, 0, 2)  # torch.Size([7, 32, 256])
 
         # time_embedding
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        timesteps = timestep.expand(sample.shape[1]).clone()
+        timesteps = timestep.expand(sample.shape[1]).clone()  # torch.Size([32])，里面的值比如[10,265,985,...]
         time_emb = self.time_proj(timesteps)
-        time_emb = time_emb.to(dtype=sample.dtype)
+        time_emb = time_emb.to(dtype=sample.dtype) # torch.Size([32, 256])
         # [1, bs, latent_dim] <= [bs, latent_dim]
-        time_emb = self.time_embedding(time_emb).unsqueeze(0)
+        time_emb = self.time_embedding(time_emb).unsqueeze(0)  # torch.Size([1, 32, 256])
 
         # three conditions
-        style_emb = encoder_hidden_states[1].permute(1, 0, 2)
-        content_emb = encoder_hidden_states[0].permute(1, 0, 2)
-        trans_cond = encoder_hidden_states[-1]
+        style_emb = encoder_hidden_states[1].permute(1, 0, 2)  # torch.Size([1, 32, 512])
+        content_emb = encoder_hidden_states[0].permute(1, 0, 2) # torch.Size([7, 32, 256])
+        trans_cond = encoder_hidden_states[-1] # torch.Size([32, 40, 3])
         
         # content        
         content_emb_latent = content_emb
         # style remover for content
-        content_emb_latent = self.IN(content_emb_latent.permute(1,2,0)).permute(2,0,1)
+        content_emb_latent = self.IN(content_emb_latent.permute(1,2,0)).permute(2,0,1) # torch.Size([7, 32, 256]),【QUESTION】这里面的IN是什么？有什么作用？self.IN = nn.InstanceNorm1d(text_encoded_dim, affine=True)
         content_emb_latent = content_emb_latent+time_emb
-        content_emb_latent = self.pe_content(content_emb_latent)
-        content_emb_latent = self.seqTransEncoder(content_emb_latent).permute(1,0,2)
-        content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256)
-        content_emb_latent = content_emb_latent.permute(1,0,2)
+        content_emb_latent = self.pe_content(content_emb_latent) # torch.Size([7, 32, 256])
+        content_emb_latent = self.seqTransEncoder(content_emb_latent).permute(1,0,2) # torch.Size([32, 7, 256])
+        content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256) # torch.Size([32, 6, 256])
+        content_emb_latent = content_emb_latent.permute(1,0,2) # torch.Size([6, 32, 256])
         # concatenation with sample
-        xseq = torch.cat((content_emb_latent, sample), axis=0)
+        xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
 
         # style encoder
-        style_emb_latent = self.emb_proj_st(style_emb)
+        style_emb_latent = self.emb_proj_st(style_emb) # torch.Size([1, 32, 256])
         style_emb_latent = time_emb + style_emb_latent
-        style_emb_latent = style_emb_latent.squeeze()
+        style_emb_latent = style_emb_latent.squeeze() # torch.Size([32, 256])
 
         # trajectory encoder
-        trans_emb = self.trans_Encoder(trans_cond, lengths)
+        trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
         trans_emb = trans_emb + time_emb
-        trans_emb = trans_emb.squeeze()
+        trans_emb = trans_emb.squeeze() # torch.Size([32, 256])
         
         # to dit blocks (N, T, D)
-        xseq = self.query_pos(xseq).permute(1,0,2)
+        xseq = self.query_pos(xseq).permute(1,0,2) # torch.Size([32, 13, 256])
         for block in self.blocks:
-            xseq = block(xseq, style_emb_latent, trans_emb) 
-        sample = xseq[:,content_emb_latent.shape[0]:,:]
+            xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
+        sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
        
 
         return (sample, )        
