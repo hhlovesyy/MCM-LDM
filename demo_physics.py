@@ -28,7 +28,7 @@ path_config = {
     "pretrained_denoiser": "checkpoints/denoiser_checkpoint/denoiser.ckpt",
     
     # 你的微调权重 (灵魂 - 163MB那个)
-    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2_1125/checkpoints/epoch=649.ckpt" 
+    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2_1125_3scenes/checkpoints/epoch=499.ckpt" 
 }
 
 def plot_attention(attn_weights, scene_name, save_path):
@@ -42,10 +42,10 @@ def plot_attention(attn_weights, scene_name, save_path):
     data = attn_weights[0].squeeze().cpu().numpy() 
     
     # 2. 定义标签 (对应 scenes.json 里的 physical_parameters_desc)
-    labels = ["WindX", "WindY", "WindStrength", "CeilingHeight"]
+    labels = ["WindX", "WindY", "WindStrength", "CeilingHeight", "Gap Width", "GapOffset"]
     
     # 3. 绘图
-    plt.figure(figsize=(8, 4))
+    plt.figure(figsize=(8, 6))
     # 把它变成 (1, 4) 矩阵方便画热力图
     sns.heatmap(data.reshape(1, -1), annot=True, cmap="Reds", 
                 xticklabels=labels, yticklabels=[scene_name],
@@ -127,7 +127,7 @@ def parse_inference_json(json_path, max_wind=330000.0, max_height=220.0):
     params = data.get("physical_parameters", {})
     
     # 初始化 4 维向量
-    phys_vec = torch.zeros(4)
+    phys_vec = torch.zeros(6)
     
     # 填充风力
     if "wind_force" in params:
@@ -142,6 +142,13 @@ def parse_inference_json(json_path, max_wind=330000.0, max_height=220.0):
     if "ceiling_height" in params:
         ch = params["ceiling_height"]
         phys_vec[3] = max(0, 1.0 - (ch / max_height))
+    
+    if "gap_width" in params:
+        gw = params["gap_width"]
+        phys_vec[4] = gw / 120.0
+    if "gap_offset" in params:
+        go = params["gap_offset"]
+        phys_vec[5] = go / 20.0
 
     # 生成一个虚拟的 scene_cat
     scene_cat = torch.ones(1)

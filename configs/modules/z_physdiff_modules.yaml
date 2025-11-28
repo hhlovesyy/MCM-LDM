@@ -21,7 +21,7 @@ physics_encoder:
     # We will pass these values directly from mld.py, 
     # but defining them here is good practice.
     scene_cat_dim: 1
-    phys_params_dim: 4
+    phys_params_dim: 6
     d_model: 256  # ${model.latent_dim[-1]} # Use the model's latent dim for consistency，直接写死了256，这样比较方便
     n_head: ${model.num_head}
     n_layers: 1 # Start with 1 layer for the probe

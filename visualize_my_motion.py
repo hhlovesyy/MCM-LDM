@@ -35,7 +35,7 @@ except ImportError:
 
 # 1. [输入] 请将这里修改为您想要可视化的.npy文件的【绝对路径】
 #    这个文件应该是我们之前生成的，例如 'YHSMPLClapping100.npy'
-NPY_FILE_TO_VISUALIZE = "/root/autodl-tmp/HumanML3D/HumanML3D/dataset_res/npy_input_ceiling/npy_output/Ceiling_Front_80cm_Alpha0p0_0025.npy" # <-- 请修改我！把Blender产出的windows操作系统下的文件上传到Linux服务器上
+NPY_FILE_TO_VISUALIZE = "/root/autodl-tmp/HumanML3D/HumanML3D/dataset_res/npy_input_narrowgap_02_10/npy_output/Gap_35cm_OffNeg5_Alpha1p0_0278.npy" # <-- 请修改我！把Blender产出的windows操作系统下的文件上传到Linux服务器上
 
 # 2. [输出] 可视化视频将被保存在.npy文件相同的目录下
 #    例如，输出文件将是 'YHSMPLClapping100.mp4'

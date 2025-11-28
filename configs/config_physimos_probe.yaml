@@ -5,7 +5,7 @@
 ####################################
 # The following are general settings
 ####################################
-NAME: "PhysiMoS_Finetune_v2_1125" #<-- 1. MODIFIED
+NAME: "PhysiMoS_Finetune_v2_1125_3scenes" #<-- 1. MODIFIED
 FOLDER_EXP: "experiments/physimos_probe"   #<-- 2. NEW
 DEBUG: False
 ACCELERATOR: 'gpu'

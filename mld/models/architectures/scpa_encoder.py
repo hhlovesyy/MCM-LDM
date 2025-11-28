@@ -159,6 +159,7 @@ class SCPAEncoder1125(nn.Module):
 
     def forward(self, phys_params: torch.Tensor, scene_cat: torch.Tensor = None, need_weights: bool = False):
         # [核心修改] scene_cat 变为可选参数，但我们不再使用它
+        # print("in forward , phys params:", phys_params.shape)
         batch_size = phys_params.shape[0]  # torch.Size([16, 4])
 
         # A. 构建 Memory (同之前)

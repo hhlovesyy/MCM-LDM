@@ -247,12 +247,11 @@ class PhysicsDataset(data.Dataset):
         self.max_wind_force = max_wind_force
         self.max_ceiling_height = max_ceiling_height
 
-        self.phys_dim = 4 # [wind_x, wind_y, wind_mag, ceiling_height]
+        self.phys_dim = 6 # [wind_x, wind_y, wind_mag, ceiling_height, gap_width, gap_offset]
         
         self.motion_dir = motion_dir
         self.json_dir = json_dir
 
-        self.phys_dim = 4 # [wind_x, wind_y, wind_mag, ceiling_height]
         self.data_list = []
         all_json_files = [f for f in os.listdir(json_dir) if f.endswith('.json')]
         
@@ -316,7 +315,20 @@ class PhysicsDataset(data.Dataset):
             ch = params["ceiling_height"]
             # 值越低 -> 特征值越高 (1.0)
             phys_params_np[3] = max(0, 1.0 - (ch / self.max_ceiling_height))
+        
+        if "gap_width" in params:
+            gw = params["gap_width"]
+            phys_params_np[4] = gw / 120.0
+        if "gap_offset" in params:
+            go = params["gap_offset"]
+            phys_params_np[5] = go / 20.0
 
+        if self.is_train: # 在训练的时候添加一个随机噪声，避免模型
+            noise_scale = 0.05
+            noise = np.random.randn(*phys_params_np.shape) * noise_scale
+            phys_params_np += noise
+            # 可以选择性地 clamp 到 [-1, 1]
+            phys_params_np = np.clip(phys_params_np, -1.0, 1.0)
         phys_params = torch.from_numpy(phys_params_np).float()
 
         # [修改] 生成一个虚拟的、长度为1的 scene_cat，以匹配 mld.py 的接口
