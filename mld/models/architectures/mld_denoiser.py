@@ -75,14 +75,68 @@ class TransEncoder(nn.Module):
 
 
 
+# # 定义“场景-风格适配器”，并在前向传播时拦截 Style 特征，用 Scene 特征对其进行“物理修正”。
+class SceneStyleAdapter(nn.Module):
+    def __init__(self, style_dim=256, scene_dim=512):
+        super().__init__()
+        # 降维层
+        self.scene_mapper = nn.Sequential(
+            nn.Linear(scene_dim, style_dim),
+            nn.SiLU(),
+            nn.Linear(style_dim, style_dim)
+        )
+        # 门控层 (Channel-wise Gating)
+        self.channel_gate = nn.Sequential(
+            nn.Linear(style_dim * 2, style_dim),
+            nn.Sigmoid()
+        )
+        
+        self.norm = nn.LayerNorm(style_dim)
 
+    def forward(self, style_feat, scene_feat):
+        # style_feat: [Batch, 256]
+        # scene_feat: [Batch, 1, 512]
+        scene_feat = scene_feat.squeeze(1) # torch.Size([32, 512])
+        
+        scene_latent = self.scene_mapper(scene_feat) # [B, 256] torch.Size([32, 256])
+        
+        # 拼接并计算门控
+        cat_feat = torch.cat([style_feat, scene_latent], dim=-1) # torch.Size([32, 512])
+        gate = self.channel_gate(cat_feat) # torch.Size([32, 256])
+        
+        # 融合公式：Style * Gate + Scene * (1-Gate)
+        refined_style = style_feat * gate + scene_latent * (1 - gate)
+        
+        return self.norm(refined_style)
+    
+class SceneStyleAdapterSimple(nn.Module):
+    # 非常激进的版本，直接暴力加在一起
+    def __init__(self, style_dim=256, scene_dim=512):
+        super().__init__()
+        
+        # 1. 映射层
+        self.scene_mapper = nn.Sequential(
+            nn.Linear(scene_dim, style_dim),
+            nn.SiLU(),
+            nn.Linear(style_dim, style_dim)
+        )
+        
+        # 2. 【激进修改】去掉 Sigmoid 门控，改用简单的 Learnable Scale
+        # 这是一个可学习的缩放系数，初始化为 0.1 或 1.0，强迫网络接受信号
+        self.output_scale = nn.Parameter(torch.ones(1) * 0.1) 
+        
+        self.norm = nn.LayerNorm(style_dim)
 
-
-
-
-
-
-
+    def forward(self, style_feat, scene_feat):
+        scene_feat = scene_feat.squeeze(1)
+        scene_latent = self.scene_mapper(scene_feat)
+        
+        # 【核心修改】残差连接 (Residual Connection)
+        # 强制公式：New = Old + alpha * Scene
+        # 这样 Style 必须接受 Scene 的干扰，网络被迫去适应这个干扰
+        refined_style = style_feat + self.output_scale * scene_latent
+        
+        return self.norm(refined_style)
 
 # adaln-zero in dit
 
@@ -202,7 +256,7 @@ class MldDenoiser(nn.Module):
 
 
         self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
-
+        self.scene_adapter = SceneStyleAdapter(style_dim=self.latent_dim, scene_dim=512)
 
 
     def forward(self,
@@ -225,7 +279,8 @@ class MldDenoiser(nn.Module):
         # three conditions
         style_emb = encoder_hidden_states[1].permute(1, 0, 2)  # torch.Size([1, 32, 512])
         content_emb = encoder_hidden_states[0].permute(1, 0, 2) # torch.Size([7, 32, 256])
-        trans_cond = encoder_hidden_states[-1] # torch.Size([32, 40, 3])
+        trans_cond = encoder_hidden_states[2] # torch.Size([32, 40, 3])
+        scene_emb = encoder_hidden_states[3] # [B, 1, 512] (新增的)
         
         # content        
         content_emb_latent = content_emb
@@ -244,6 +299,8 @@ class MldDenoiser(nn.Module):
         style_emb_latent = time_emb + style_emb_latent
         style_emb_latent = style_emb_latent.squeeze() # torch.Size([32, 256])
 
+        style_emb_final = self.scene_adapter(style_emb_latent, scene_emb) # torch.Size([32, 256])
+
         # trajectory encoder
         trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
         trans_emb = trans_emb + time_emb
@@ -252,7 +309,7 @@ class MldDenoiser(nn.Module):
         # to dit blocks (N, T, D)
         xseq = self.query_pos(xseq).permute(1,0,2) # torch.Size([32, 13, 256])
         for block in self.blocks:
-            xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
+            xseq = block(xseq, style_emb_final, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
         sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
        
 

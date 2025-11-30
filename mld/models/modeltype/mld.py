@@ -40,7 +40,7 @@ from datasets.utils.common.quaternion import *
 from datasets.utils.paramUtil import *
 # import evaluate.utils.rotation_conversions as geometry
 
-
+from transformers import CLIPTokenizer, CLIPTextModel
 
 
 
@@ -92,9 +92,21 @@ class MLD(BaseModel):
             p.requires_grad = False
 
 
+        print("Loading CLIP for Scene Guidance...")
+        import os
+        local_clip_path = "/root/autodl-tmp/MyRepository/MCM-LDM/local_clip_model" 
+        # 或者如果是相对路径: local_clip_path = "./local_clip_model"
 
+        print(f"Loading CLIP from local path: {local_clip_path}")
+        # 加载预训练模型
+        self.scene_tokenizer = CLIPTokenizer.from_pretrained(local_clip_path)
+        self.scene_text_encoder = CLIPTextModel.from_pretrained(local_clip_path)
 
-
+        # 冻结参数（这一点非常重要，否则显存会爆，且难以训练）
+        self.scene_text_encoder.eval()
+        self.scene_text_encoder.requires_grad_(False)
+        for p in self.scene_text_encoder.parameters():
+            p.requires_grad = False
 
 
         self.vae = instantiate_from_config(cfg.model.motion_vae)
@@ -113,12 +125,12 @@ class MLD(BaseModel):
 
         # self._get_t2m_evaluator(cfg)
 
-        if cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
-            self.optimizer = AdamW(lr=cfg.TRAIN.OPTIM.LR,
-                                   params=self.parameters())
-        else:
-            raise NotImplementedError(
-                "Do not support other optimizer for now.")
+        # if cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
+        #     self.optimizer = AdamW(lr=cfg.TRAIN.OPTIM.LR,
+        #                            params=self.parameters())
+        # else:
+        #     raise NotImplementedError(
+        #         "Do not support other optimizer for now.")
 
         if cfg.LOSS.TYPE == "mld":
             self._losses = MetricCollection({
@@ -144,6 +156,34 @@ class MLD(BaseModel):
 
         self.feats2joints = datamodule.feats2joints
         self.joints2feats = datamodule.joints2feats
+
+    def configure_optimizers(self):
+        print("Configuring optimizers with parameter groups for finetuning...")
+        # 1. 分离参数组：Adapter 用大火猛炒，Denoiser 用文火慢炖
+        denoiser_params = []
+        adapter_params = []
+        
+        # 遍历所有参数，根据名字区分
+        for name, param in self.denoiser.named_parameters():
+            if "scene_adapter" in name:
+                # 这是我们的新模块，需要高学习率
+                adapter_params.append(param)
+            else:
+                # 这是预训练好的旧模块，需要低学习率
+                denoiser_params.append(param)
+        
+        # 2. 定义优化器
+        # 注意：这里我们移除了 scheduler，直接返回 optimizer
+        optimizer = torch.optim.AdamW([
+            # 老参数：低学习率 (保护原有知识)
+            {"params": denoiser_params, "lr": 1e-5}, 
+            # 新参数：高学习率 (放大20倍，强制它快速学习)
+            {"params": adapter_params, "lr": 2e-4},  
+        ], weight_decay=0.0) # Finetune 时通常关掉 weight_decay 防止过拟合
+        
+        # 3. 直接返回，不要那个 scheduler 了
+        # 之前的报错是因为你把 DDIM 传给了 Lightning，Lightning 以为它是调整学习率的
+        return {"optimizer": optimizer}
 
     def _get_t2m_evaluator(self, cfg):
         """
@@ -293,8 +333,26 @@ class MLD(BaseModel):
             trans_cond = trans_motion[...,:3]
             uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
 
+            scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
+            with torch.no_grad():
+                text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+                scene_text_emb = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
+            scene_emb = scene_text_emb # 目前主要靠 Text
+                
+            scene_emb = scene_emb.unsqueeze(1) # [B, 1, 512]
+
+            # Classifier-Free Guidance (推理时非常重要！)
+            # 我们需要构造 Unconditional 的 Scene Feature
+            # 通常是用空字符串 "" 或者 "unconditional"
+            uncond_inputs = self.scene_tokenizer([""] * len(lengths), padding=True, truncation=True, return_tensors="pt").to(self.device)
+            uncond_scene_emb = self.scene_text_encoder(**uncond_inputs).pooler_output.unsqueeze(1)
+            
+            # 拼接 Condition (用于 CFG)
+            # 注意顺序：[Uncond, Cond]
+            scene_emb_cfg = torch.cat([uncond_scene_emb, scene_emb], dim=0)
+
             # three conditions
-            multi_cond_emb = [motion_emb_content, motion_emb, uncond_trans]
+            multi_cond_emb = [motion_emb_content, motion_emb, uncond_trans, scene_emb_cfg]
 
 
             z = self._diffusion_reverse(multi_cond_emb, lengths, scale)
@@ -485,13 +543,25 @@ class MLD(BaseModel):
         motion_emb[mask_uncond, ...] = 0
         
 
-
         # trans condition
         trans_cond = batch["motion"][...,:3]  # torch.Size([32, 40, 3])
 
-        # three condition
-        multi_cond_emb = [cond_emb, motion_emb, trans_cond] # 复习一下： cond_emb：内容（torch.Size([32, 7, 256])），motion_emb：风格（torch.Size([32, 1, 512])），trans_cond：轨迹（torch.Size([32, 40, 3])）
+        scene_texts = batch.get("scene_text", [""] * len(batch["length"]))
+        # 2. CLIP 编码
+        with torch.no_grad():
+            inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+            outputs = self.scene_text_encoder(**inputs)
+            # 取 [EOS] token 特征 [Batch, 512]
+            scene_emb = outputs.pooler_output 
+        scene_emb = scene_emb.unsqueeze(1)
+        if "mask_uncond" in locals(): # 确保变量存在
+            scene_emb[mask_uncond, ...] = 0
 
+
+        # three condition
+        # multi_cond_emb = [cond_emb, motion_emb, trans_cond] # 复习一下： cond_emb：内容（torch.Size([32, 7, 256])），motion_emb：风格（torch.Size([32, 1, 512])），trans_cond：轨迹（torch.Size([32, 40, 3])）
+        # scene_emb: 我们新增的场景的自然语言描述：
+        multi_cond_emb = [cond_emb, motion_emb, trans_cond, scene_emb] 
 
         # diffusion process return with noise and noise_pred
         n_set = self._diffusion_process(z, multi_cond_emb, lengths) # 返回的n_set是一个字段，包含计算loss的时候pytorch_lightning所关心的内容
@@ -780,4 +850,12 @@ class MLD(BaseModel):
         # return forward output rather than loss during test
         if split in ["test"]:
             return rs_set["joints_rst"], batch["length"]
+        # tensorboard 现在看不到loss，log一下?
+        self.log('train/loss', 
+             loss, 
+             on_step=True,       # 在每一步 (Batch) 结束时记录
+             on_epoch=True,      # 在每轮 (Epoch) 结束时计算平均值并记录
+             prog_bar=True,      # 显示在进度条上 (可选)
+             logger=True,        # 记录到 TensorBoard
+             sync_dist=True)     # 在多 GPU 环境下同步损失 (重要)
         return loss

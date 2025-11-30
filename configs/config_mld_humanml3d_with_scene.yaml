@@ -29,13 +29,14 @@ TRAIN:
   # Size of batches
   BATCH_SIZE: 16
   # Total epochs for training
-  END_EPOCH: 2000
+  END_EPOCH: 500
 
   RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
+  PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
-    LR: 1e-4 # Learning rate
+    LR: 1e-5 # Learning rate
   # Ablation study configurations.
   ABLATION:
     SKIP_CONNECT: True
@@ -54,7 +55,8 @@ EVAL:
 # The following are testing settings
 #####################################
 TEST:
-  CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
+  # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1130/checkpoints/epoch=149.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
@@ -109,7 +111,7 @@ model:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 100
+  SACE_CHECKPOINT_EPOCH: 50
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True
