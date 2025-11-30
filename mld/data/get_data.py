@@ -2,7 +2,7 @@ from os.path import join as pjoin
 
 import numpy as np
 from .humanml.utils.word_vectorizer import WordVectorizer
-from .HumanML3D import HumanML3DDataModule
+from .HumanML3D import HumanML3DDataModule, StyleSceneDataModule
 from .utils import *
 
 
@@ -17,6 +17,8 @@ def get_mean_std(phase, cfg, dataset_name):
     #     std = np.load(pjoin(opt.data_root, 'Std.npy'))
 
     # todo: use different mean and val for phases
+    if dataset_name == "stylescenedataset":
+        dataset_name = "humanml3d"  # trick 一下，因为VAE只认识HumanML3D的mean和std，所以借用一下
     name = "t2m" if dataset_name == "humanml3d" else dataset_name
     assert name in ["t2m", "kit"]
     # if phase in ["train", "val", "test"]:
@@ -41,7 +43,7 @@ def get_mean_std(phase, cfg, dataset_name):
 
 def get_WordVectorizer(cfg, phase, dataset_name):
     if phase not in ["text_only"]:
-        if dataset_name.lower() in ["humanml3d", "kit"]:
+        if dataset_name.lower() in ["humanml3d", "kit", "stylescenedataset"]:
             return WordVectorizer(cfg.DATASET.WORD_VERTILIZER_PATH, "our_vab")
         else:
             raise ValueError("Only support WordVectorizer for HumanML3D")
@@ -54,6 +56,8 @@ def get_collate_fn(name, phase="train"):
         return mld_collate
     elif name.lower() in ["humanact12", 'uestc']:
         return a2m_collate
+    elif name.lower() in ["stylescenedataset"]:
+        return scene_collate
     # else:
     #     return all_collate
     # if phase == "test":
@@ -64,8 +68,9 @@ def get_collate_fn(name, phase="train"):
 # map config name to module&path
 dataset_module_map = {
     "humanml3d": HumanML3DDataModule,
+    "stylescenedataset":StyleSceneDataModule,
 }
-motion_subdir = {"humanml3d": "new_joint_vecs", "kit": "new_joint_vecs"}
+motion_subdir = {"humanml3d": "new_joint_vecs", "kit": "new_joint_vecs", "stylescenedataset":"new_joint_vecs"}
 
 
 def get_datasets(cfg, logger=None, phase="train"):
@@ -102,6 +107,32 @@ def get_datasets(cfg, logger=None, phase="train"):
                 max_text_len=cfg.DATASET.SAMPLER.MAX_TEXT_LEN,
                 unit_length=eval(
                     f"cfg.DATASET.{dataset_name.upper()}.UNIT_LEN"),
+            )
+            datasets.append(dataset)
+        elif dataset_name.lower() in ["stylescenedataset"]:
+            data_root = eval(f"cfg.DATASET.{dataset_name.upper()}.ROOT")
+            mean, std = get_mean_std(phase, cfg, dataset_name)
+            mean_eval, std_eval = get_mean_std("val", cfg, dataset_name)
+            wordVectorizer = get_WordVectorizer(cfg, phase, dataset_name)
+            collate_fn = get_collate_fn(dataset_name, phase)
+            dataset = dataset_module_map[dataset_name.lower()](
+                cfg=cfg,
+                batch_size=cfg.TRAIN.BATCH_SIZE,
+                num_workers=cfg.TRAIN.NUM_WORKERS,
+                debug=cfg.DEBUG,
+                collate_fn=collate_fn,
+                mean=mean,
+                std=std,
+                mean_eval=mean_eval,
+                std_eval=std_eval,
+                w_vectorizer=wordVectorizer,
+                text_dir=pjoin(data_root, "texts"),
+                style_text_dir=pjoin(data_root, "texts"),
+                motion_dir=pjoin(data_root, motion_subdir[dataset_name]),
+                unit_length=eval(
+                    f"cfg.DATASET.{dataset_name.upper()}.UNIT_LEN"),
+                scene_dict_path = cfg.DATASET.STYLESCENEDATASET.SCENE_DICT_PATH,
+                scene_image_dir = cfg.DATASET.STYLESCENEDATASET.SCENE_IMAGE_DIR,
             )
             datasets.append(dataset)
         elif dataset_name.lower() in ["humanact12", 'uestc']:

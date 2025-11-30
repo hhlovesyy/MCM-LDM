@@ -153,6 +153,33 @@ def all_collate(batch):
 
     return motion, cond
 
+def scene_collate(batch):
+    notnone_batches = [b for b in batch if b is not None]
+    # 按动作长度排序
+    notnone_batches.sort(key=lambda x: x[5], reverse=True)
+    adapted_batch = {
+        # 【修改点 1】：去掉 torch.tensor()，直接用 .float()
+        # 因为在 Dataset.__getitem__ 里我们已经转成 Tensor 了
+        "motion": collate_tensors([b[4].float() for b in notnone_batches]),
+        
+        "text": [b[2] for b in notnone_batches],
+        "length": [b[5] for b in notnone_batches],
+        
+        # 【修改点 2】：同样去掉 torch.tensor()
+        "word_embs": collate_tensors([b[0].float() for b in notnone_batches]),
+        "pos_ohot": collate_tensors([b[1].float() for b in notnone_batches]),
+        
+        # text_len 是 int，这里可以用 torch.tensor 转一下，或者直接 stack
+        "text_len": torch.tensor([b[3] for b in notnone_batches]),
+        "tokens": [b[6] for b in notnone_batches],
+
+        # -------------------------------------------------------
+        # 【ICME 新增字段】：确保这些也在！不要漏了！
+        # -------------------------------------------------------
+        "scene_text": [b[7] for b in notnone_batches],  # List of strings
+        "scene_image": torch.stack([b[8] for b in notnone_batches]), # Tensor stack
+    }
+    return adapted_batch
 
 # an adapter to our collate func
 def mld_collate(batch):

@@ -10,6 +10,11 @@ DATASET:
   HUMANML3D:
     ROOT: 'datasets/humanml3d' # HumanML3D directory
     SPLIT_ROOT: 'datasets/humanml3d' # HumanML3D splits directory
+  STYLESCENEDATASET:
+    ROOT: 'datasets/humanml3d_scene' # StyleSceneDataset directory
+    SPLIT_ROOT: 'datasets/humanml3d_scene' # StyleSceneDataset splits directory
+    SCENE_DICT_PATH: 'datasets/humanml3d_scene/Scene_name_dict.txt'
+    SCENE_IMAGE_DIR: 'datasets/humanml3d_scene/scene_images/' 
 
 
 model:

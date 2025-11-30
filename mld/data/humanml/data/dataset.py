@@ -1459,6 +1459,322 @@ class Text2MotionDataset(data.Dataset):
 
         return word_embeddings, pos_one_hots, caption, sent_len, motion, m_length
 
+# -----------------------------------------------------------------------
+# 【ICME 策略】: Semantic Prompt Ensemble
+# Key: 你的原始数据集Label (拼音/英文)
+# Value: List of Strings (包含不同侧重点的物理环境描述)
+# -----------------------------------------------------------------------
+
+SCENE_DESCRIPTIONS = {
+    # 1. 独木桥 - 侧重：平衡、张开双臂、小心翼翼
+    "Dumuqiao": [
+        "A person carefully crossing a narrow single-plank bridge, extending arms sideways to maintain balance.",
+        "Walking tightrope-style on a very narrow beam, taking slow and deliberate steps, placing one foot directly in front of the other.",
+        "Balancing precariously on a thin bridge, body wobbling slightly, arms outstretched for stability.",
+        "Moving cautiously on a high narrow log, looking down at the feet to ensure safe footing."
+    ],
+
+    # 2. 低矮通道 - 侧重：弯腰、屈膝、低头
+    "DiAiTongDao": [
+        "Walking through a low tunnel, crouching down with bent knees and hunched back to avoid hitting the ceiling.",
+        "Moving in a confined space with limited vertical clearance, keeping the head low and body compressed.",
+        "Stooping forward while walking, maintaining a lowered posture to navigate through a short passage.",
+        "Walking with a duck-walk posture, knees bent deeply, to fit through a low-hanging channel."
+    ],
+
+    # 3. 水坑地面 - 侧重：躲避、跨步、犹豫
+    "ShuiKengDiMian": [
+        "Navigating a muddy ground full of puddles, taking irregular steps to jump over or step around water spots.",
+        "Walking carefully on uneven terrain with water pools, looking down to choose dry spots for footing.",
+        "Dodging puddles on the ground, making sudden lateral adjustments and varying step lengths.",
+        "Tip-toeing and hopping occasionally to avoid stepping into dirty water on the ground."
+    ],
+
+    # 4. 玻璃房间 - 侧重：摸索、迷茫、手伸向前方
+    "BoLiFangJian": [
+        "Trapped in a glass room, walking tentatively with hands reaching out to feel for invisible walls.",
+        "Moving with hesitation and confusion, exploring the boundaries of a transparent enclosure with hands stretched forward.",
+        "Walking blindly but cautiously, palms facing outward to detect potential glass barriers.",
+        "Pacing around in a glass maze, testing the air with hands before taking a step."
+    ],
+
+    # 5. T台走秀 - 侧重：自信、挺胸、猫步、夸张的跨步
+    "T_Stage": [
+        "A fashion model walking on a runway, posture upright and confident, with a rhythmic and exaggerated catwalk strut.",
+        "Strutting elegantly on a T-stage, shoulders back, hips swaying with each long step.",
+        "Performing a high-fashion walk, looking straight ahead with a cool expression, steps aligned in a straight line.",
+        "Walking with intense confidence and style, emphasizing the movement of the legs and hips like a supermodel."
+    ],
+
+    # 6. 拥挤的场合 - 侧重：侧身、避让、收缩身体
+    "CroudedPlace": [
+        "Navigating through a dense crowd, constantly turning the torso sideways to squeeze past people.",
+        "Walking in a jammed subway station, making small steps and frequently adjusting direction to avoid collisions.",
+        "Weaving through a busy street, protecting personal space by keeping arms close to the body.",
+        "Shouldering through a thick crowd, stopping and starting abruptly, looking for gaps in the flow of people."
+    ],
+
+    # 7. 低矮天花板 - 侧重：此场景与低矮通道类似，但更强调头顶的压迫感
+    "DiAiTianhuaban": [
+        "Walking under a very low ceiling, head ducked down and neck bent forward to prevent injury.",
+        "Moving with a hunched posture due to insufficient headroom, instinctively protecting the top of the head.",
+        "Crouching slightly while walking, constantly looking up to check the clearance of the ceiling.",
+        "Walking nervously under a low hanging structure, keeping the body low and compact."
+    ],
+
+    # 8. 酒吧 (Drunk) - 侧重：踉跄、摇晃、重心不稳
+    "Bar": [
+        "Stumbling out of a bar, swaying unpredictably from side to side, struggling to maintain a straight line.",
+        "Walking with a drunk gait, footsteps heavy and uncoordinated, body leaning dangerously in random directions.",
+        "Trying to walk straight while intoxicated, losing balance frequently and taking wide steps to recover.",
+        "A tipsy walk, limbs feeling loose and heavy, occasionally tripping over own feet."
+    ],
+
+    # 9. 雪地或沙地 - 侧重：拔腿高抬、费力、陷落感
+    "WalkInSnowOrSand": [
+        "Trudging through deep snow, lifting knees high and stomping down to break the surface.",
+        "Walking on soft sand, feet sinking into the ground with every step, requiring extra effort to push off.",
+        "Slogging through heavy terrain, movement is slow and laborious, body leaning forward to generate momentum.",
+        "Marching through deep powder snow, emphasizing high leg lifts and forceful grounding."
+    ],
+
+    # 10. 摸黑 - 侧重：手探路、脚步虚探、缓慢
+    "Dark": [
+        "Groping in pitch darkness, moving slowly with hands stretched forward to detect obstacles.",
+        "Walking blindly in a blacked-out room, shuffling feet cautiously to feel the ground changes.",
+        "Navigating without vision, body tense, arms waving slowly in front to protect the face.",
+        "Moving hesitantly in the dark, taking small testing steps before committing weight to the foot."
+    ],
+
+    # 11. 左倾 - 侧重：非对称、单侧负重感、抗侧风
+    "LeanLeft": [
+        "Walking while constantly leaning to the left side, as if carrying a heavy weight on the left shoulder.",
+        "Moving with a distinct tilt to the left, struggling to keep the body upright against a force.",
+        "A gait with a permanent leftward list, body axis shifted off-center.",
+        "Walking as if fighting a strong wind blowing from the right, leaning left to compensate."
+    ],
+
+    # 12. 潮湿地面 - 侧重：小碎步、脚掌平放、僵硬、防滑
+    "WetFloor": [
+        "Walking on a freshly mopped wet floor, taking tiny shuffling steps with stiff legs to prevent slipping.",
+        "Moving cautiously on a slick surface, keeping feet flat and close to the ground.",
+        "Treading on a slippery tiled floor, body stiff and center of gravity kept perfectly vertical.",
+        "Walking as if on eggshells due to the wet floor, arms slightly out for emergency balance."
+    ],
+
+    # 13. 暴风雨 - 侧重：挡风、身体前倾、顶风
+    "BaoFengYu": [
+        "Battling against a violent rainstorm, using one arm to shield the face from rain and wind.",
+        "Walking into a gale-force wind, leaning body forward significantly to penetrate the air resistance.",
+        "Struggling against strong gusts, protecting eyes with hands, steps are heavy and grounded.",
+        "Pushing through a storm, head down and shoulders hunched to minimize wind exposure."
+    ],
+
+    # 14. 冰面 - 侧重：极其小心、甚至有些滑动、双腿分开
+    "IcyRoad": [
+        "Walking on a frozen icy road, maintaining a wide stance for stability, sliding feet gently instead of lifting them.",
+        "Moving on black ice, extremely cautious, knees bent to lower the center of gravity.",
+        "Trying to walk on a skating rink without skates, arms flailing slightly to catch balance, steps are tentative.",
+        "Navigating a slippery ice sheet, looking at the ground intently, fearing a fall at any moment."
+    ]
+}
+
+from PIL import Image
+from torchvision import transforms
+# 图像预处理 (用于 CLIP Image Encoder)
+# 简单的 Resize 和 Normalize
+scene_image_transform = transforms.Compose([
+    transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.ToTensor(),
+    transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+])
+
+class Scene100StyleDataset(data.Dataset):
+    def __init__(
+        self,
+        mean,
+        std,
+        split_file, # e.g., "train.txt"
+        motion_dir, # e.g., ".../new_joint_vecs"
+        scene_dict_path, # e.g., ".../Scene_name_dict.txt"
+        scene_image_dir, # e.g., ".../scene_images/" (存放15张场景图的文件夹)
+        max_motion_length=450, # NOTE:这个先用450，不然到时候VAE的pe长度会溢出报错，先简单训练一轮看看效果
+        min_motion_length=20,
+        unit_length=4,
+        **kwargs,
+    ):
+        self.mean = mean
+        self.std = std
+        self.max_motion_length = max_motion_length
+        self.min_motion_length = min_motion_length
+        self.unit_length = unit_length
+        self.scene_image_dir = scene_image_dir
+        
+        # 1. 读取 Split File (决定是训练集还是测试集)
+        self.id_list = []
+        with open(split_file, "r") as f:
+            for line in f.readlines():
+                self.id_list.append(line.strip())
+        
+        # 2. 读取 Scene Mapping (Motion ID -> Scene Label)
+        # Scene_name_dict.txt 格式: 030561 Dumuqiao_00 0
+        self.motion2scene = {}
+        unique_scenes = set()
+        
+        print(f"Loading Scene Dictionary from {scene_dict_path}...")
+        total_dataset_id_cnt = 0
+        with open(scene_dict_path, "r") as f:
+            for line in f.readlines():
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    m_id = parts[0]
+                    # 处理 Label: "Dumuqiao_00" -> "Dumuqiao"
+                    raw_label = parts[1]
+                    # 假设 Label 都是 Name_Number 的格式，我们只取 Name
+                    scene_label = raw_label.split('_')[0] 
+                    # 暂时写死一个T_Stage这个，代码不是很优雅，但是能跑
+                    if scene_label == 'T':
+                        scene_label = 'T_Stage'
+                    
+                    self.motion2scene[m_id] = scene_label
+                    total_dataset_id_cnt += 1
+                    unique_scenes.add(scene_label)
+        
+        print(f"Found {len(unique_scenes)} unique scenes: {unique_scenes}")
+        print("Total dataset motion IDs in scene dict:", total_dataset_id_cnt)
+        
+        # 3. 过滤数据 (只保留在 Split 中 且 有 Scene 标签 且 长度合适 的动作)
+        self.data = []
+        
+        print(f"Indexing motion data from {motion_dir}...")
+        nameNotInSceneDict_cnt = 0
+        pathNotExit_cnt = 0
+        lenNotValid_cnt = 0
+        for name in self.id_list:
+            # 检查是否有场景标签
+            if name not in self.motion2scene:
+                nameNotInSceneDict_cnt += 1
+                continue
+            
+            motion_path = pjoin(motion_dir, name + ".npy")
+            if not os.path.exists(motion_path):
+                pathNotExit_cnt += 1
+                continue
+                
+            try:
+                motion = np.load(motion_path)
+                # 长度过滤
+                if len(motion) < self.min_motion_length or len(motion) >= 450:
+                    lenNotValid_cnt += 1
+                    print("debug lenNotValid name:", name, " len:", len(motion))
+                    continue
+                
+                # 成功添加
+                self.data.append({
+                    "name": name,
+                    "motion_path": motion_path,
+                    "scene_label": self.motion2scene[name]
+                })
+            except Exception as e:
+                print(f"Error loading {name}: {e}")
+                pass
+                
+        print(f"Dataset Loaded: {len(self.data)} samples ready for training.")
+        print(f"  - Names not in Scene Dict: {nameNotInSceneDict_cnt}")
+        print(f"  - Motion files not found: {pathNotExit_cnt}")
+        print(f"  - Motions with invalid length: {lenNotValid_cnt}")
+        
+        # 4. 预加载图片 (Optional: 如果内存够，把15张图直接读进内存，省IO)
+        self.scene_images_cache = {}
+        if scene_image_dir:
+            for scene_name in unique_scenes:
+                img_name = f"{scene_name}.jpg" # 假设图片以此命名
+                img_path = pjoin(scene_image_dir, img_name)
+                if os.path.exists(img_path):
+                    try:
+                        img = Image.open(img_path).convert("RGB")
+                        self.scene_images_cache[scene_name] = scene_image_transform(img)
+                    except:
+                        print(f"Warning: Could not load image for scene {scene_name}, using black image.")
+                        self.scene_images_cache[scene_name] = torch.zeros(3, 224, 224)
+                else:
+                    # 如果没有图，暂时用全黑图代替，保证代码能跑
+                    self.scene_images_cache[scene_name] = torch.zeros(3, 224, 224)
+        print("On Dataset class __init__ function end")
+        pass_dataset_cnt = len(self.data)
+        # 打印一下数据集里面的数据的通过率，pass_dataset_cnt / total_dataset_id_cnt
+        print("pass dataset cnt:", pass_dataset_cnt, " total dataset id cnt:", total_dataset_id_cnt)
+        print("Pass rate :", pass_dataset_cnt / total_dataset_id_cnt)
+        # NOTE: 现在训练集里面只有957个动作，但是train.txt的split文件里则有2400个文件，平均一个场景应该是68个动作，这个比例有点少，后面看看需不需要处理一下
+    
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, item):
+        sample = self.data[item]
+        name = sample['name']
+        scene_label = sample['scene_label']
+        
+        # 1. 加载 Motion & 归一化
+        motion = np.load(sample['motion_path'])
+        
+        # 随机裁剪逻辑 (参考 MCM-LDM)
+        m_length = len(motion)
+        if self.unit_length < 10:
+             # MCM-LDM 的奇怪逻辑，保留它
+            coin2 = np.random.choice(["single", "single", "double"])
+        else:
+            coin2 = "single"
+        if coin2 == "double":
+            m_length = (m_length // self.unit_length - 1) * self.unit_length
+        elif coin2 == "single":
+            m_length = (m_length // self.unit_length) * self.unit_length
+            
+        idx = random.randint(0, len(motion) - m_length)
+        motion = motion[idx:idx + m_length]
+        
+        # Z-Normalization
+        motion = (motion - self.mean) / self.std
+        motion = torch.tensor(motion).float() # 转 Tensor
+        
+        # 2. 获取 Scene Text (LLM Description)
+        # 如果字典里没找到，就回退到原始 Label
+        if scene_label in SCENE_DESCRIPTIONS:
+            # 随机选一条，增加数据的多样性
+            scene_text_raw = random.choice(SCENE_DESCRIPTIONS[scene_label])
+        else:
+            # Fallback
+            scene_text_raw = f"A person moving in {scene_label} environment."
+        
+        # 3. 获取 Scene Image
+        scene_image = self.scene_images_cache.get(scene_label, torch.zeros(3, 224, 224))
+        
+        # 4. 为了兼容 MCM-LDM 的 collate_fn 和 pipeline，我们需要填充一些 Dummy 数据
+        # MCM-LDM 需要: word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, tokens
+        # 我们的 Scene Text 用 CLIP 处理，不需要 word_embeddings (GloVe)
+        # 但为了不报错，我们填一些假的
+        
+        dummy_w_emb = torch.zeros(1, 300) # 假设 dim=300
+        dummy_pos_oh = torch.zeros(1, 15)
+        dummy_tokens = "sos/OTHER eos/OTHER"
+        
+        # -----------------------------------------------------------
+        # 返回值 (Tuple) - 注意顺序！
+        # 前 7 个是 MCM-LDM 原始需要的 (我们尽量给它填上，虽然可能不用)
+        # 后 2 个是我们新增的 (Scene Info)
+        # -----------------------------------------------------------
+        return (
+            dummy_w_emb,       # 0. word_embeddings (Unused for Scene)
+            dummy_pos_oh,      # 1. pos_one_hots (Unused)
+            scene_text_raw,        # 2. caption (这里我们直接把 Scene Text 给进去，方便查看)
+            len(scene_text_raw),   # 3. sent_len (String length, not token length, but fine)
+            motion,            # 4. motion (The Real Data)
+            m_length,          # 5. m_length
+            dummy_tokens,      # 6. tokens (Unused)
+            scene_text_raw,        # 7. [NEW] scene_text_raw (Explicitly for CLIP)
+            scene_image        # 8. [NEW] scene_image_tensor
+        )
+
 
 """For use of training text motion matching model, and evaluations"""
 

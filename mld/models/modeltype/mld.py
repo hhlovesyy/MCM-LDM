@@ -111,7 +111,7 @@ class MLD(BaseModel):
             cfg.model.noise_scheduler)
 
 
-        self._get_t2m_evaluator(cfg)
+        # self._get_t2m_evaluator(cfg)
 
         if cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
             self.optimizer = AdamW(lr=cfg.TRAIN.OPTIM.LR,
@@ -710,72 +710,72 @@ class MLD(BaseModel):
                 raise ValueError(
                     "Loss is None, this happend with torchmetrics > 0.7")
 
-        # Compute the metrics - currently evaluate results from text to motion
-        if split in ["val", "test"]:
-            # use t2m evaluators
-            rs_set = self.t2m_eval(batch)
+        # # Compute the metrics - currently evaluate results from text to motion
+        # if split in ["val", "test"]:
+        #     # use t2m evaluators
+        #     rs_set = self.t2m_eval(batch)
 
-            # MultiModality evaluation sperately
-            if self.trainer.datamodule.is_mm:
-                metrics_dicts = ['MMMetrics']
-            else:
-                metrics_dicts = self.metrics_dict
-            # metric = 'TemosMetric' 'TM2TMetrics'
-            for metric in metrics_dicts:
-                if metric == "TemosMetric":
-                    phase = split if split != "val" else "eval"
-                    if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
-                    ) not in [
-                            "humanml3d",
-                            "kit",
-                    ]:
-                        raise TypeError(
-                            "APE and AVE metrics only support humanml3d and kit datasets now"
-                        )
+        #     # MultiModality evaluation sperately
+        #     if self.trainer.datamodule.is_mm:
+        #         metrics_dicts = ['MMMetrics']
+        #     else:
+        #         metrics_dicts = self.metrics_dict
+        #     # metric = 'TemosMetric' 'TM2TMetrics'
+        #     for metric in metrics_dicts:
+        #         if metric == "TemosMetric":
+        #             phase = split if split != "val" else "eval"
+        #             if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
+        #             ) not in [
+        #                     "humanml3d",
+        #                     "kit",
+        #             ]:
+        #                 raise TypeError(
+        #                     "APE and AVE metrics only support humanml3d and kit datasets now"
+        #                 )
 
-                    getattr(self, metric).update(rs_set["joints_rst"],
-                                                 rs_set["joints_ref"],
-                                                 batch["length"])
-                elif metric == "TM2TMetrics":
-                    getattr(self, metric).update(
-                        # lat_t, latent encoded from diffusion-based text
-                        # lat_rm, latent encoded from reconstructed motion
-                        # lat_m, latent encoded from gt motion
-                        # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
-                        rs_set["lat_t"],
-                        rs_set["lat_rm"],
-                        rs_set["lat_m"],
-                        batch["length"],
-                    )
-                elif metric == "UncondMetrics":
-                    getattr(self, metric).update(
-                        recmotion_embeddings=rs_set["lat_rm"],
-                        gtmotion_embeddings=rs_set["lat_m"],
-                        lengths=batch["length"],
-                    )
-                elif metric == "MRMetrics":
-                    getattr(self, metric).update(rs_set["joints_rst"],
-                                                 rs_set["joints_ref"],
-                                                 batch["length"])
-                elif metric == "MMMetrics":
-                    getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
-                                                 batch["length"])
-                elif metric == "HUMANACTMetrics":
-                    getattr(self, metric).update(rs_set["m_action"],
-                                                 rs_set["joints_eval_rst"],
-                                                 rs_set["joints_eval_ref"],
-                                                 rs_set["m_lens"])
-                elif metric == "UESTCMetrics":
-                    # the stgcn model expects rotations only
-                    getattr(self, metric).update(
-                        rs_set["m_action"],
-                        rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
-                                             25).permute(0, 3, 2, 1)[:, :-1],
-                        rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
-                                             25).permute(0, 3, 2, 1)[:, :-1],
-                        rs_set["m_lens"])
-                else:
-                    raise TypeError(f"Not support this metric {metric}")
+        #             getattr(self, metric).update(rs_set["joints_rst"],
+        #                                          rs_set["joints_ref"],
+        #                                          batch["length"])
+        #         elif metric == "TM2TMetrics":
+        #             getattr(self, metric).update(
+        #                 # lat_t, latent encoded from diffusion-based text
+        #                 # lat_rm, latent encoded from reconstructed motion
+        #                 # lat_m, latent encoded from gt motion
+        #                 # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
+        #                 rs_set["lat_t"],
+        #                 rs_set["lat_rm"],
+        #                 rs_set["lat_m"],
+        #                 batch["length"],
+        #             )
+        #         elif metric == "UncondMetrics":
+        #             getattr(self, metric).update(
+        #                 recmotion_embeddings=rs_set["lat_rm"],
+        #                 gtmotion_embeddings=rs_set["lat_m"],
+        #                 lengths=batch["length"],
+        #             )
+        #         elif metric == "MRMetrics":
+        #             getattr(self, metric).update(rs_set["joints_rst"],
+        #                                          rs_set["joints_ref"],
+        #                                          batch["length"])
+        #         elif metric == "MMMetrics":
+        #             getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
+        #                                          batch["length"])
+        #         elif metric == "HUMANACTMetrics":
+        #             getattr(self, metric).update(rs_set["m_action"],
+        #                                          rs_set["joints_eval_rst"],
+        #                                          rs_set["joints_eval_ref"],
+        #                                          rs_set["m_lens"])
+        #         elif metric == "UESTCMetrics":
+        #             # the stgcn model expects rotations only
+        #             getattr(self, metric).update(
+        #                 rs_set["m_action"],
+        #                 rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
+        #                                      25).permute(0, 3, 2, 1)[:, :-1],
+        #                 rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
+        #                                      25).permute(0, 3, 2, 1)[:, :-1],
+        #                 rs_set["m_lens"])
+        #         else:
+        #             raise TypeError(f"Not support this metric {metric}")
 
         # return forward output rather than loss during test
         if split in ["test"]:
