@@ -138,6 +138,35 @@ class SceneStyleAdapterSimple(nn.Module):
         
         return self.norm(refined_style)
 
+class SceneStyleAdapterFiLM(nn.Module):
+    def __init__(self, style_dim=256, scene_dim=512):
+        super().__init__()
+        
+        # 【新增】先对 Scene 归一化，解决你的顾虑
+        self.scene_norm = nn.LayerNorm(scene_dim) 
+        
+        # FiLM 生成器
+        self.film_generator = nn.Sequential(
+            nn.Linear(scene_dim, style_dim * 2),
+            nn.SiLU(),
+            nn.Linear(style_dim * 2, style_dim * 2)
+        )
+        self.norm = nn.LayerNorm(style_dim)
+
+    def forward(self, style_feat, scene_feat):
+        scene_feat = scene_feat.squeeze(1)
+        
+        # 1. 先归一化 Scene
+        scene_feat = self.scene_norm(scene_feat)
+        
+        # 2. 生成参数
+        film_params = self.film_generator(scene_feat)
+        gamma, beta = film_params.chunk(2, dim=-1)
+        
+        # 3. 调制
+        refined_style = style_feat * (1 + gamma) + beta
+        return self.norm(refined_style)
+
 # adaln-zero in dit
 
 def modulate(x, shift, scale):
@@ -256,7 +285,7 @@ class MldDenoiser(nn.Module):
 
 
         self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
-        self.scene_adapter = SceneStyleAdapter(style_dim=self.latent_dim, scene_dim=512)
+        self.scene_adapter = SceneStyleAdapterFiLM(style_dim=self.latent_dim, scene_dim=512)
 
 
     def forward(self,

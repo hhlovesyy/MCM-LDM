@@ -23,117 +23,47 @@ from mld.utils.logger import create_logger
 from visual import visual_pos 
 
 SCENE_DESCRIPTIONS = {
-    # 1. 独木桥 - 侧重：平衡、张开双臂、小心翼翼
-    "Dumuqiao": [
-        "A person carefully crossing a narrow single-plank bridge, extending arms sideways to maintain balance.",
-        "Walking tightrope-style on a very narrow beam, taking slow and deliberate steps, placing one foot directly in front of the other.",
-        "Balancing precariously on a thin bridge, body wobbling slightly, arms outstretched for stability.",
-        "Moving cautiously on a high narrow log, looking down at the feet to ensure safe footing."
-    ],
+    # 1. 独木桥 -> 聚焦：高空、狭窄、平衡不稳
+    "Dumuqiao": "A cinematic shot of a person balancing on a narrow beam high in the sky, unstable footing, arms out for balance, fear of falling.",
 
-    # 2. 低矮通道 - 侧重：弯腰、屈膝、低头
-    "DiAiTongDao": [
-        "Walking through a low tunnel, crouching down with bent knees and hunched back to avoid hitting the ceiling.",
-        "Moving in a confined space with limited vertical clearance, keeping the head low and body compressed.",
-        "Stooping forward while walking, maintaining a lowered posture to navigate through a short passage.",
-        "Walking with a duck-walk posture, knees bent deeply, to fit through a low-hanging channel."
-    ],
+    # 2. 低矮通道 -> 聚焦：狭窄空间、压抑、蜷缩
+    "DiAiTongDao": "Moving through a cramped underground tunnel with a very low ceiling, body crouched and compressed, claustrophobic atmosphere.",
 
-    # 3. 水坑地面 - 侧重：躲避、跨步、犹豫
-    "ShuiKengDiMian": [
-        "Navigating a muddy ground full of puddles, taking irregular steps to jump over or step around water spots.",
-        "Walking carefully on uneven terrain with water pools, looking down to choose dry spots for footing.",
-        "Dodging puddles on the ground, making sudden lateral adjustments and varying step lengths.",
-        "Tip-toeing and hopping occasionally to avoid stepping into dirty water on the ground."
-    ],
+    # 3. 水坑地面 -> 聚焦：脏水、躲避、小心翼翼
+    "ShuiKengDiMian": "Walking on a muddy road filled with dirty water puddles, carefully choosing dry spots, avoiding getting shoes wet.",
 
-    # 4. 玻璃房间 - 侧重：摸索、迷茫、手伸向前方
-    "BoLiFangJian": [
-        "Trapped in a glass room, walking tentatively with hands reaching out to feel for invisible walls.",
-        "Moving with hesitation and confusion, exploring the boundaries of a transparent enclosure with hands stretched forward.",
-        "Walking blindly but cautiously, palms facing outward to detect potential glass barriers.",
-        "Pacing around in a glass maze, testing the air with hands before taking a step."
-    ],
+    # 4. 玻璃房间 -> 聚焦：看不见的墙、摸索、困惑
+    "BoLiFangJian": "Trapped inside a transparent glass maze, hands reaching out to feel invisible walls, hesitant and confused movement.",
 
-    # 5. T台走秀 - 侧重：自信、挺胸、猫步、夸张的跨步
-    "T_Stage": [
-        "A fashion model walking on a runway, posture upright and confident, with a rhythmic and exaggerated catwalk strut.",
-        "Strutting elegantly on a T-stage, shoulders back, hips swaying with each long step.",
-        "Performing a high-fashion walk, looking straight ahead with a cool expression, steps aligned in a straight line.",
-        "Walking with intense confidence and style, emphasizing the movement of the legs and hips like a supermodel."
-    ],
+    # 5. T台走秀 -> 聚焦：聚光灯、自信、模特步
+    "T_Stage": "A supermodel walking on a fashion runway under spotlight, confident posture, rhythmic stride, elegant and high-fashion.",
 
-    # 6. 拥挤的场合 - 侧重：侧身、避让、收缩身体
-    "CroudedPlace": [
-        "Navigating through a dense crowd, constantly turning the torso sideways to squeeze past people.",
-        "Walking in a jammed subway station, making small steps and frequently adjusting direction to avoid collisions.",
-        "Weaving through a busy street, protecting personal space by keeping arms close to the body.",
-        "Shouldering through a thick crowd, stopping and starting abruptly, looking for gaps in the flow of people."
-    ],
+    # 6. 拥挤场合 -> 聚焦：由于拥挤导致的肢体收缩、侧身
+    "CroudedPlace": "Squeezing through a packed subway crowd during rush hour, protecting personal space, turning sideways to fit through gaps.",
 
-    # 7. 低矮天花板 - 侧重：此场景与低矮通道类似，但更强调头顶的压迫感
-    "DiAiTianhuaban": [
-        "Walking under a very low ceiling, head ducked down and neck bent forward to prevent injury.",
-        "Moving with a hunched posture due to insufficient headroom, instinctively protecting the top of the head.",
-        "Crouching slightly while walking, constantly looking up to check the clearance of the ceiling.",
-        "Walking nervously under a low hanging structure, keeping the body low and compact."
-    ],
+    # 7. 低矮天花板 -> 聚焦：头顶撞击风险、低头
+    "DiAiTianhuaban": "Walking in a room with an extremely low roof, head ducked down instinctively to avoid hitting the beams, protective posture.",
 
-    # 8. 酒吧 (Drunk) - 侧重：踉跄、摇晃、重心不稳
-    "Bar": [
-        "Stumbling out of a bar, swaying unpredictably from side to side, struggling to maintain a straight line.",
-        "Walking with a drunk gait, footsteps heavy and uncoordinated, body leaning dangerously in random directions.",
-        "Trying to walk straight while intoxicated, losing balance frequently and taking wide steps to recover.",
-        "A tipsy walk, limbs feeling loose and heavy, occasionally tripping over own feet."
-    ],
+    # 8. 酒吧 -> 聚焦：醉酒、眩晕、失去重心
+    "Bar": "A heavily drunk person stumbling home, dizzy and disoriented, losing balance, swaying unpredictably from side to side.",
 
-    # 9. 雪地或沙地 - 侧重：拔腿高抬、费力、陷落感
-    "WalkInSnowOrSand": [
-        "Trudging through deep snow, lifting knees high and stomping down to break the surface.",
-        "Walking on soft sand, feet sinking into the ground with every step, requiring extra effort to push off.",
-        "Slogging through heavy terrain, movement is slow and laborious, body leaning forward to generate momentum.",
-        "Marching through deep powder snow, emphasizing high leg lifts and forceful grounding."
-    ],
+    # 9. 雪地/沙地 -> 聚焦：阻力、下陷、沉重
+    "WalkInSnowOrSand": "Trudging through deep soft snow, feet sinking into the ground, heavy resistance, lifting legs high to move forward.",
 
-    # 10. 摸黑 - 侧重：手探路、脚步虚探、缓慢
-    "Dark": [
-        "Groping in pitch darkness, moving slowly with hands stretched forward to detect obstacles.",
-        "Walking blindly in a blacked-out room, shuffling feet cautiously to feel the ground changes.",
-        "Navigating without vision, body tense, arms waving slowly in front to protect the face.",
-        "Moving hesitantly in the dark, taking small testing steps before committing weight to the foot."
-    ],
+    # 10. 摸黑 -> 聚焦：黑暗、失明感、试探
+    "Dark": "Walking in a pitch-black room with zero visibility, moving blindly, hands waving in front to detect obstacles, slow testing steps.",
 
-    # 11. 左倾 - 侧重：非对称、单侧负重感、抗侧风
-    "LeanLeft": [
-        "Walking while constantly leaning to the left side, as if carrying a heavy weight on the left shoulder.",
-        "Moving with a distinct tilt to the left, struggling to keep the body upright against a force.",
-        "A gait with a permanent leftward list, body axis shifted off-center.",
-        "Walking as if fighting a strong wind blowing from the right, leaning left to compensate."
-    ],
+    # 11. 左倾 -> 聚焦：重力异常、单侧负重
+    "LeanLeft": "Walking while carrying a heavy load on the left shoulder, body tilted significantly to the left, fighting to stay upright.",
 
-    # 12. 潮湿地面 - 侧重：小碎步、脚掌平放、僵硬、防滑
-    "WetFloor": [
-        "Walking on a freshly mopped wet floor, taking tiny shuffling steps with stiff legs to prevent slipping.",
-        "Moving cautiously on a slick surface, keeping feet flat and close to the ground.",
-        "Treading on a slippery tiled floor, body stiff and center of gravity kept perfectly vertical.",
-        "Walking as if on eggshells due to the wet floor, arms slightly out for emergency balance."
-    ],
+    # 12. 潮湿地面 -> 聚焦：非常滑、摩擦力小、僵硬
+    "WetFloor": "Walking on a freshly polished wet floor, extremely slippery, stiff legs, tiny shuffling steps to prevent slipping and falling.",
 
-    # 13. 暴风雨 - 侧重：挡风、身体前倾、顶风
-    "BaoFengYu": [
-        "Battling against a violent rainstorm, using one arm to shield the face from rain and wind.",
-        "Walking into a gale-force wind, leaning body forward significantly to penetrate the air resistance.",
-        "Struggling against strong gusts, protecting eyes with hands, steps are heavy and grounded.",
-        "Pushing through a storm, head down and shoulders hunched to minimize wind exposure."
-    ],
+    # 13. 暴风雨 -> 聚焦：狂风、阻力、身体前倾对抗
+    "BaoFengYu": "Struggling against a violent hurricane wind blowing from the front, body leaning forward to penetrate the wind, heavy storm.",
 
-    # 14. 冰面 - 侧重：极其小心、甚至有些滑动、双腿分开
-    "IcyRoad": [
-        "Walking on a frozen icy road, maintaining a wide stance for stability, sliding feet gently instead of lifting them.",
-        "Moving on black ice, extremely cautious, knees bent to lower the center of gravity.",
-        "Trying to walk on a skating rink without skates, arms flailing slightly to catch balance, steps are tentative.",
-        "Navigating a slippery ice sheet, looking at the ground intently, fearing a fall at any moment."
-    ]
+    # 14. 冰面 -> 聚焦：溜冰感、失控、双腿分开
+    "IcyRoad": "Trying to walk on a frozen lake surface, zero friction, feet sliding uncontrollably, wide stance to keep center of gravity low."
 }
 
 
@@ -195,7 +125,7 @@ def main():
     model.eval()
 
     scale = cfg.DEMO.scale
-    target_scene_label = "DiAiTianhuaban"
+    target_scene_label = "BaoFengYu"
     # 核心修复：获取对应的长文本 Prompt
     if target_scene_label in SCENE_DESCRIPTIONS:
         # 既然是推理，我们不用随机列表，直接取第一句或者你觉得最典型的一句
