@@ -4,7 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-NAME: testWithScene_1201
+NAME: testWithScene_1201_sceneemb
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -27,7 +27,7 @@ TRAIN:
   # Number of dataloader workers
   NUM_WORKERS: 4
   # Size of batches
-  BATCH_SIZE: 16
+  BATCH_SIZE: 32
   # Total epochs for training
   END_EPOCH: 500
 
@@ -56,7 +56,7 @@ EVAL:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1201/checkpoints/epoch=99.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1201_sceneemb/checkpoints/epoch=399.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test

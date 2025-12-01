@@ -66,6 +66,23 @@ SCENE_DESCRIPTIONS = {
     "IcyRoad": "Trying to walk on a frozen lake surface, zero friction, feet sliding uncontrollably, wide stance to keep center of gravity low."
 }
 
+SCENE_LIST = sorted([
+    "BaoFengYu",        # 暴风雨
+    "Bar",              # 酒吧
+    "BoLiFangJian",     # 玻璃房间
+    "CroudedPlace",     # 拥挤
+    "Dark",             # 黑暗
+    "DiAiTianhuaban",   # 低矮天花板
+    "DiAiTongDao",      # 低矮通道
+    "Dumuqiao",         # 独木桥
+    "IcyRoad",          # 冰面
+    "LeanLeft",         # 左倾
+    "ShuiKengDiMian",   # 水坑
+    "T_Stage",          # T台
+    "WalkInSnowOrSand", # 雪地/沙地
+    "WetFloor"          # 湿地
+])
+
 
 
 def main():
@@ -123,9 +140,15 @@ def main():
     model.fact = cfg.TEST.FACT
     model.to(device)
     model.eval()
+    # print("Check Embedding Weight Mean:", model.scene_embedding_table.weight.mean().item())
+    
+    # # 看看 Adapter 的参数
+    # # 假设你的 adapter 叫 scene_adapter
+    # # 打印第一层 linear 的权重均值
+    # print("Check Adapter Weight Mean:", model.denoiser.scene_adapter.film_generator[0].weight.mean().item())
 
     scale = cfg.DEMO.scale
-    target_scene_label = "BaoFengYu"
+    target_scene_label = "DiAiTianhuaban"
     # 核心修复：获取对应的长文本 Prompt
     if target_scene_label in SCENE_DESCRIPTIONS:
         # 既然是推理，我们不用随机列表，直接取第一句或者你觉得最典型的一句
@@ -139,6 +162,16 @@ def main():
     logger.info(f"Inferencing with Scene: {target_scene_label}")
     logger.info(f"Using Prompt: {scene_prompt}") # 打印出来确认一下
 
+    scene2id_dict = {scene: idx for idx, scene in enumerate(SCENE_LIST)}
+    # id2scene_dict = {idx: scene for idx, scene in enumerate(SCENE_LIST)}
+    # 使用 items() 方法遍历键值对
+    for scene_name, scene_id in scene2id_dict.items():
+        print(f"键 (Scene Name): {scene_name}, 值 (ID): {scene_id}")
+
+    print("------------------------")
+    target_scene_id = scene2id_dict[target_scene_label]
+    scene_ids_tensor = torch.tensor([target_scene_id]).to(device)
+    print("target scene id = ", scene_ids_tensor, scene_ids_tensor.shape)
 
     for content in os.listdir(content_path):
         if not content.endswith('.npy'):
@@ -174,7 +207,8 @@ def main():
                         # 修复 1: 必须是 List，且长度要和 batch size 一致
                         "scene_text": [scene_prompt] * len(lengths),
                         # 修复 2: 加上 Image 占位符 (防止 mld.py 报错)
-                        "scene_image": torch.zeros(len(lengths), 3, 224, 224).to(device)}
+                        "scene_image": torch.zeros(len(lengths), 3, 224, 224).to(device),
+                        "scene_id": scene_ids_tensor}
                 # joints,latents = model(batch)
                 joints = model(batch)
                 npypath = str(output_dir /

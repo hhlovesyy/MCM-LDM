@@ -1523,6 +1523,23 @@ scene_image_transform = transforms.Compose([
     transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
 ])
 
+SCENE_LIST = sorted([
+    "BaoFengYu",        # 暴风雨
+    "Bar",              # 酒吧
+    "BoLiFangJian",     # 玻璃房间
+    "CroudedPlace",     # 拥挤
+    "Dark",             # 黑暗
+    "DiAiTianhuaban",   # 低矮天花板
+    "DiAiTongDao",      # 低矮通道
+    "Dumuqiao",         # 独木桥
+    "IcyRoad",          # 冰面
+    "LeanLeft",         # 左倾
+    "ShuiKengDiMian",   # 水坑
+    "T_Stage",          # T台
+    "WalkInSnowOrSand", # 雪地/沙地
+    "WetFloor"          # 湿地
+])
+
 class Scene100StyleDataset(data.Dataset):
     def __init__(
         self,
@@ -1574,6 +1591,15 @@ class Scene100StyleDataset(data.Dataset):
                     total_dataset_id_cnt += 1
                     unique_scenes.add(scene_label)
         
+        self.SCENE_TO_ID = {scene: idx for idx, scene in enumerate(SCENE_LIST)}
+        self.ID_TO_SCENE = {idx: scene for idx, scene in enumerate(SCENE_LIST)}
+        print("--- 字典的所有键和值 ---")
+
+        # 使用 items() 方法遍历键值对
+        for scene_name, scene_id in self.SCENE_TO_ID.items():
+            print(f"键 (Scene Name): {scene_name}, 值 (ID): {scene_id}")
+
+        print("------------------------")
         print(f"Found {len(unique_scenes)} unique scenes: {unique_scenes}")
         print("Total dataset motion IDs in scene dict:", total_dataset_id_cnt)
         
@@ -1670,6 +1696,8 @@ class Scene100StyleDataset(data.Dataset):
         # Z-Normalization
         motion = (motion - self.mean) / self.std
         motion = torch.tensor(motion).float() # 转 Tensor
+
+        scene_id = self.SCENE_TO_ID[scene_label]
         
         # 2. 获取 Scene Text (LLM Description)
         # 如果字典里没找到，就回退到原始 Label
@@ -1706,7 +1734,9 @@ class Scene100StyleDataset(data.Dataset):
             m_length,          # 5. m_length
             dummy_tokens,      # 6. tokens (Unused)
             scene_text_raw,        # 7. [NEW] scene_text_raw (Explicitly for CLIP)
-            scene_image        # 8. [NEW] scene_image_tensor
+            scene_image,        # 8. [NEW] scene_image_tensor
+            scene_id,
+
         )
 
 

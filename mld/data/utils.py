@@ -177,7 +177,8 @@ def scene_collate(batch):
         # 【ICME 新增字段】：确保这些也在！不要漏了！
         # -------------------------------------------------------
         "scene_text": [b[7] for b in notnone_batches],  # List of strings
-        "scene_image": torch.stack([b[8] for b in notnone_batches]), # Tensor stack
+        "scene_image": torch.stack([b[8] for b in notnone_batches]), # Tensor stack,
+        "scene_id": torch.tensor([b[9] for b in notnone_batches]),
     }
     return adapted_batch
 

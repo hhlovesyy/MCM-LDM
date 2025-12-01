@@ -122,6 +122,8 @@ class MLD(BaseModel):
         self.noise_scheduler = instantiate_from_config(
             cfg.model.noise_scheduler)
 
+        self.num_scenes = 14
+        self.scene_embedding_table = torch.nn.Embedding(self.num_scenes, 512)
 
         # self._get_t2m_evaluator(cfg)
 
@@ -158,32 +160,32 @@ class MLD(BaseModel):
         self.joints2feats = datamodule.joints2feats
 
     def configure_optimizers(self):
-        print("Configuring optimizers with parameter groups for finetuning...")
-        # 1. 分离参数组：Adapter 用大火猛炒，Denoiser 用文火慢炖
         denoiser_params = []
         adapter_params = []
+        embedding_params = []
         
-        # 遍历所有参数，根据名字区分
         for name, param in self.denoiser.named_parameters():
             if "scene_adapter" in name:
-                # 这是我们的新模块，需要高学习率
                 adapter_params.append(param)
             else:
-                # 这是预训练好的旧模块，需要低学习率
                 denoiser_params.append(param)
         
-        # 2. 定义优化器
-        # 注意：这里我们移除了 scheduler，直接返回 optimizer
+        # 别忘了你的 Embedding 表也要大火猛炒
+        if hasattr(self, "scene_embedding_table"):
+            embedding_params.append(self.scene_embedding_table.weight)
+
         optimizer = torch.optim.AdamW([
-            # 老参数：低学习率 (保护原有知识)
+            # 1. 预训练层：极低学习率 (防止灾难性遗忘)
             {"params": denoiser_params, "lr": 1e-5}, 
-            # 新参数：高学习率 (放大20倍，强制它快速学习)
-            {"params": adapter_params, "lr": 2e-4},  
-        ], weight_decay=0.0) # Finetune 时通常关掉 weight_decay 防止过拟合
+            
+            # 2. 新层 (Adapter + Embedding)：高学习率 (放大 20-50 倍)
+            # 只有这样，Gamma 和 Beta 才能快速脱离 0，开始影响 Style
+            {"params": adapter_params, "lr": 5e-4}, 
+            {"params": embedding_params, "lr": 5e-4},
+        ], weight_decay=0.0)
         
-        # 3. 直接返回，不要那个 scheduler 了
-        # 之前的报错是因为你把 DDIM 传给了 Lightning，Lightning 以为它是调整学习率的
         return {"optimizer": optimizer}
+
 
     def _get_t2m_evaluator(self, cfg):
         """
@@ -331,21 +333,30 @@ class MLD(BaseModel):
 
             # trajectory
             trans_cond = trans_motion[...,:3]
+            trans_uncond = torch.zeros(trans_cond.shape).to(motion_seq.device)
             uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
+            # uncond_trans = torch.cat([trans_uncond, trans_uncond], dim=0)
 
-            scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
-            with torch.no_grad():
-                text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
-                scene_text_emb = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
-            scene_emb = scene_text_emb # 目前主要靠 Text
-                
-            scene_emb = scene_emb.unsqueeze(1) # [B, 1, 512]
+            # scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
+            # with torch.no_grad():
+            #     text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+            #     scene_text_emb = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
+            # scene_emb = scene_text_emb # 目前主要靠 Text
+            scene_ids = batch["scene_id"].to(content_motion.device) # [Batch]
+    
+            # 直接查表
+            scene_emb = self.scene_embedding_table(scene_ids).to(content_motion.device) # [Batch, 512]
+            # scene_emb = scene_emb.unsqueeze(0) # 推理的时候默认batch_size是1
+            # print("scebe_enb shape:", scene_emb.shape)
+            scene_emb = scene_emb.unsqueeze(1)
+            uncond_scene_emb = torch.zeros(scene_emb.shape).to(content_motion.device)
+
 
             # Classifier-Free Guidance (推理时非常重要！)
             # 我们需要构造 Unconditional 的 Scene Feature
             # 通常是用空字符串 "" 或者 "unconditional"
-            uncond_inputs = self.scene_tokenizer([""] * len(lengths), padding=True, truncation=True, return_tensors="pt").to(self.device)
-            uncond_scene_emb = self.scene_text_encoder(**uncond_inputs).pooler_output.unsqueeze(1)
+            # uncond_inputs = self.scene_tokenizer([""] * len(lengths), padding=True, truncation=True, return_tensors="pt").to(self.device)
+            # uncond_scene_emb = self.scene_text_encoder(**uncond_inputs).pooler_output.unsqueeze(1)
             
             # 拼接 Condition (用于 CFG)
             # 注意顺序：[Uncond, Cond]
@@ -545,23 +556,31 @@ class MLD(BaseModel):
 
         # trans condition
         trans_cond = batch["motion"][...,:3]  # torch.Size([32, 40, 3])
+        traj_drop_mask = torch.rand(trans_cond.shape[0], 1, 1, device=trans_cond.device) > 0.5
+        trans_cond = trans_cond * traj_drop_mask  # 尝试让生成的动作“偏离轨迹”，看一下效果
 
-        scene_texts = batch.get("scene_text", [""] * len(batch["length"]))
-        # 2. CLIP 编码
-        with torch.no_grad():
-            inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
-            outputs = self.scene_text_encoder(**inputs)
-            # 取 [EOS] token 特征 [Batch, 512]
-            scene_emb = outputs.pooler_output 
+        # scene_texts = batch.get("scene_text", [""] * len(batch["length"]))
+        # # 2. CLIP 编码
+        # with torch.no_grad():
+        #     inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+        #     outputs = self.scene_text_encoder(**inputs)
+        #     # 取 [EOS] token 特征 [Batch, 512]
+        #     scene_emb = outputs.pooler_output 
+
+        scene_ids = batch["scene_id"] # [Batch]
+    
+        # 直接查表
+        scene_emb = self.scene_embedding_table(scene_ids) # [Batch, 512]
+
         scene_emb = scene_emb.unsqueeze(1)
-        if "mask_uncond" in locals(): # 确保变量存在
-            scene_emb[mask_uncond, ...] = 0
+        mask = torch.rand(scene_emb.shape[0], 1, 1, device=scene_emb.device) > 0.1
+        scene_emb = scene_emb * mask # 被 mask 的变成全 0 向量
 
 
         # three condition
         # multi_cond_emb = [cond_emb, motion_emb, trans_cond] # 复习一下： cond_emb：内容（torch.Size([32, 7, 256])），motion_emb：风格（torch.Size([32, 1, 512])），trans_cond：轨迹（torch.Size([32, 40, 3])）
         # scene_emb: 我们新增的场景的自然语言描述：
-        multi_cond_emb = [cond_emb, motion_emb, trans_cond, scene_emb] 
+        multi_cond_emb = [cond_emb, motion_emb, trans_cond, scene_emb]  
 
         # diffusion process return with noise and noise_pred
         n_set = self._diffusion_process(z, multi_cond_emb, lengths) # 返回的n_set是一个字段，包含计算loss的时候pytorch_lightning所关心的内容

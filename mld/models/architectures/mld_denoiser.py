@@ -109,32 +109,50 @@ class SceneStyleAdapter(nn.Module):
         
         return self.norm(refined_style)
     
-class SceneStyleAdapterSimple(nn.Module):
-    # 非常激进的版本，直接暴力加在一起
+class SceneStyleAdaptorSimple(nn.Module):
     def __init__(self, style_dim=256, scene_dim=512):
         super().__init__()
         
-        # 1. 映射层
-        self.scene_mapper = nn.Sequential(
+        # 【关键步骤 1】LayerNorm
+        # 无论 Scene Embedding 初始化是多少，进来先标准化
+        # 这样 MLP 比较容易学习
+        self.scene_norm = nn.LayerNorm(scene_dim)
+        
+        # 【关键步骤 2】FiLM Generator
+        # 输入 Scene，输出 Gamma (缩放) 和 Beta (平移)
+        # 输出维度是 style_dim * 2
+        self.film_generator = nn.Sequential(
             nn.Linear(scene_dim, style_dim),
             nn.SiLU(),
-            nn.Linear(style_dim, style_dim)
+            nn.Linear(style_dim, style_dim * 2)
         )
         
-        # 2. 【激进修改】去掉 Sigmoid 门控，改用简单的 Learnable Scale
-        # 这是一个可学习的缩放系数，初始化为 0.1 或 1.0，强迫网络接受信号
-        self.output_scale = nn.Parameter(torch.ones(1) * 0.1) 
-        
+        # 初始化策略：
+        # 为了让微调开始时模型不崩，我们让 Gamma 接近 0，Beta 接近 0
+        # 这样初始效果是 Identity Mapping (输出 = 输入)
+        # 随着训练，Gamma 和 Beta 会慢慢变大，注入风格
+        nn.init.zeros_(self.film_generator[-1].weight)
+        nn.init.zeros_(self.film_generator[-1].bias)
+
+        # 最后的输出 Norm
         self.norm = nn.LayerNorm(style_dim)
 
     def forward(self, style_feat, scene_feat):
-        scene_feat = scene_feat.squeeze(1)
-        scene_latent = self.scene_mapper(scene_feat)
+        # style_feat: [Batch, 256]
+        # scene_feat: [Batch, 1, 512]
         
-        # 【核心修改】残差连接 (Residual Connection)
-        # 强制公式：New = Old + alpha * Scene
-        # 这样 Style 必须接受 Scene 的干扰，网络被迫去适应这个干扰
-        refined_style = style_feat + self.output_scale * scene_latent
+        scene_feat = scene_feat.squeeze(1)
+        
+        # 1. 对齐输入分布
+        scene_feat = self.scene_norm(scene_feat)
+        
+        # 2. 计算 FiLM 参数
+        params = self.film_generator(scene_feat)
+        gamma, beta = params.chunk(2, dim=-1)
+        
+        # 3. FiLM 调制公式
+        # (1 + gamma) 意味着初始时乘以 1，保持原样
+        refined_style = style_feat * (1 + gamma) + beta
         
         return self.norm(refined_style)
 
@@ -152,6 +170,8 @@ class SceneStyleAdapterFiLM(nn.Module):
             nn.Linear(style_dim * 2, style_dim * 2)
         )
         self.norm = nn.LayerNorm(style_dim)
+        nn.init.normal_(self.film_generator[-1].weight, mean=0.0, std=0.01)
+        nn.init.constant_(self.film_generator[-1].bias, 0.1) # 甚至加一点 Bias
 
     def forward(self, style_feat, scene_feat):
         scene_feat = scene_feat.squeeze(1)
@@ -285,7 +305,8 @@ class MldDenoiser(nn.Module):
 
 
         self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
-        self.scene_adapter = SceneStyleAdapterFiLM(style_dim=self.latent_dim, scene_dim=512)
+        # self.scene_adapter = SceneStyleAdapterFiLM(style_dim=self.latent_dim, scene_dim=512)
+        self.scene_adapter = SceneStyleAdaptorSimple(style_dim=self.latent_dim, scene_dim=512)
 
 
     def forward(self,
@@ -328,7 +349,33 @@ class MldDenoiser(nn.Module):
         style_emb_latent = time_emb + style_emb_latent
         style_emb_latent = style_emb_latent.squeeze() # torch.Size([32, 256])
 
+        
+        
+        # 训练时保持原样
         style_emb_final = self.scene_adapter(style_emb_latent, scene_emb) # torch.Size([32, 256])
+        # =================================================================
+        # 【DEBUG】 在这里插入 Print
+        # =================================================================
+        # 我们只在推理的时候看 (或者你可以去掉 if 限制，在训练时看几眼然后手动停止)
+        if not self.training: 
+            # 计算 Scene 到底造成了多大的改变 (Delta)
+            delta = style_emb_final - style_emb_latent
+            
+            # 计算绝对值的均值
+            style_mag = style_emb_latent.abs().mean().item()
+            delta_mag = delta.abs().mean().item()
+            
+            print(f"\n[DEBUG Layer]")
+            print(f"  > Original Style Magnitude: {style_mag:.6f}")
+            print(f"  > Scene Injection Magnitude: {delta_mag:.6f}")
+            
+            if style_mag > 0:
+                ratio = (delta_mag / style_mag) * 100
+                print(f"  > Injection Ratio: {ratio:.2f}%")
+                
+            # 如果 Ratio 小于 1%，说明 Scene 根本没起作用！
+            # 如果 Ratio 大于 10%，说明起作用了！
+        # =================================================================
 
         # trajectory encoder
         trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
