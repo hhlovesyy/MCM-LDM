@@ -349,34 +349,6 @@ class MldDenoiser(nn.Module):
         style_emb_latent = time_emb + style_emb_latent
         style_emb_latent = style_emb_latent.squeeze() # torch.Size([32, 256])
 
-        
-        
-        # 训练时保持原样
-        style_emb_final = self.scene_adapter(style_emb_latent, scene_emb) # torch.Size([32, 256])
-        # =================================================================
-        # 【DEBUG】 在这里插入 Print
-        # =================================================================
-        # 我们只在推理的时候看 (或者你可以去掉 if 限制，在训练时看几眼然后手动停止)
-        if not self.training: 
-            # 计算 Scene 到底造成了多大的改变 (Delta)
-            delta = style_emb_final - style_emb_latent
-            
-            # 计算绝对值的均值
-            style_mag = style_emb_latent.abs().mean().item()
-            delta_mag = delta.abs().mean().item()
-            
-            print(f"\n[DEBUG Layer]")
-            print(f"  > Original Style Magnitude: {style_mag:.6f}")
-            print(f"  > Scene Injection Magnitude: {delta_mag:.6f}")
-            
-            if style_mag > 0:
-                ratio = (delta_mag / style_mag) * 100
-                print(f"  > Injection Ratio: {ratio:.2f}%")
-                
-            # 如果 Ratio 小于 1%，说明 Scene 根本没起作用！
-            # 如果 Ratio 大于 10%，说明起作用了！
-        # =================================================================
-
         # trajectory encoder
         trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
         trans_emb = trans_emb + time_emb
@@ -385,7 +357,7 @@ class MldDenoiser(nn.Module):
         # to dit blocks (N, T, D)
         xseq = self.query_pos(xseq).permute(1,0,2) # torch.Size([32, 13, 256])
         for block in self.blocks:
-            xseq = block(xseq, style_emb_final, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
+            xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
         sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
        
 

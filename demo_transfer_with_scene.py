@@ -148,7 +148,7 @@ def main():
     # print("Check Adapter Weight Mean:", model.denoiser.scene_adapter.film_generator[0].weight.mean().item())
 
     scale = cfg.DEMO.scale
-    target_scene_label = "DiAiTianhuaban"
+    target_scene_label = "Dumuqiao"
     # 核心修复：获取对应的长文本 Prompt
     if target_scene_label in SCENE_DESCRIPTIONS:
         # 既然是推理，我们不用随机列表，直接取第一句或者你觉得最典型的一句
