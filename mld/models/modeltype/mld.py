@@ -108,6 +108,21 @@ class MLD(BaseModel):
         self.scene_text_encoder.requires_grad_(False)
         for p in self.scene_text_encoder.parameters():
             p.requires_grad = False
+        
+        # 作用：把 CLIP 的 512 维特征，映射到适合做 Motion FiLM 的 512 维空间
+        # 这就是你说的 "CLIP 之后加几层 MLP"
+        self.scene_projector = nn.Sequential(
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.SiLU(),
+            nn.Linear(512, 512), # 输出给 FiLM MLP 用
+            nn.LayerNorm(512)    # 再次 Norm 保证稳定
+        )
+        # 初始化 Projector
+        # 让它初始接近 Identity，或者稍微有波动
+        nn.init.xavier_uniform_(self.scene_projector[0].weight)
+        nn.init.zeros_(self.scene_projector[-2].weight) # 最后一层 Linear 权重置0
+        nn.init.zeros_(self.scene_projector[-2].bias)   # 这样初始输出接近 0 (经过Norm后会变)
 
 
         self.vae = instantiate_from_config(cfg.model.motion_vae)
@@ -180,6 +195,10 @@ class MLD(BaseModel):
         # 2. 快速组：新加入的所有模块 (需要大火猛炒)
         # 包括: FiLM MLP, Embedding, 以及两个 LayerNorm
         adapter_params = []
+
+        # 添加 Projector
+        if hasattr(self, "scene_projector"):
+            adapter_params.extend(list(self.scene_projector.parameters()))
         
         # 显式添加模块，防止漏掉
         if hasattr(self, "film_mlp"):
@@ -344,47 +363,34 @@ class MLD(BaseModel):
             # trajectory
             trans_cond = trans_motion[...,:3]
             trans_uncond = torch.zeros(trans_cond.shape).to(motion_seq.device)
-            uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
-            # uncond_trans = torch.cat([trans_uncond, trans_uncond], dim=0)
+            # uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
+            uncond_trans = torch.cat([trans_uncond, trans_uncond], dim=0)
+            # uncond_trans = torch.cat([trans_uncond, trans_cond], dim=0)
 
-            # scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
-            # with torch.no_grad():
-            #     text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
-            #     scene_text_emb = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
-            # scene_emb = scene_text_emb # 目前主要靠 Text
-            scene_ids = batch["scene_id"].to(content_motion.device) # [Batch]
-    
-            # 直接查表
-            scene_feat = self.scene_embedding_table(scene_ids).to(content_motion.device) # [Batch, 512]
-            
+            scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
+            with torch.no_grad():
+                text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+                clip_feat = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
+            scene_feat = self.scene_projector(clip_feat) # [Batch, 512]
             scene_feat_norm = self.scene_norm(scene_feat)
+
+            # scene_feat_norm = self.scene_norm(scene_feat)
             film_params = self.film_mlp(scene_feat_norm)
             gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
             gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1) # [B, 1, 512]
             beta = beta_raw.unsqueeze(1)                       # [B, 1, 512]
-            # motion_emb = torch.zeros_like(motion_emb) # 先试试不要style
+            motion_emb = torch.zeros_like(motion_emb) # 先试试不要style
             
-            # C. 执行融合 (获得被场景改变后的风格)
-            raw_style_normed = self.style_norm(motion_emb)
             filmed_emb = gamma * motion_emb + beta
             adapted_style_normed = self.style_norm(filmed_emb)
 
-            scene_delta = adapted_style_normed - raw_style_normed
-
-            # SCENE_SCALE = 2
-            SCENE_SCALE = 0
-            
-            final_style_emb = raw_style_normed + scene_delta * SCENE_SCALE
-
-            #style_delta = adapted_style_emb - motion_emb  # motion_emb是MotionCLIP出来的style
-            #adapted_style_emb = motion_emb + style_delta * 1.5
             # D. 构造 CFG 输入
             # Uncond 分支：给全 0 (代表"无风格")
             # Cond 分支：给 Adapted Style
-            uncond_style = torch.zeros_like(final_style_emb)
+            uncond_style = torch.zeros_like(adapted_style_normed)
             
             # 拼接顺序：[Uncond, Cond], 这个是场景指导后的style
-            motion_emb_cfg = torch.cat([uncond_style, final_style_emb], dim=0)
+            motion_emb_cfg = torch.cat([uncond_style, adapted_style_normed], dim=0)
  
 
             scene_feat_reshaped = scene_feat.unsqueeze(1)
@@ -588,18 +594,18 @@ class MLD(BaseModel):
         traj_drop_mask = torch.rand(trans_cond.shape[0], 1, 1, device=trans_cond.device) > 0.5
         trans_cond = trans_cond * traj_drop_mask  # 尝试让生成的动作“偏离轨迹”，看一下效果# 2.没有轨迹的学习
 
-        # scene_texts = batch.get("scene_text", [""] * len(batch["length"]))
-        # # 2. CLIP 编码
-        # with torch.no_grad():
-        #     inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
-        #     outputs = self.scene_text_encoder(**inputs)
-        #     # 取 [EOS] token 特征 [Batch, 512]
-        #     scene_emb = outputs.pooler_output 
+        scene_texts = batch.get("scene_text", [""] * len(batch["length"]))
+        # 2. CLIP 编码
+        with torch.no_grad():
+            text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+            clip_feat = self.scene_text_encoder(**text_inputs).pooler_output 
+            # 取 [EOS] token 特征 [Batch, 512]
+        scene_feat = self.scene_projector(clip_feat) # [Batch, 512]
 
-        scene_ids = batch["scene_id"] # [Batch]
+        # scene_ids = batch["scene_id"] # [Batch]
     
-        # 直接查表
-        scene_feat = self.scene_embedding_table(scene_ids) # [Batch, 512]
+        # # 直接查表
+        # scene_feat = self.scene_embedding_table(scene_ids) # [Batch, 512]
         scene_feat = scene_feat.unsqueeze(1)  # [Batch, 1, 512]
         mask_scene = torch.rand(scene_feat.shape[0], device=scene_feat.device) < 0.2 # 大部分都是False，少量是True
         scene_feat[mask_scene] = 0  # 3.还有一定概率，场景没有
@@ -607,7 +613,7 @@ class MLD(BaseModel):
         # =================================================================
         # 【调试代码】打印统计信息 (只在第0个Epoch的前5个Step打印)
         # =================================================================
-        if self.current_epoch == 0 and self.global_step < 5:
+        if self.current_epoch == 100 and self.global_step < 5:
             print(f"\n[DEBUG STATS] Step {self.global_step}")
             
             # 1. 打印原始 MotionCLIP 输出 (Style)
@@ -631,7 +637,7 @@ class MLD(BaseModel):
         # =================================================================
         # 【调试代码】打印 Norm 后的 Scene
         # =================================================================
-        if self.current_epoch == 0 and self.global_step < 5:
+        if self.current_epoch == 100 and self.global_step < 5:
             sn_mean = scene_feat_norm.mean().item()
             sn_std = scene_feat_norm.std().item()
             print(f"  > [Scene Norm] Mean: {sn_mean:.4f} | Std: {sn_std:.4f} (Magic happened here!)")
@@ -655,7 +661,7 @@ class MLD(BaseModel):
         # =================================================================
         # 【调试代码】打印最终融合后的 Style
         # =================================================================
-        if self.current_epoch == 0 and self.global_step < 5:
+        if self.current_epoch == 100 and self.global_step < 5:
             final_mean = adapted_style_emb.mean().item()
             final_std = adapted_style_emb.std().item()
             print(f"  > [Style Final] Mean: {final_mean:.4f} | Std: {final_std:.4f}")

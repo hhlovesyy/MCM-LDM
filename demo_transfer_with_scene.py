@@ -23,47 +23,131 @@ from mld.utils.logger import create_logger
 from visual import visual_pos 
 
 SCENE_DESCRIPTIONS = {
-    # 1. 独木桥 -> 聚焦：高空、狭窄、平衡不稳
-    "Dumuqiao": "A cinematic shot of a person balancing on a narrow beam high in the sky, unstable footing, arms out for balance, fear of falling.",
+    # 1. 独木桥 (Dumuqiao)
+    "Dumuqiao": [
+        "A cinematic shot of a person balancing on a narrow beam high in the sky, unstable footing, arms out for balance, fear of falling.", # Visual
+        "Walking tightrope-style, extending arms sideways to maintain balance, taking slow and deliberate steps.", # Action
+        "Balancing precariously on a thin line, body wobbling, trying to keep center of gravity.", # Physical
+        "Walking on a narrow bridge.", # Simple
+        "Crossing a single-plank bridge over a deep canyon." # Scenario
+    ],
 
-    # 2. 低矮通道 -> 聚焦：狭窄空间、压抑、蜷缩
-    "DiAiTongDao": "Moving through a cramped underground tunnel with a very low ceiling, body crouched and compressed, claustrophobic atmosphere.",
+    # 2. 低矮通道 (DiAiTongDao)
+    "DiAiTongDao": [
+        "Moving through a cramped underground tunnel with a very low ceiling, body crouched and compressed, claustrophobic atmosphere.", # Visual
+        "Walking while crouching down, bending knees deeply and hunching back to avoid hitting the head.", # Action
+        "Stooping forward in a confined space, keeping the body low.", # Physical
+        "Crouching while walking.", # Simple
+        "Navigating inside a low ventilation shaft." # Scenario
+    ],
 
-    # 3. 水坑地面 -> 聚焦：脏水、躲避、小心翼翼
-    "ShuiKengDiMian": "Walking on a muddy road filled with dirty water puddles, carefully choosing dry spots, avoiding getting shoes wet.",
+    # 3. 水坑地面 (ShuiKengDiMian)
+    "ShuiKengDiMian": [
+        "Walking on a muddy road filled with dirty water puddles, carefully choosing dry spots, avoiding getting shoes wet.", # Visual
+        "Taking irregular steps to jump over puddles, looking down at the ground constantly.", # Action
+        "Navigating uneven and wet terrain, dodging water spots.", # Physical
+        "Walking on muddy ground.", # Simple
+        "A street full of rain puddles." # Scenario
+    ],
 
-    # 4. 玻璃房间 -> 聚焦：看不见的墙、摸索、困惑
-    "BoLiFangJian": "Trapped inside a transparent glass maze, hands reaching out to feel invisible walls, hesitant and confused movement.",
+    # 4. 玻璃房间 (BoLiFangJian)
+    "BoLiFangJian": [
+        "Trapped inside a transparent glass maze, hands reaching out to feel invisible walls, hesitant and confused movement.", # Visual
+        "Walking with hands stretched forward to detect obstacles, moving slowly and cautiously.", # Action
+        "Groping in an invisible enclosure, testing the air before stepping.", # Physical
+        "Walking in a glass room.", # Simple
+        "A mime artist pretending to be trapped in a box." # Scenario
+    ],
 
-    # 5. T台走秀 -> 聚焦：聚光灯、自信、模特步
-    "T_Stage": "A supermodel walking on a fashion runway under spotlight, confident posture, rhythmic stride, elegant and high-fashion.",
+    # 5. T台走秀 (T_Stage)
+    "T_Stage": [
+        "A supermodel walking on a fashion runway under spotlight, confident posture, rhythmic stride, elegant and high-fashion.", # Visual
+        "Strutting with a cat-walk gait, shoulders back, hips swaying, stepping in a straight line.", # Action
+        "Walking with intense confidence and upright posture.", # Physical
+        "Fashion model walking.", # Simple
+        "A high-fashion runway show." # Scenario
+    ],
 
-    # 6. 拥挤场合 -> 聚焦：由于拥挤导致的肢体收缩、侧身
-    "CroudedPlace": "Squeezing through a packed subway crowd during rush hour, protecting personal space, turning sideways to fit through gaps.",
+    # 6. 拥挤场合 (CroudedPlace)
+    "CroudedPlace": [
+        "Squeezing through a packed subway crowd during rush hour, protecting personal space, turning sideways to fit through gaps.", # Visual
+        "Turning the torso sideways while walking, making small steps, arms held close to the body.", # Action
+        "Navigating a high-density area, avoiding collisions with others.", # Physical
+        "Walking through a crowd.", # Simple
+        "A jammed market street." # Scenario
+    ],
 
-    # 7. 低矮天花板 -> 聚焦：头顶撞击风险、低头
-    "DiAiTianhuaban": "Walking in a room with an extremely low roof, head ducked down instinctively to avoid hitting the beams, protective posture.",
+    # 7. 低矮天花板 (DiAiTianhuaban)
+    "DiAiTianhuaban": [
+        "Walking in a room with an extremely low roof, head ducked down instinctively to avoid hitting the beams, protective posture.", # Visual
+        "Lowering the head and neck while walking, looking upwards occasionally.", # Action
+        "Hunched over to fit under a low structure.", # Physical
+        "Walking under a low ceiling.", # Simple
+        "Moving in a basement with low hanging pipes." # Scenario
+    ],
 
-    # 8. 酒吧 -> 聚焦：醉酒、眩晕、失去重心
-    "Bar": "A heavily drunk person stumbling home, dizzy and disoriented, losing balance, swaying unpredictably from side to side.",
+    # 8. 酒吧/醉酒 (Bar)
+    "Bar": [
+        "A heavily drunk person stumbling home, dizzy and disoriented, losing balance, swaying unpredictably from side to side.", # Visual
+        "Walking with a staggering gait, tripping over own feet, unable to walk in a straight line.", # Action
+        "Loss of motor control, gravity feels shifting, heavy limbs.", # Physical
+        "Drunk walking.", # Simple
+        "Leaving a bar late at night wasted." # Scenario
+    ],
 
-    # 9. 雪地/沙地 -> 聚焦：阻力、下陷、沉重
-    "WalkInSnowOrSand": "Trudging through deep soft snow, feet sinking into the ground, heavy resistance, lifting legs high to move forward.",
+    # 9. 雪地/沙地 (WalkInSnowOrSand)
+    "WalkInSnowOrSand": [
+        "Trudging through deep soft snow, feet sinking into the ground, heavy resistance, lifting legs high to move forward.", # Visual
+        "Marching with high knees, stomping down to break the surface, moving slowly.", # Action
+        "Walking against high ground resistance, feet sinking.", # Physical
+        "Walking in deep snow.", # Simple
+        "Crossing a desert dune or snowy field." # Scenario
+    ],
 
-    # 10. 摸黑 -> 聚焦：黑暗、失明感、试探
-    "Dark": "Walking in a pitch-black room with zero visibility, moving blindly, hands waving in front to detect obstacles, slow testing steps.",
+    # 10. 摸黑 (Dark)
+    "Dark": [
+        "Walking in a pitch-black room with zero visibility, moving blindly, hands waving in front to detect obstacles, slow testing steps.", # Visual
+        "Shuffling feet carefully, arms reached out for protection, head turning to listen.", # Action
+        "Navigating without vision, tentative movement.", # Physical
+        "Walking in the dark.", # Simple
+        "A blackout at night." # Scenario
+    ],
 
-    # 11. 左倾 -> 聚焦：重力异常、单侧负重
-    "LeanLeft": "Walking while carrying a heavy load on the left shoulder, body tilted significantly to the left, fighting to stay upright.",
+    # 11. 左倾 (LeanLeft)
+    "LeanLeft": [
+        "Walking while carrying a heavy load on the left shoulder, body tilted significantly to the left, fighting to stay upright.", # Visual
+        "Walking with the torso leaning to the left side.", # Action
+        "Center of gravity shifted to the left, asymmetric gait.", # Physical
+        "Leaning left.", # Simple
+        "Walking against a strong wind blowing from the right." # Scenario
+    ],
 
-    # 12. 潮湿地面 -> 聚焦：非常滑、摩擦力小、僵硬
-    "WetFloor": "Walking on a freshly polished wet floor, extremely slippery, stiff legs, tiny shuffling steps to prevent slipping and falling.",
+    # 12. 潮湿地面 (WetFloor)
+    "WetFloor": [
+        "Walking on a freshly polished wet floor, extremely slippery, stiff legs, tiny shuffling steps to prevent slipping and falling.", # Visual
+        "Taking small, flat-footed steps, keeping the body stiff and vertical.", # Action
+        "Zero friction surface, trying to maintain traction.", # Physical
+        "Slippery floor.", # Simple
+        "Walking on ice or wet tiles." # Scenario
+    ],
 
-    # 13. 暴风雨 -> 聚焦：狂风、阻力、身体前倾对抗
-    "BaoFengYu": "Struggling against a violent hurricane wind blowing from the front, body leaning forward to penetrate the wind, heavy storm.",
+    # 13. 暴风雨 (BaoFengYu)
+    "BaoFengYu": [
+        "Struggling against a violent hurricane wind blowing from the front, body leaning forward to penetrate the wind, heavy storm.", # Visual
+        "Walking while shielding face with one arm, leaning torso forward, pushing against resistance.", # Action
+        "Fighting high wind resistance, unstable balance, heavy steps.", # Physical
+        "Walking in strong wind.", # Simple
+        "Caught in a typhoon." # Scenario
+    ],
 
-    # 14. 冰面 -> 聚焦：溜冰感、失控、双腿分开
-    "IcyRoad": "Trying to walk on a frozen lake surface, zero friction, feet sliding uncontrollably, wide stance to keep center of gravity low."
+    # 14. 冰面 (IcyRoad)
+    "IcyRoad": [
+        "Trying to walk on a frozen lake surface, zero friction, feet sliding uncontrollably, wide stance to keep center of gravity low.", # Visual
+        "Sliding feet instead of lifting them, arms out for balance, knees bent.", # Action
+        "Extremely slippery surface, loss of friction, careful balancing.", # Physical
+        "Walking on ice.", # Simple
+        "A frozen skating rink." # Scenario
+    ]
 }
 
 SCENE_LIST = sorted([
@@ -148,7 +232,7 @@ def main():
     # print("Check Adapter Weight Mean:", model.denoiser.scene_adapter.film_generator[0].weight.mean().item())
 
     scale = cfg.DEMO.scale
-    target_scene_label = "Dumuqiao"
+    target_scene_label = "BaoFengYu"
     # 核心修复：获取对应的长文本 Prompt
     if target_scene_label in SCENE_DESCRIPTIONS:
         # 既然是推理，我们不用随机列表，直接取第一句或者你觉得最典型的一句
@@ -161,6 +245,7 @@ def main():
         
     logger.info(f"Inferencing with Scene: {target_scene_label}")
     logger.info(f"Using Prompt: {scene_prompt}") # 打印出来确认一下
+    scene_prompt = f"Walking with the torso leaning to the left side."
 
     scene2id_dict = {scene: idx for idx, scene in enumerate(SCENE_LIST)}
     # id2scene_dict = {idx: scene for idx, scene in enumerate(SCENE_LIST)}
