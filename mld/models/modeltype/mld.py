@@ -40,7 +40,7 @@ from datasets.utils.common.quaternion import *
 from datasets.utils.paramUtil import *
 # import evaluate.utils.rotation_conversions as geometry
 
-from transformers import CLIPTokenizer, CLIPTextModel
+from transformers import CLIPTokenizer, CLIPTextModel, CLIPVisionModel
 import torch.nn as nn
 
 
@@ -124,6 +124,29 @@ class MLD(BaseModel):
         nn.init.zeros_(self.scene_projector[-2].weight) # 最后一层 Linear 权重置0
         nn.init.zeros_(self.scene_projector[-2].bias)   # 这样初始输出接近 0 (经过Norm后会变)
 
+        # 【ICME 新增】1. Vision Encoder
+        # 必须和 Text Encoder 版本一致 (e.g. clip-vit-base-patch32)
+        print("Loading CLIP Vision Model...")
+        self.scene_vision_encoder = CLIPVisionModel.from_pretrained(local_clip_path)
+        self.scene_vision_encoder.eval()
+        for p in self.scene_vision_encoder.parameters(): 
+            p.requires_grad = False
+        
+        # 【ICME 新增】2. Image Projector
+        # 结构建议和 Text Projector 保持一致 (假设 Text Projector 是 3 层 MLP)
+        # CLIP Vision (ViT-Base) 输出通常是 768维，需要映射到 512维
+        self.scene_image_projector = nn.Sequential(
+            nn.Linear(768, 512), 
+            nn.LayerNorm(512),
+            nn.SiLU(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512)
+        )
+        
+        # 初始化
+        nn.init.xavier_uniform_(self.scene_image_projector[0].weight)
+        nn.init.zeros_(self.scene_image_projector[-2].weight)
+        nn.init.zeros_(self.scene_image_projector[-2].bias)
 
         self.vae = instantiate_from_config(cfg.model.motion_vae)
         # Don't train the motion encoder and decoder
@@ -139,7 +162,7 @@ class MLD(BaseModel):
             cfg.model.noise_scheduler)
 
         self.num_scenes = 14
-        self.scene_embedding_table = torch.nn.Embedding(self.num_scenes, 512)
+        # self.scene_embedding_table = torch.nn.Embedding(self.num_scenes, 512)
         # 2. FiLM MLP (输入 512，输出 1024)
         self.film_mlp = nn.Sequential(
             nn.Linear(512, 512),
@@ -199,15 +222,19 @@ class MLD(BaseModel):
         # 添加 Projector
         if hasattr(self, "scene_projector"):
             adapter_params.extend(list(self.scene_projector.parameters()))
+
+        # 【新增】图像 Projector
+        if hasattr(self, "scene_image_projector"):
+            adapter_params.extend(list(self.scene_image_projector.parameters()))
         
         # 显式添加模块，防止漏掉
         if hasattr(self, "film_mlp"):
             adapter_params.extend(list(self.film_mlp.parameters()))
             print(f"DEBUG: Added film_mlp params ({len(list(self.film_mlp.parameters()))} tensors)")
             
-        if hasattr(self, "scene_embedding_table"):
-            adapter_params.extend(list(self.scene_embedding_table.parameters()))
-            print("DEBUG: Added scene_embedding_table params")
+        # if hasattr(self, "scene_embedding_table"):
+        #     adapter_params.extend(list(self.scene_embedding_table.parameters()))
+        #     print("DEBUG: Added scene_embedding_table params")
 
         if hasattr(self, "scene_norm"):
             adapter_params.extend(list(self.scene_norm.parameters()))
@@ -367,15 +394,28 @@ class MLD(BaseModel):
             uncond_trans = torch.cat([trans_uncond, trans_uncond], dim=0)
             # uncond_trans = torch.cat([trans_uncond, trans_cond], dim=0)
 
-            scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
-            with torch.no_grad():
-                text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
-                clip_feat = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
-            scene_feat = self.scene_projector(clip_feat) # [Batch, 512]
-            scene_feat_norm = self.scene_norm(scene_feat)
+            has_image = batch["has_image"] # tensor([True], device='cuda:0')
+            use_image_for_inference = has_image.item()
+            print("use_image_for_inference :", use_image_for_inference)
+            scene_feat = None
+            if not use_image_for_inference:
+                scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
+                with torch.no_grad():
+                    text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+                    clip_feat = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
+                scene_feat = self.scene_projector(clip_feat) # [Batch, 512]
+                # scene_feat_norm = self.scene_norm(scene_feat)
+            else:
+                scene_images = batch.get("scene_image").to(motion_seq.device) # torch.Size([1, 3, 224, 224])
+                with torch.no_grad():
+                    vision_out = self.scene_vision_encoder(pixel_values=scene_images)
+                    image_feat_raw = vision_out.pooler_output # [B, 768]
+                image_feat = self.scene_image_projector(image_feat_raw) # [B, 512]
+                scene_feat = image_feat
+                
 
             # scene_feat_norm = self.scene_norm(scene_feat)
-            film_params = self.film_mlp(scene_feat_norm)
+            film_params = self.film_mlp(scene_feat)
             gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
             gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1) # [B, 1, 512]
             beta = beta_raw.unsqueeze(1)                       # [B, 1, 512]
@@ -598,14 +638,44 @@ class MLD(BaseModel):
         # 2. CLIP 编码
         with torch.no_grad():
             text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
-            clip_feat = self.scene_text_encoder(**text_inputs).pooler_output 
+            clip_text_feat = self.scene_text_encoder(**text_inputs).pooler_output 
             # 取 [EOS] token 特征 [Batch, 512]
-        scene_feat = self.scene_projector(clip_feat) # [Batch, 512]
+        text_feat = self.scene_projector(clip_text_feat) # [Batch, 512]
 
-        # scene_ids = batch["scene_id"] # [Batch]
-    
-        # # 直接查表
-        # scene_feat = self.scene_embedding_table(scene_ids) # [Batch, 512]
+        # --- 2. 图像分支 ---
+        scene_images = batch['scene_image'] # [B, 3, 224, 224]
+        has_image = batch['has_image']      # [B] (Bool, 哪些样本有图)
+        batch_has_image = has_image.all() # 只有当全Batch都有图时，才允许 Image-Only 模式
+        
+        rand_modality = torch.rand(1).item()
+        with torch.no_grad():
+            vision_out = self.scene_vision_encoder(pixel_values=scene_images)
+            image_feat_raw = vision_out.pooler_output # [B, 768]
+            
+        image_feat = self.scene_image_projector(image_feat_raw) # [B, 512]
+
+        # 策略：
+        # 40% Text Only
+        # 40% Image Only (前提是有图)
+        # 20% Fusion (前提是有图)
+        image_for_train = False
+        if rand_modality < 0.4:
+            # [Text Only]
+            scene_feat = text_feat
+        elif rand_modality < 0.8 and batch_has_image:
+            # [Image Only]
+            scene_feat = image_feat
+            image_for_train = True
+        elif batch_has_image:
+            # [Fusion] 简单的平均
+            scene_feat = (text_feat + image_feat) / 2  # 【NOTE】这个策略可能需要改一下，感觉直接混合之后/2很奇怪，可能用别的方式更好，比如对比学习？
+            image_for_train = True
+        else:
+            # [Fallback] 如果该Batch缺图，强制回退到 Text
+            scene_feat = text_feat
+
+        # if image_for_train:
+        #     print("image is used in training process!")
         scene_feat = scene_feat.unsqueeze(1)  # [Batch, 1, 512]
         mask_scene = torch.rand(scene_feat.shape[0], device=scene_feat.device) < 0.2 # 大部分都是False，少量是True
         scene_feat[mask_scene] = 0  # 3.还有一定概率，场景没有

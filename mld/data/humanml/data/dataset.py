@@ -1593,13 +1593,6 @@ SCENE_DESCRIPTIONS = {
 
 from PIL import Image
 from torchvision import transforms
-# 图像预处理 (用于 CLIP Image Encoder)
-# 简单的 Resize 和 Normalize
-scene_image_transform = transforms.Compose([
-    transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
-    transforms.ToTensor(),
-    transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
-])
 
 SCENE_LIST = sorted([
     "BaoFengYu",        # 暴风雨
@@ -1722,22 +1715,15 @@ class Scene100StyleDataset(data.Dataset):
         print(f"  - Motion files not found: {pathNotExit_cnt}")
         print(f"  - Motions with invalid length: {lenNotValid_cnt}")
         
-        # 4. 预加载图片 (Optional: 如果内存够，把15张图直接读进内存，省IO)
-        self.scene_images_cache = {}
-        if scene_image_dir:
-            for scene_name in unique_scenes:
-                img_name = f"{scene_name}.jpg" # 假设图片以此命名
-                img_path = pjoin(scene_image_dir, img_name)
-                if os.path.exists(img_path):
-                    try:
-                        img = Image.open(img_path).convert("RGB")
-                        self.scene_images_cache[scene_name] = scene_image_transform(img)
-                    except:
-                        print(f"Warning: Could not load image for scene {scene_name}, using black image.")
-                        self.scene_images_cache[scene_name] = torch.zeros(3, 224, 224)
-                else:
-                    # 如果没有图，暂时用全黑图代替，保证代码能跑
-                    self.scene_images_cache[scene_name] = torch.zeros(3, 224, 224)
+        # 1. 图像预处理 (CLIP 标准)
+        self.image_transform = transforms.Compose([
+            transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), 
+                                 (0.26862954, 0.26130258, 0.27577711))
+        ])
+        self.scene_image_dir = scene_image_dir
         print("On Dataset class __init__ function end")
         pass_dataset_cnt = len(self.data)
         # 打印一下数据集里面的数据的通过率，pass_dataset_cnt / total_dataset_id_cnt
@@ -1785,10 +1771,7 @@ class Scene100StyleDataset(data.Dataset):
         else:
             # Fallback
             scene_text_raw = f"A person moving in {scene_label} environment."
-        
-        # 3. 获取 Scene Image
-        scene_image = self.scene_images_cache.get(scene_label, torch.zeros(3, 224, 224))
-        
+          
         # 4. 为了兼容 MCM-LDM 的 collate_fn 和 pipeline，我们需要填充一些 Dummy 数据
         # MCM-LDM 需要: word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, tokens
         # 我们的 Scene Text 用 CLIP 处理，不需要 word_embeddings (GloVe)
@@ -1797,6 +1780,22 @@ class Scene100StyleDataset(data.Dataset):
         dummy_w_emb = torch.zeros(1, 300) # 假设 dim=300
         dummy_pos_oh = torch.zeros(1, 15)
         dummy_tokens = "sos/OTHER eos/OTHER"
+
+        scene_dir = os.path.join(self.scene_image_dir, scene_label)
+        has_image = False
+        scene_image = torch.zeros(3, 224, 224) # 默认全黑
+        
+        if os.path.exists(scene_dir):
+            files = [f for f in os.listdir(scene_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+            if len(files) > 0:
+                # 随机选一张
+                img_name = random.choice(files)
+                try:
+                    img = Image.open(os.path.join(scene_dir, img_name)).convert("RGB")
+                    scene_image = self.image_transform(img)
+                    has_image = True
+                except:
+                    pass # 读取失败就还是全黑
         
         # -----------------------------------------------------------
         # 返回值 (Tuple) - 注意顺序！
@@ -1814,7 +1813,7 @@ class Scene100StyleDataset(data.Dataset):
             scene_text_raw,        # 7. [NEW] scene_text_raw (Explicitly for CLIP)
             scene_image,        # 8. [NEW] scene_image_tensor
             scene_id,
-
+            has_image,
         )
 
 

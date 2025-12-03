@@ -167,6 +167,15 @@ SCENE_LIST = sorted([
     "WetFloor"          # 湿地
 ])
 
+from torchvision import transforms
+image_transform = transforms.Compose([
+            transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), 
+                                 (0.26862954, 0.26130258, 0.27577711))
+        ])
+
 
 
 def main():
@@ -233,6 +242,7 @@ def main():
 
     scale = cfg.DEMO.scale
     target_scene_label = "BaoFengYu"
+    test_with_image = True
     # 核心修复：获取对应的长文本 Prompt
     if target_scene_label in SCENE_DESCRIPTIONS:
         # 既然是推理，我们不用随机列表，直接取第一句或者你觉得最典型的一句
@@ -257,6 +267,21 @@ def main():
     target_scene_id = scene2id_dict[target_scene_label]
     scene_ids_tensor = torch.tensor([target_scene_id]).to(device)
     print("target scene id = ", scene_ids_tensor, scene_ids_tensor.shape)
+    
+    # 读一下scene_image
+    has_image = torch.tensor([False]).to(device)
+    scene_image = torch.zeros(3, 224, 224) # 默认全黑
+    from PIL import Image
+    scene_test_image_path = "/root/autodl-tmp/MyRepository/MCM-LDM/images.jpg"
+    if os.path.exists(scene_test_image_path):
+        img = Image.open(scene_test_image_path ).convert("RGB")
+        img.save("inference_image_visualize.png")
+        print("save image to inference_image_visualize.png, check out!")
+        scene_image = image_transform(img)
+        has_image = torch.tensor([True]).to(device)
+    else:
+        print("can not find image for multi modal test!!")
+    scene_image = scene_image.unsqueeze(0)
 
     for content in os.listdir(content_path):
         if not content.endswith('.npy'):
@@ -287,13 +312,14 @@ def main():
             with torch.no_grad():
 
                 # prepare batch data
-                batch = {"length": lengths, "style_motion": style_motion, 
+                batch = {"length": lengths, "style_motion": style_motion,  # torch.Size([1, 199, 263])
                         "tag_scale": scale, "content_motion": content_motion,
                         # 修复 1: 必须是 List，且长度要和 batch size 一致
                         "scene_text": [scene_prompt] * len(lengths),
                         # 修复 2: 加上 Image 占位符 (防止 mld.py 报错)
-                        "scene_image": torch.zeros(len(lengths), 3, 224, 224).to(device),
-                        "scene_id": scene_ids_tensor}
+                        "scene_image": scene_image, # torch.Size([1, 3, 224, 224])
+                        "scene_id": scene_ids_tensor,
+                        "has_image": has_image} # torch.Size([1])
                 # joints,latents = model(batch)
                 joints = model(batch)
                 npypath = str(output_dir /

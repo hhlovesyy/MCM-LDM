@@ -178,65 +178,57 @@ def main():
                 vae_dict[name] = v
         model.vae.load_state_dict(vae_dict, strict=True)
 
-    # 2. 加载 Denoiser 权重 (Stage 2 - 核心)
     if cfg.TRAIN.PRETRAINED:
-        logger.info(f"[Loader] Loading Denoiser from {cfg.TRAIN.PRETRAINED}")
+        logger.info(f"[Loader] Loading weights from {cfg.TRAIN.PRETRAINED}")
         
         # 读取 Checkpoint
         ckpt = torch.load(cfg.TRAIN.PRETRAINED, map_location="cpu")
-        if "state_dict" in ckpt:
-            state_dict = ckpt["state_dict"]
-        else:
-            state_dict = ckpt # 有些ckpt直接就是dict
-            
-        # [智能前缀处理] 
-        # 问题：denoiser.ckpt 里的键是 "blocks.0..." 还是 "denoiser.blocks.0..."?
-        # 我们的 model 是 MLD 类，它的 denoiser 在 model.denoiser 下。
-        # 所以我们需要让所有键都以 "denoiser." 开头。
+        state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
         
         from collections import OrderedDict
         new_state_dict = OrderedDict()
         
-        # 侦测 Checkpoint 里的前缀格式
-        keys_list = list(state_dict.keys())
-        has_denoiser_prefix = any(k.startswith("denoiser.") for k in keys_list)
+        # 获取当前模型的 Keys (作为真理标准)
+        current_model_keys = set(model.state_dict().keys())
         
-        logger.info(f"[Loader] Detected 'denoiser.' prefix in checkpoint? {has_denoiser_prefix}")
-
+        # 遍历 Checkpoint 里的所有键
         for k, v in state_dict.items():
-            # 过滤掉不兼容的旧位置编码 (Sequence Length 可能不同)
+            # 1. 过滤掉不兼容的位置编码 (MCM-LDM 遗留问题)
             if "sequence_pos_encoding.pe" in k:
                 continue
+            
+            # 2. 情况 A: 完美匹配 (你的 Projector, FiLM, 或者已经是 denoiser.xxx 的键)
+            if k in current_model_keys:
+                new_state_dict[k] = v
                 
-            if has_denoiser_prefix:
-                # 格式匹配：直接用
-                if k.startswith("denoiser."):
-                    new_state_dict[k] = v
+            # 3. 情况 B: 原始 MCM-LDM 权重 (缺 "denoiser." 前缀)
+            # 比如 ckpt 里是 "blocks.0...", 但模型里是 "denoiser.blocks.0..."
+            elif f"denoiser.{k}" in current_model_keys:
+                new_state_dict[f"denoiser.{k}"] = v
+                
+            # 4. 其他情况: 确实不匹配的键，忽略
             else:
-                # 格式不匹配：假设 checkpoint 里全是 denoiser 的参数，手动加上前缀
-                # 例如: "blocks.0.attn..." -> "denoiser.blocks.0.attn..."
-                new_key = f"denoiser.{k}"
-                new_state_dict[new_key] = v
+                pass
 
         # [手动诊断] 计算 Missing / Unexpected Keys
-        model_keys = set(model.state_dict().keys())
-        ckpt_keys = set(new_state_dict.keys())
+        ckpt_keys_processed = set(new_state_dict.keys())
         
-        missing_keys = list(model_keys - ckpt_keys)
-        unexpected_keys = list(ckpt_keys - model_keys)
+        missing_keys = list(current_model_keys - ckpt_keys_processed)
+        unexpected_keys = list(set(state_dict.keys()) - current_model_keys) # 粗略统计
         
         # 打印详细报告
         logger.info(f"====== Weight Loading Report ======")
-        logger.info(f"Keys in Model: {len(model_keys)} | Keys in Ckpt: {len(ckpt_keys)}")
+        logger.info(f"Loaded Keys: {len(new_state_dict)}")
         logger.info(f"MISSING Keys (Init Randomly): {len(missing_keys)}")
         
-        # # 关键检查：Physics Encoder 是否在 missing 列表里？(应该在)
-        # phys_missing = any("physics_encoder" in k for k in missing_keys)
-        # logger.info(f"  - Physics Encoder is missing (Expected)? {phys_missing}")
-        
-        logger.info(f"UNEXPECTED Keys (Ignored): {len(unexpected_keys)}")
-        # 打印部分 Unexpected 以便排查
-        for k in sorted(unexpected_keys)[:5]: logger.info(f"  - UNEXP: {k}")
+        # 关键检查：看看我们的新模块是否在 Missing 列表里
+        # 如果我们在 Resume，这些应该都不在 Missing 里
+        check_modules = ["scene_projector", "film_mlp", "scene_vision_encoder"]
+        for mod in check_modules:
+            is_missing = any(mod in k for k in missing_keys)
+            status = "MISSING (Random Init)" if is_missing else "LOADED (Success)"
+            logger.info(f"  > Module '{mod}': {status}")
+            
         logger.info(f"===================================")
 
         # 执行加载

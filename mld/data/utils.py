@@ -179,6 +179,7 @@ def scene_collate(batch):
         "scene_text": [b[7] for b in notnone_batches],  # List of strings
         "scene_image": torch.stack([b[8] for b in notnone_batches]), # Tensor stack,
         "scene_id": torch.tensor([b[9] for b in notnone_batches]),
+        "has_image": torch.tensor([b[10] for b in notnone_batches]),
     }
     return adapted_batch
 
