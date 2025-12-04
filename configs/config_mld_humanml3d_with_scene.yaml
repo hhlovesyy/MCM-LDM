@@ -4,7 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-NAME: testWithScene_1203_scenetext_addImage
+NAME: testWithScene_1203_scenetext_addImage_withNewLossFunc
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -34,7 +34,7 @@ TRAIN:
   RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
   # PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
-  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext/checkpoints/epoch=499.ckpt'
+  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=49.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
     LR: 1e-5 # Learning rate
@@ -57,7 +57,8 @@ EVAL:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=149.ckpt'
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=149.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage_withNewLossFunc/checkpoints/epoch=49.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
@@ -65,6 +66,12 @@ TEST:
   MEAN: False
   NUM_SAMPLES: 1
   FACT: 1
+  MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
+  # MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
+  MULTI_MODAL_TEXT_PROMPT: 'Crouching while walking.'
+  MULTI_MODAL_IMAGE_PATH: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene/scene_images/Dumuqiao/01.jpg'
+  CFG_STYLE : 10.0
+  CFG_SCENE : 5.0
 
 #####################################
 # The following are basic datasets settings
@@ -91,6 +98,10 @@ LOSS:
   LAMBDA_CYCLE: 0.0 # Lambda for cycle Losses
   LAMBDA_PRIOR: 0.0
   DIST_SYNC_ON_STEP: False # Sync Losses on step when distributed trained
+
+  USE_SCENE_CLS: True       # 【总开关】是否使用场景分类 Loss
+  LAMBDA_SCENE: 1.0         # 【权重】分类 Loss 的权重
+  CORRUPTION_PROB: 0.3      # 【策略】训练时有多大概率破坏 Style，强迫模型学 Scene
 
 #####################################
 # The following are basic model settings
@@ -120,3 +131,6 @@ LOGGER:
     PROJECT: null
     OFFLINE: False
     RESUME_ID: null
+  
+TRAIN_STRTEGY:
+  MULTI_MODAL_FUSION: "select"  # 会使用图像/文本的一侧，概率各50%, 也可以设置为 "text" 或 "image"(表示为纯文本或者纯图像)

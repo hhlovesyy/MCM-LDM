@@ -228,34 +228,16 @@ def main():
     state_dict = torch.load(cfg.TEST.CHECKPOINTS,
                             map_location="cpu")["state_dict"]
     model.load_state_dict(state_dict, strict=True)
+    # model.load_state_dict(state_dict, strict=False)
     logger.info("model {} loaded".format(cfg.model.model_type))
     model.sample_mean = cfg.TEST.MEAN
     model.fact = cfg.TEST.FACT
     model.to(device)
     model.eval()
-    # print("Check Embedding Weight Mean:", model.scene_embedding_table.weight.mean().item())
-    
-    # # 看看 Adapter 的参数
-    # # 假设你的 adapter 叫 scene_adapter
-    # # 打印第一层 linear 的权重均值
-    # print("Check Adapter Weight Mean:", model.denoiser.scene_adapter.film_generator[0].weight.mean().item())
 
     scale = cfg.DEMO.scale
-    target_scene_label = "BaoFengYu"
-    test_with_image = True
-    # 核心修复：获取对应的长文本 Prompt
-    if target_scene_label in SCENE_DESCRIPTIONS:
-        # 既然是推理，我们不用随机列表，直接取第一句或者你觉得最典型的一句
-        # 如果 SCENE_DESCRIPTIONS 的 value 是 list，取 list[0]
-        # 如果是 string，直接取
-        val = SCENE_DESCRIPTIONS[target_scene_label]
-        scene_prompt = val[0] if isinstance(val, list) else val
-    else:
-        scene_prompt = f"A person moving in {target_scene_label} environment."
-        
-    logger.info(f"Inferencing with Scene: {target_scene_label}")
-    logger.info(f"Using Prompt: {scene_prompt}") # 打印出来确认一下
-    scene_prompt = f"Walking with the torso leaning to the left side."
+    target_scene_label = "BaoFengYu" #  应该是用不上了，但为了保留字段
+    scene_prompt = cfg.TEST.MULTI_MODAL_TEXT_PROMPT
 
     scene2id_dict = {scene: idx for idx, scene in enumerate(SCENE_LIST)}
     # id2scene_dict = {idx: scene for idx, scene in enumerate(SCENE_LIST)}
@@ -268,21 +250,34 @@ def main():
     scene_ids_tensor = torch.tensor([target_scene_id]).to(device)
     print("target scene id = ", scene_ids_tensor, scene_ids_tensor.shape)
     
+    use_image_for_inference = (cfg.TEST.MULTI_MODAL_TYPE == 'image')
+    print("IF Use Image for inference: ", use_image_for_inference)
+
     # 读一下scene_image
     has_image = torch.tensor([False]).to(device)
     scene_image = torch.zeros(3, 224, 224) # 默认全黑
-    from PIL import Image
-    scene_test_image_path = "/root/autodl-tmp/MyRepository/MCM-LDM/images.jpg"
-    if os.path.exists(scene_test_image_path):
-        img = Image.open(scene_test_image_path ).convert("RGB")
-        img.save("inference_image_visualize.png")
-        print("save image to inference_image_visualize.png, check out!")
-        scene_image = image_transform(img)
-        has_image = torch.tensor([True]).to(device)
-    else:
-        print("can not find image for multi modal test!!")
+    if use_image_for_inference:
+        from PIL import Image
+        scene_test_image_path = cfg.TEST.MULTI_MODAL_IMAGE_PATH
+        if os.path.exists(scene_test_image_path):
+            img = Image.open(scene_test_image_path ).convert("RGB")
+            # 保存在这个路径下面：output_dir
+            img.save(output_dir / "inference_image_visualize.png")
+            print("save image to inference_image_visualize.png, check out!")
+            scene_image = image_transform(img)
+            if use_image_for_inference:
+                has_image = torch.tensor([True]).to(device)
+        else:
+            print("can not find image for multi modal test!!")
     scene_image = scene_image.unsqueeze(0)
 
+    if not has_image.item(): # 如果是文本，则把txt文件放到output_dir的路径下面
+        with open(output_dir / "inference_text_prompt.txt", "w") as text_file:
+            text_file.write(scene_prompt)
+            text_file.write("\nstyle cfg: {}".format(cfg.TEST.CFG_STYLE))
+            text_file.write("\nscene cfg: {}".format(cfg.TEST.CFG_SCENE))
+            print(f"File saved to: {output_dir / 'inference_text_prompt.txt'}") # "w" 模式的含义是 "write"，覆盖写入，没有的话会创建
+        
     for content in os.listdir(content_path):
         if not content.endswith('.npy'):
             continue
@@ -314,16 +309,14 @@ def main():
                 # prepare batch data
                 batch = {"length": lengths, "style_motion": style_motion,  # torch.Size([1, 199, 263])
                         "tag_scale": scale, "content_motion": content_motion,
-                        # 修复 1: 必须是 List，且长度要和 batch size 一致
                         "scene_text": [scene_prompt] * len(lengths),
-                        # 修复 2: 加上 Image 占位符 (防止 mld.py 报错)
                         "scene_image": scene_image, # torch.Size([1, 3, 224, 224])
                         "scene_id": scene_ids_tensor,
                         "has_image": has_image} # torch.Size([1])
                 # joints,latents = model(batch)
                 joints = model(batch)
                 npypath = str(output_dir /
-                            f"{content_file_name}_{style_file_name}_{target_scene_label}_{str(lengths[0])}_scale_{str(scale).replace('.','-')}.npy")
+                            f"{content_file_name}_{style_file_name}.npy")
                 mp4path = npypath.replace('.npy', '.mp4')
                 # with open(npypath.replace(".npy", ".txt"), "w") as text_file:
                 #     text_file.write('content {}'.format(content_file_name))

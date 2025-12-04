@@ -330,7 +330,7 @@ class MldDenoiser(nn.Module):
         style_emb = encoder_hidden_states[1].permute(1, 0, 2)  # torch.Size([1, 32, 512])
         content_emb = encoder_hidden_states[0].permute(1, 0, 2) # torch.Size([7, 32, 256])
         trans_cond = encoder_hidden_states[2] # torch.Size([32, 40, 3])
-        scene_emb = encoder_hidden_states[3] # [B, 1, 512] (新增的)
+        # scene_emb = encoder_hidden_states[3] # [B, 1, 512] (新增的)
         
         # content        
         content_emb_latent = content_emb
