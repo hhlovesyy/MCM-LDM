@@ -155,12 +155,14 @@ def main():
         enable_progress_bar=True,
         logger=loggers,
         callbacks=callbacks,
-        check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
+        # check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
+        check_val_every_n_epoch=1
     )
     logger.info("Trainer initialized")
 
     vae_type = cfg.model.motion_vae.target.split(".")[-1].lower().replace(
         "vae", "")
+    
     # strict load vae model
     if cfg.TRAIN.PRETRAINED_VAE:
         logger.info("Loading pretrain vae from {}".format(
@@ -177,19 +179,75 @@ def main():
         model.vae.load_state_dict(vae_dict, strict=True)
 
     if cfg.TRAIN.PRETRAINED:
-        logger.info("Loading pretrain mode from {}".format(
-            cfg.TRAIN.PRETRAINED))
-        logger.info("Attention! VAE will be recovered")
-        state_dict = torch.load(cfg.TRAIN.PRETRAINED,
-                                map_location="cpu")["state_dict"]
-        # remove mismatched and unused params
+        logger.info(f"[Loader] Loading weights from {cfg.TRAIN.PRETRAINED}")
+        
+        # 读取 Checkpoint
+        ckpt = torch.load(cfg.TRAIN.PRETRAINED, map_location="cpu")
+        state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+        
         from collections import OrderedDict
-
         new_state_dict = OrderedDict()
+        
+        # 获取当前模型的 Keys (作为真理标准)
+        current_model_keys = set(model.state_dict().keys())
+        
+        # 遍历 Checkpoint 里的所有键
         for k, v in state_dict.items():
-            if k not in ["denoiser.sequence_pos_encoding.pe"]:
+            # 1. 过滤掉不兼容的位置编码 (MCM-LDM 遗留问题)
+            if "sequence_pos_encoding.pe" in k:
+                continue
+            
+            # 2. 情况 A: 完美匹配 (你的 Projector, FiLM, 或者已经是 denoiser.xxx 的键)
+            if k in current_model_keys:
                 new_state_dict[k] = v
+                
+            # 3. 情况 B: 原始 MCM-LDM 权重 (缺 "denoiser." 前缀)
+            # 比如 ckpt 里是 "blocks.0...", 但模型里是 "denoiser.blocks.0..."
+            elif f"denoiser.{k}" in current_model_keys:
+                new_state_dict[f"denoiser.{k}"] = v
+                
+            # 4. 其他情况: 确实不匹配的键，忽略
+            else:
+                pass
+
+        # [手动诊断] 计算 Missing / Unexpected Keys
+        ckpt_keys_processed = set(new_state_dict.keys())
+        
+        missing_keys = list(current_model_keys - ckpt_keys_processed)
+        unexpected_keys = list(set(state_dict.keys()) - current_model_keys) # 粗略统计
+        
+        # 打印详细报告
+        logger.info(f"====== Weight Loading Report ======")
+        logger.info(f"Loaded Keys: {len(new_state_dict)}")
+        logger.info(f"MISSING Keys (Init Randomly): {len(missing_keys)}")
+        
+        # 关键检查：看看我们的新模块是否在 Missing 列表里
+        # 如果我们在 Resume，这些应该都不在 Missing 里
+        check_modules = ["scene_projector", "film_mlp", "scene_vision_encoder"]
+        for mod in check_modules:
+            is_missing = any(mod in k for k in missing_keys)
+            status = "MISSING (Random Init)" if is_missing else "LOADED (Success)"
+            logger.info(f"  > Module '{mod}': {status}")
+            
+        logger.info(f"===================================")
+
+        # 执行加载
         model.load_state_dict(new_state_dict, strict=False)
+        
+        # [安全验证] 验证主干网络是否加载成功
+        # 检查第一层 Attention 的权重是否存在于 missing_keys 中
+        backbone_key = "denoiser.blocks.0.attn.qkv.weight"
+        if backbone_key in missing_keys:
+            logger.error(f"!!! CRITICAL FAILURE !!! Backbone key '{backbone_key}' was NOT loaded.")
+            logger.error("Your model is running with RANDOM weights. Please check 'num_layers' in yaml or key prefixes.")
+            # 在这里抛出异常，阻止无效训练
+            raise RuntimeError("Denoiser backbone weights failed to load.")
+        else:
+            logger.info(">>> SUCCESS: Denoiser backbone loaded. Ready for fine-tuning.")
+
+    # =========================================================
+    # [PhysiMoS] 强化版权重加载逻辑 - 结束
+    # =========================================================
 
     # fitting
     if cfg.TRAIN.RESUME:

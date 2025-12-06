@@ -108,6 +108,9 @@ def main():
             style_motion = np.load(style_file_path)
             style_motion = np.array([style_motion])
             style_motion = torch.tensor(style_motion).to(device)
+            
+            # length = style_motion.shape[1]
+            # lengths = [int(length)]
 
             # start
             with torch.no_grad():
@@ -115,7 +118,8 @@ def main():
                 # prepare batch data
                 batch = {"length": lengths, "style_motion": style_motion, "tag_scale": scale, "content_motion": content_motion}
                 # joints,latents = model(batch)
-                joints = model(batch)
+                joints, trans_cond = model(batch)
+                print("transcond.shape: ", trans_cond.shape)  # transcond.shape:  torch.Size([1, 38, 4])
                 npypath = str(output_dir /
                             f"{content_file_name}_{style_file_name}_{str(lengths[0])}_scale_{str(scale).replace('.','-')}.npy")
                 mp4path = npypath.replace('.npy', '.mp4')
@@ -127,7 +131,7 @@ def main():
                 np.save(npypath, motion)
 
                 # visualization
-                visual_pos(npypath, mp4path)
+                visual_pos(npypath, mp4path, trans_cond=trans_cond)
 
                 logger.info(f"Motions are generated here:\n{npypath}")
 

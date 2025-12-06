@@ -75,13 +75,56 @@ class TransEncoder(nn.Module):
 
 
 
+class DenseTransEncoder(nn.Module):
+    def __init__(self, d_model=256, target_len=6):
+        super().__init__()
+        self.target_len = target_len
+        
+        # 输入维度是 4 (RotVel, VelX, VelZ, RootY)
+        # 我们用卷积层逐步提取特征并压缩长度
+        
+        self.net = nn.Sequential(
+            # Layer 1: 提取基础运动特征
+            # [B, 4, T] -> [B, 64, T]
+            nn.Conv1d(4, 64, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.BatchNorm1d(64),
+            
+            # Layer 2: 下采样 (Stride=2)
+            # [B, 64, T] -> [B, 128, T/2]
+            nn.Conv1d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(),
+            nn.BatchNorm1d(128),
+            
+            # Layer 3: 继续提取
+            # [B, 128, T/2] -> [B, 256, T/2]
+            nn.Conv1d(128, 256, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.BatchNorm1d(256),
+            
+            # Layer 4: 自适应池化到目标长度
+            # 在特征提取丰富之后再池化，此时池化的是"语义特征"而不是"原始速度"
+            # 比如特征通道 10 代表"左转倾向"，这个特征平均后依然存在，不会被抵消
+            nn.AdaptiveAvgPool1d(target_len) 
+        )
+        
+        # 最后的投影，确保数值分布对齐
+        self.out_proj = nn.Linear(256, d_model)
 
-
-
-
-
-
-
+    def forward(self, x):
+        # x: [Batch, Frames, 4]
+        
+        # Conv1d 需要 [Batch, Dim, Frames]
+        x = x.permute(0, 2, 1) 
+        
+        # 卷积提取 + 压缩
+        x = self.net(x) # -> [Batch, 256, 6]
+        
+        # 转回 Transformer 格式 [Batch, 6, 256]
+        x = x.permute(0, 2, 1)
+        
+        x = self.out_proj(x) # torch.Size([32, 6, 256])
+        return x
 
 
 # adaln-zero in dit
@@ -201,62 +244,65 @@ class MldDenoiser(nn.Module):
         self.linear = nn.Linear(7*256, 6*256)
 
 
-        self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
-
-
-
-    def forward(self,
-                sample,
-                timestep,
-                encoder_hidden_states,
-                lengths=None,
-                **kwargs):
-
-        sample = sample.permute(1, 0, 2)  # torch.Size([7, 32, 256])
-
-        # time_embedding
-        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        timesteps = timestep.expand(sample.shape[1]).clone()  # torch.Size([32])，里面的值比如[10,265,985,...]
+        # self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
+        self.trans_Encoder = DenseTransEncoder(d_model=self.latent_dim) # 换成新的
+      
+    
+    def forward(self, sample, timestep, encoder_hidden_states, lengths=None, **kwargs):
+        # 1. 基础处理 (Permute, Time Emb...) 保持不变
+        sample = sample.permute(1, 0, 2) 
+        timesteps = timestep.expand(sample.shape[1]).clone()
         time_emb = self.time_proj(timesteps)
-        time_emb = time_emb.to(dtype=sample.dtype) # torch.Size([32, 256])
-        # [1, bs, latent_dim] <= [bs, latent_dim]
-        time_emb = self.time_embedding(time_emb).unsqueeze(0)  # torch.Size([1, 32, 256])
+        time_emb = time_emb.to(dtype=sample.dtype)
+        time_emb = self.time_embedding(time_emb).unsqueeze(0)
 
-        # three conditions
-        style_emb = encoder_hidden_states[1].permute(1, 0, 2)  # torch.Size([1, 32, 512])
-        content_emb = encoder_hidden_states[0].permute(1, 0, 2) # torch.Size([7, 32, 256])
-        trans_cond = encoder_hidden_states[-1] # torch.Size([32, 40, 3])
-        
-        # content        
+        # 提取条件
+        style_emb = encoder_hidden_states[1].permute(1, 0, 2)
+        content_emb = encoder_hidden_states[0].permute(1, 0, 2) 
+        trans_cond = encoder_hidden_states[-1] 
+
+        # 2. Content 处理 (生成 Clean Context)
         content_emb_latent = content_emb
-        # style remover for content
-        content_emb_latent = self.IN(content_emb_latent.permute(1,2,0)).permute(2,0,1) # torch.Size([7, 32, 256]),【QUESTION】这里面的IN是什么？有什么作用？self.IN = nn.InstanceNorm1d(text_encoded_dim, affine=True)
-        content_emb_latent = content_emb_latent+time_emb
-        content_emb_latent = self.pe_content(content_emb_latent) # torch.Size([7, 32, 256])
-        content_emb_latent = self.seqTransEncoder(content_emb_latent).permute(1,0,2) # torch.Size([32, 7, 256])
-        content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256) # torch.Size([32, 6, 256])
-        content_emb_latent = content_emb_latent.permute(1,0,2) # torch.Size([6, 32, 256])
-        # concatenation with sample
-        xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
-
-        # style encoder
-        style_emb_latent = self.emb_proj_st(style_emb) # torch.Size([1, 32, 256])
-        style_emb_latent = time_emb + style_emb_latent
-        style_emb_latent = style_emb_latent.squeeze() # torch.Size([32, 256])
-
-        # trajectory encoder
-        trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
-        trans_emb = trans_emb + time_emb
-        trans_emb = trans_emb.squeeze() # torch.Size([32, 256])
+        content_emb_latent = self.IN(content_emb_latent.permute(1,2,0)).permute(2,0,1)
+        content_emb_latent = content_emb_latent + time_emb
+        content_emb_latent = self.pe_content(content_emb_latent)
+        content_emb_latent = self.seqTransEncoder(content_emb_latent).permute(1,0,2) 
         
-        # to dit blocks (N, T, D)
-        xseq = self.query_pos(xseq).permute(1,0,2) # torch.Size([32, 13, 256])
-        for block in self.blocks:
-            xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
-        sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
-       
+        # 降维到 6 个 Token
+        content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256) 
+        content_emb_latent = content_emb_latent.permute(1,0,2) # [6, B, 256]
 
-        return (sample, )        
+        # 3. Trajectory 处理 (生成 Clean Traj Features)
+        # 这里的 Encoder 输出必须是 [B, 6, 256]
+        # 请确保你的 ConvTrajectoryEncoder(target_len=6)
+        trans_dense = self.trans_Encoder(trans_cond) # torch.Size([32, 6, 256])
+        trans_dense = trans_dense.permute(1, 0, 2) # [6, B, 256] torch.Size([6, 32, 256])
+
+        # ==========================================================
+        # 【修正点】 把轨迹加到 Context 上 (Clean + Clean)
+        # ==========================================================
+        # 这是一个非常合理的特征融合：Context 既包含了姿态(Content)也包含了位移(Traj)
+        context_emb = content_emb_latent + trans_dense
+        
+        # 4. 拼接 (In-Context Conditioning)
+        # xseq = [Context(Clean), Sample(Noisy)]
+        # Transformer 会让 Sample 去 attend Context
+        xseq = torch.cat((context_emb, sample), axis=0) # [13, B, 256]
+
+        # 5. Style 处理 (保持不变)
+        style_emb_latent = self.emb_proj_st(style_emb)
+        style_emb_latent = time_emb + style_emb_latent
+        style_emb_latent = style_emb_latent.squeeze(0)
+
+        # 6. 送入 DiT Blocks
+        xseq = self.query_pos(xseq).permute(1,0,2)
+        dummy_trans = torch.zeros_like(style_emb_latent)
+        
+        for block in self.blocks:
+            xseq = block(xseq, style_emb_latent, dummy_trans)
+            
+        sample = xseq[:, content_emb_latent.shape[0]:, :] 
+        return (sample, )
 
 
 class EmbedAction(nn.Module):

@@ -4,7 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-NAME: testBaseline0904
+NAME: finetuneBaseline1206_Stage2
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -28,13 +28,14 @@ TRAIN:
   # Size of batches
   BATCH_SIZE: 128
   # Total epochs for training
-  END_EPOCH: 2000
+  END_EPOCH: 200
 
   RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
+  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/finetuneBaseline1206/checkpoints/epoch=199.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
-    LR: 1e-4 # Learning rate
+    LR: 5e-5 # Learning rate
   # Ablation study configurations.
   ABLATION:
     SKIP_CONNECT: True
@@ -53,7 +54,8 @@ EVAL:
 # The following are testing settings
 #####################################
 TEST:
-  CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
+  # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/finetuneBaseline1206_Stage2/checkpoints/epoch=179.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
@@ -108,7 +110,7 @@ model:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 100
+  SACE_CHECKPOINT_EPOCH: 10
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True

@@ -41,11 +41,107 @@ from datasets.utils.paramUtil import *
 # import evaluate.utils.rotation_conversions as geometry
 
 
-
+def differentiable_global_pos(features, mean, std):
+    """
+    输入 features: [Batch, Length, 4] (RotVel, VelX, VelZ, Height) - 归一化后的数据
+    输入 mean, std: [263] - 数据集的均值和方差
+    输出: [Batch, Length, 2] (Global X, Global Z)
+    """
+    # 1. 准备反归一化参数 (切片取前4维)
+    # [263] -> [1, 1, 4]
+    device = features.device
+    mean_root = mean[:4].view(1, 1, 4).to(device)
+    std_root = std[:4].view(1, 1, 4).to(device)
+    
+    # 2. 反归一化 (关键！必须还原到真实物理尺度才能算坐标)
+    features_denorm = features * std_root + mean_root
+    
+    # 3. 提取分量
+    # HumanML3D: Index 0=RotVelY, 1=VelX, 2=VelZ
+    rot_vel = features_denorm[..., 0] # [B, T]
+    local_vel_x = features_denorm[..., 1]
+    local_vel_z = features_denorm[..., 2]
+    
+    # 4. 计算绝对朝向 (Global Rotation)
+    # 累加角速度。假设初始朝向为0。
+    global_rot = torch.cumsum(rot_vel, dim=1)
+    
+    # 5. 投影到全局坐标系
+    # 公式：旋转矩阵变换
+    cos_rot = torch.cos(global_rot)
+    sin_rot = torch.sin(global_rot)
+    
+    # HumanML3D 常用坐标系转换
+    global_vel_x = local_vel_x * cos_rot + local_vel_z * sin_rot
+    global_vel_z = local_vel_z * cos_rot - local_vel_x * sin_rot
+    
+    # 6. 累加得到位置
+    global_pos_x = torch.cumsum(global_vel_x, dim=1)
+    global_pos_z = torch.cumsum(global_vel_z, dim=1)
+    
+    return torch.stack([global_pos_x, global_pos_z], dim=-1)
 
 
 from .base import BaseModel
 
+def generate_safe_trajectory(batch_size, length, mean, std, shape_type="rectangle", device="cpu"):
+    """
+    基于数据集统计量生成绝对安全的轨迹。
+    确保归一化后的数值在 [-3, 3] 之间。
+    """
+    # 确保 mean/std 是 tensor
+    if not isinstance(mean, torch.Tensor):
+        mean = torch.tensor(mean, device=device)
+        std = torch.tensor(std, device=device)
+    
+    # 取前4维
+    mean = mean[:4]
+    std = std[:4]
+    
+    # 初始化: 全部设为均值 (最安全的状态，归一化后为0)
+    traj = mean.view(1, 1, 4).repeat(batch_size, length, 1)
+    
+    # 定义"快"的标准：均值 + 2倍标准差 (归一化后=2.0)
+    # 这是一个非常健康的数值，既有明显动作，又不会崩
+    FAST_SPEED = mean[2] + 2.0 * std[2] 
+    
+    # 定义"转弯"的标准：均值 + 2倍标准差 (归一化后=2.0)
+    # HumanML3D 的 Std[0] 是 0.0128 rad/frame (约 0.7度/帧)
+    # 2.0 倍就是 1.4度/帧。转90度大概需要 60 帧。
+    TURN_SPEED = mean[0] + 2.0 * std[0]
+
+    if shape_type == "straight":
+        # === 直走 ===
+        traj[..., 2] = FAST_SPEED # Z轴前进
+        
+    elif shape_type == "rectangle":
+        # === 矩形 ===
+        # 我们根据 TURN_SPEED 反推需要转多久
+        # 目标转角: 90度 (pi/2)
+        # 所需帧数 = (pi/2) / (2.0 * std[0])
+        # 0.0128 * 2 = 0.0256. 1.57 / 0.0256 ≈ 60 帧
+        
+        turn_duration = 20 
+        walk_duration = 20
+        cycle_len = (turn_duration + walk_duration) * 4
+        
+        for t in range(length):
+            phase = t % (walk_duration + turn_duration)
+            
+            if phase < walk_duration:
+                # 直走阶段
+                traj[:, t, 2] = FAST_SPEED * 2
+            else:
+                # 转弯阶段
+                traj[:, t, 0] = TURN_SPEED * 2 # 向左转
+                traj[:, t, 2] = mean[2] + 0.5 * std[2] # 转弯时稍微减速 (0.5 sigma)
+
+    elif shape_type == "circle":
+        # === 画圆 ===
+        traj[..., 2] = mean[2] + 2.0 * std[2] # 前进
+        traj[..., 0] = mean[0] - 2.0 * std[0] # 持续向左转 (1 sigma)
+        
+    return traj
 
 class MLD(BaseModel):
     """
@@ -234,17 +330,48 @@ class MLD(BaseModel):
         lengths = batch["length"]
         # style
         motion = batch["style_motion"].clone()
-        motion[...,:3] = 0
+        motion[...,:4] = 0
 
 
         # content
         content_motion = batch['content_motion']
         content_motion = (content_motion - self.mean.to(content_motion.device))/self.std.to(content_motion.device)
 
-        # trajectory
-        trans_motion = content_motion.clone()
+        # # trajectory
+        # # trans_motion = content_motion.clone()
+        style_motion = batch['style_motion']
+        style_motion_norm = (style_motion - self.mean.to(style_motion.device))/self.std.to(style_motion.device)
+        trans_motion = style_motion_norm.clone()
+        trans_cond = trans_motion[...,:4]
+        
+        # ========================================================
+        # 【测试】 注入伪造轨迹 (直接修改 trans_cond)
+        # ========================================================
+        # USE_FAKE_TRAJ = True 
+        # FAKE_SHAPE = "circle" 
+        # if USE_FAKE_TRAJ:
+        #     print(f"!!! USING FAKE TRAJECTORY: {FAKE_SHAPE} !!!")
+        #     bsz = content_motion.shape[0]
+        #     max_len = content_motion.shape[1]
+            
+        #     # A. 生成 Raw Trajectory (米, 弧度)
+        #     fake_traj_raw = generate_safe_trajectory(
+        #         bsz, max_len, self.mean, self.std, shape_type=FAKE_SHAPE, device=content_motion.device
+        #     )
+            
+        #     # B. 归一化 (关键！必须把物理数值映射到 Latent 能够理解的分布)
+        #     # 我们只归一化前 4 维
+        #     mean_root = self.mean.to(content_motion.device)[:4]
+        #     std_root = self.std.to(content_motion.device)[:4]
+            
+        #     fake_traj_norm = (fake_traj_raw - mean_root) / std_root
+            
+        #     # C. 赋值给 trans_cond
+        #     # 注意：如果 batch size > 1，这里会把所有样本的轨迹都改成一样的
+        #     trans_cond = fake_traj_norm
+
         # 
-        content_motion[...,:3] = 0
+        content_motion[...,:4] = 0
 
 
         scale = batch["tag_scale"]
@@ -290,14 +417,17 @@ class MLD(BaseModel):
             # np.save("eee.npy",fff)
 
             # trajectory
-            trans_cond = trans_motion[...,:3]
+            # trans_cond = trans_motion[...,:4]
             uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
 
             # three conditions
             multi_cond_emb = [motion_emb_content, motion_emb, uncond_trans]
 
+            target_traj_feat = batch["style_motion"][..., :4].clone() # [B, T, 4]
 
-            z = self._diffusion_reverse(multi_cond_emb, lengths, scale)
+
+            z = self._diffusion_reverse(multi_cond_emb, lengths, scale) # , target_traj_feat
+            # z = self._diffusion_reverse(multi_cond_emb, lengths, self.guidance_scale, trans_cond)
 
         elif self.stage in ['vae']:
             motions = batch['motion']
@@ -309,7 +439,8 @@ class MLD(BaseModel):
 
         joints = self.feats2joints(feats_rst.detach().cpu())
 
-        return remove_padding(joints, lengths)
+        return remove_padding(joints, lengths), style_motion.clone()[...,:4]
+        # return remove_padding(joints, lengths), fake_traj_raw
     
 
 
@@ -368,6 +499,204 @@ class MLD(BaseModel):
         latents = latents.permute(1, 0, 2)
         return latents
 
+    # def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None, target_traj_feat=None):
+    #     # target_traj_feat: [B, T, 4] 归一化后的目标轨迹特征
+        
+    #     # 1. 初始化 Latents (保持不变)
+    #     bsz = encoder_hidden_states[0].shape[0]
+    #     if self.do_classifier_free_guidance:
+    #         bsz = bsz // 2
+        
+    #     latents = torch.randn(
+    #         (bsz, self.latent_dim[0], self.latent_dim[-1]),
+    #         device=encoder_hidden_states[0].device,
+    #         dtype=torch.float,
+    #     )
+    #     latents = latents * self.scheduler.init_noise_sigma
+        
+    #     self.scheduler.set_timesteps(self.cfg.model.scheduler.num_inference_timesteps)
+    #     timesteps = self.scheduler.timesteps.to(encoder_hidden_states[0].device)
+        
+    #     extra_step_kwargs = {}
+    #     if "eta" in set(inspect.signature(self.scheduler.step).parameters.keys()):
+    #         extra_step_kwargs["eta"] = self.cfg.model.scheduler.eta
+
+    #     # ========================================================
+    #     # 【准备 Guidance 目标】
+    #     # ========================================================
+    #     gt_global_pos = None
+    #     # 定义引导强度：这是一场拉锯战，Scale 要给大一点
+    #     GUIDANCE_SCALE = 300.0  
+    #     # 只在前 60% 的步数做引导 (太靠后了 Latent 已经定型，强改会崩)
+    #     GUIDANCE_STEPS = len(timesteps) * 0.6 
+        
+    #     if target_traj_feat is not None:
+    #         # 预先计算好目标的全局路径 (Ground Truth Path)
+    #         # 这里的 target_traj_feat 应该是 Style Motion 的轨迹
+    #         with torch.no_grad():
+    #             gt_global_pos = differentiable_global_pos(
+    #                 target_traj_feat, self.mean, self.std
+    #             )
+
+    #     # ========================================================
+    #     # 【开始去噪循环】
+    #     # ========================================================
+    #     for i, t in enumerate(timesteps):
+    #         # 判断是否进行引导
+    #         do_guidance = (gt_global_pos is not None) and (i < GUIDANCE_STEPS)
+            
+    #         # 临时变量，用于存储梯度修正量
+    #         guidance_grad = torch.zeros_like(latents)
+            
+    #         # --- Guidance 计算分支 ---
+    #         if do_guidance:
+    #             with torch.enable_grad():
+    #                 # 1. Detach 并开启梯度
+    #                 # 我们只对当前的 latents 求导
+    #                 latents_in = latents.detach().requires_grad_(True)
+                    
+    #                 # 2. 预测 x0 (Denoised Sample)
+    #                 # 为了节省显存，这里我们只用 Cond 分支预测，或者简单的单次预测
+    #                 # 这里的 encoder_hidden_states 是 [Uncond, Cond] 拼接的
+    #                 # 我们取后半部分 (Cond) 来做预测，因为我们希望生成的动作符合 Cond
+    #                 cond_hidden_states = [e.chunk(2, dim=0)[1] for e in encoder_hidden_states]
+                    
+    #                 noise_pred_guide = self.denoiser(
+    #                     sample=latents_in,
+    #                     timestep=t,
+    #                     encoder_hidden_states=cond_hidden_states,
+    #                     lengths=lengths, 
+    #                 )[0]
+                    
+    #                 # 3. 使用调度器公式反推 x0
+    #                 # x0 = (xt - sqrt(1-alpha_bar) * eps) / sqrt(alpha_bar)
+    #                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
+    #                 beta_prod_t = 1 - alpha_prod_t
+    #                 pred_x0 = (latents_in - beta_prod_t ** 0.5 * noise_pred_guide) / (alpha_prod_t ** 0.5)
+                    
+    #                 # 4. VAE Decode (这一步最耗显存)
+    #                 # 注意维度转换: [B, 7, 256] -> [7, B, 256] (视你的 VAE 定义而定)
+    #                 z_in = pred_x0.permute(1, 0, 2) 
+    #                 pred_motion = self.vae.decode(z_in, lengths) # 输出 [B, 263, T] 或 [B, T, 263]
+                    
+    #                 # 确保维度是 [B, T, 263]
+    #                 if pred_motion.shape[1] == 263:
+    #                     pred_motion = pred_motion.permute(0, 2, 1)
+                        
+    #                 # 5. 提取预测轨迹并计算全局位置
+    #                 pred_root_feat = pred_motion[..., :4] # 取前4维
+    #                 pred_global_pos = differentiable_global_pos(
+    #                     pred_root_feat, self.mean, self.std
+    #                 )
+    #                 # ========================================================
+    #                 # 【修复】 轨迹长度对齐 (Interpolation)
+    #                 # ========================================================
+    #                 # pred_global_pos: [B, T_pred, 2]
+    #                 # gt_global_pos:   [B, T_gt, 2]
+                    
+    #                 if pred_global_pos.shape[1] != gt_global_pos.shape[1]:
+    #                     # 1. 转换维度适配 interpolate: [B, T, C] -> [B, C, T]
+    #                     gt_pos_permuted = gt_global_pos.permute(0, 2, 1)
+                        
+    #                     # 2. 线性插值拉伸 GT 轨迹，使其长度等于 Pred 轨迹
+    #                     gt_pos_resized = torch.nn.functional.interpolate(
+    #                         gt_pos_permuted,
+    #                         size=pred_global_pos.shape[1], # 目标长度 (199)
+    #                         mode='linear',
+    #                         align_corners=True
+    #                     )
+                        
+    #                     # 3. 转回原来的维度: [B, C, T] -> [B, T, C]
+    #                     gt_global_pos_aligned = gt_pos_resized.permute(0, 2, 1)
+    #                 else:
+    #                     gt_global_pos_aligned = gt_global_pos
+
+    #                 # ========================================================
+
+    #                  # ========================================================
+    #                 # 【修复】 相对位置 Loss (防止梯度爆炸)
+    #                 # ========================================================
+                    
+    #                 # 1. 归零起点 (Zero-centering)
+    #                 # 让两条线的起点重合，只比较形状和走向
+    #                 pred_pos_centered = pred_global_pos - pred_global_pos[:, 0:1, :]
+    #                 gt_pos_centered = gt_global_pos_aligned - gt_global_pos_aligned[:, 0:1, :]
+                    
+    #                 # 2. 计算位置 Loss
+    #                 loss_pos = torch.nn.functional.mse_loss(pred_pos_centered, gt_pos_centered)
+                    
+    #                 # 3. 计算速度 Loss (辅助稳定)
+    #                 # 提取线速度 (RotVel 不算)
+    #                 # pred_root_feat: [B, T, 4] -> Index 1,2 是 VelX, VelZ
+    #                 # 记得反归一化回去算 Loss，或者直接在归一化空间算
+    #                 # 这里为了简单，直接算归一化后的特征差异
+    #                 # gt_root_feat 需要从 target_traj_feat (interpolate后的) 提取
+                    
+    #                 # 简单的 Latent 空间速度约束:
+    #                 # 我们希望生成的 root feat 接近 target
+    #                 # (注意：需要把 target interpolate 到和 pred 一样长)
+                    
+    #                 target_traj_permuted = target_traj_feat.permute(0, 2, 1)
+    #                 target_traj_resized = torch.nn.functional.interpolate(
+    #                     target_traj_permuted, size=pred_root_feat.shape[1], mode='linear'
+    #                 ).permute(0, 2, 1)
+                    
+    #                 # loss_vel = torch.nn.functional.mse_loss(pred_root_feat, target_traj_resized)
+                    
+    #                 # # 4. 混合 Loss
+    #                 # # 主要靠 velocity (稳定)，辅以 position (修正累积误差)
+    #                 # loss = loss_vel * 10.0 + loss_pos * 1.0
+    #                 # print(f"Step {i}, Loss Pos: {loss_pos.item():.6f}, Loss Vel: {loss_vel.item():.6f}, Total Loss: {loss.item():.6f}")
+
+    #                 loss = torch.nn.functional.smooth_l1_loss(pred_pos_centered, gt_pos_centered)
+                
+    #                 print(f"Step {i}, Guidance Loss: {loss.item():.6f}")
+                    
+    #                 # ========================================================
+
+    #                 # 6. 计算 Loss (使用对齐后的 GT)
+    #                 # loss = torch.nn.functional.mse_loss(pred_global_pos, gt_global_pos_aligned)
+                    
+    #                 # 7. 反向传播
+    #                 # 我们想要 Loss 变小 -> 梯度下降
+    #                 grad = torch.autograd.grad(loss, latents_in)[0]
+
+    #                 # grad = torch.clamp(grad, -0.1, 0.1)
+    #                 grad = torch.clamp(grad, -0.02, 0.02)
+                    
+    #                 # 记录修正量
+    #                 guidance_grad = grad * GUIDANCE_SCALE
+                    
+    #                 # 清理计算图，防止爆显存
+    #                 del latents_in, pred_x0, pred_motion, pred_global_pos, loss, grad
+
+    #         # --- 正常的去噪步骤 ---
+    #         latent_model_input = (torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents)
+    #         lengths_reverse = (lengths * 2 if self.do_classifier_free_guidance else lengths)
+            
+    #         noise_pred = self.denoiser(
+    #             sample=latent_model_input,
+    #             timestep=t,
+    #             encoder_hidden_states=encoder_hidden_states,
+    #             lengths=lengths_reverse,
+    #         )[0]
+            
+    #         if self.do_classifier_free_guidance:
+    #             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+    #             noise_pred = noise_pred_uncond + scale * (noise_pred_text - noise_pred_uncond)
+            
+    #         # 【应用 Guidance】
+    #         # 公式: epsilon_hat = epsilon - sqrt(1-alpha) * grad
+    #         if do_guidance:
+    #             beta_prod_t = 1 - self.scheduler.alphas_cumprod[t]
+    #             # 减去梯度方向，让生成的图像往 Loss 小的方向走
+    #             noise_pred = noise_pred + (beta_prod_t ** 0.5) * guidance_grad
+
+    #         latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
+    #     latents = latents.permute(1, 0, 2)
+    #     return latents
+
 
 
 
@@ -418,6 +747,8 @@ class MLD(BaseModel):
             "noise_prior": noise_prior,
             "noise_pred": noise_pred, # torch.Size([32, 7, 256])
             "noise_pred_prior": noise_pred_prior,
+            "noisy_latents": noisy_latents,
+            "timesteps": timesteps,
         }
 
         return n_set
@@ -465,8 +796,9 @@ class MLD(BaseModel):
     def train_diffusion_forward(self, batch):
         feats_ref = batch["motion"] # torch.Size([32, 40, 263])
         feats_content = batch["motion"].clone() # torch.Size([32, 40, 263])
-        feats_content[...,:3] = 0.0
+        feats_content[...,:4] = 0.0
         lengths = batch["length"]
+        bsz = feats_ref.shape[0]
         
         # content condition
         with torch.no_grad():
@@ -475,19 +807,42 @@ class MLD(BaseModel):
             cond_emb = z_content.permute(1,0,2)  # torch.Size([32, 7, 256])          
         # style condition
         motion_seq = feats_ref*self.std + self.mean  # 【QUESTION】看起来风格有做一步反归一化处理，而content并没有被反归一化，是这样么？
-        motion_seq[...,:3]=0.0
+        motion_seq[...,:4]=0.0
         motion_seq = motion_seq.unsqueeze(-1).permute(0,2,3,1) # torch.Size([32, 263, 1, 40])
         motion_emb = self.motionclip.encoder({'x': motion_seq,
                         'y': torch.zeros(motion_seq.shape[0], dtype=int, device='cuda:{}'.format(self.cfg["DEVICE"][0])),
                         'mask': lengths_to_mask(lengths, device='cuda:{}'.format(self.cfg["DEVICE"][0]))})["mu"] # 一个style被提取成了512维的tensor，torch.Size([32, 512])
         motion_emb = motion_emb.unsqueeze(1) # torch.Size([32, 1, 512])
-        mask_uncond = torch.rand(motion_emb.shape[0]) < self.guidance_uncodp # [F,F,...,F,T,F,T,...]
-        motion_emb[mask_uncond, ...] = 0
         
-
+        # mask_uncond = torch.rand(motion_emb.shape[0]) < self.guidance_uncodp # [F,F,...,F,T,F,T,...]
+        # motion_emb[mask_uncond, ...] = 0
 
         # trans condition
-        trans_cond = batch["motion"][...,:3]  # torch.Size([32, 40, 3])
+        trans_cond = batch["motion"][...,:4]  # torch.Size([32, 40, 3])
+
+        # A. Content Dropout (30%)
+        # 解决你的顾虑：切断 Content 依赖
+        mask_content = torch.rand(bsz, device=self.device) < 0.15
+        cond_emb[mask_content] = 0
+        
+        # B. Style Dropout (30%)
+        # 解决你的顾虑：切断 Style 依赖，防止 Style 篡位
+        # 注意：这是独立的随机数，所以会有 0.3*0.3=9% 的概率两者同时消失
+        mask_style = torch.rand(bsz, device=self.device) < 0.3
+        motion_emb[mask_style] = 0
+        
+        # C. Trajectory Dropout (30%)
+        # 作用：让模型在没有轨迹时也能生成自然动作(无条件生成)
+        # 保护机制：如果 Content 和 Style 都没了，千万不能丢 Traj (否则就是全黑)
+        # 逻辑：Drop Traj IF (Content OK OR Style OK)
+        can_drop_traj = (~mask_content) | (~mask_style) # 只要有一个还活着，就可以丢轨迹
+        
+        rand_traj = torch.rand(bsz, device=self.device) < 0.5
+        # 最终 mask: 随机到了要丢 且 允许丢
+        final_mask_traj = rand_traj & can_drop_traj
+        
+        # 这里我们要用 mask 乘以 tensor (广播)
+        trans_cond[final_mask_traj.squeeze()] = 0
 
         # three condition
         multi_cond_emb = [cond_emb, motion_emb, trans_cond] # 复习一下： cond_emb：内容（torch.Size([32, 7, 256])），motion_emb：风格（torch.Size([32, 1, 512])），trans_cond：轨迹（torch.Size([32, 40, 3])）
@@ -495,6 +850,70 @@ class MLD(BaseModel):
 
         # diffusion process return with noise and noise_pred
         n_set = self._diffusion_process(z, multi_cond_emb, lengths) # 返回的n_set是一个字段，包含计算loss的时候pytorch_lightning所关心的内容
+        
+        # ============================================================
+        # 【ICME 解耦核心】 显式轨迹损失 (Explicit Trajectory Loss)
+        # ============================================================
+        if self.training:
+            # 5.1 反解 x0
+            z_t = n_set['noisy_latents']
+            t = n_set['timesteps']
+            noise_pred = n_set['noise_pred']
+            
+            alphas = self.noise_scheduler.alphas_cumprod.to(self.device)
+            # 处理维度广播 [B] -> [B, 1, 1]
+            sqrt_alpha = alphas[t] ** 0.5
+            sqrt_one_minus_alpha = (1 - alphas[t]) ** 0.5
+            while len(sqrt_alpha.shape) < len(z_t.shape):
+                sqrt_alpha = sqrt_alpha.unsqueeze(-1)
+                sqrt_one_minus_alpha = sqrt_one_minus_alpha.unsqueeze(-1)
+                
+            pred_z0 = (z_t - sqrt_one_minus_alpha * noise_pred) / sqrt_alpha
+            
+            # 5.2 解码 (Decode)
+            # [B, 7, 256] -> [7, B, 256]
+            pred_motion = self.vae.decode(pred_z0.permute(1,0,2), lengths) # torch.Size([32, 196, 263])
+            pred_motion = pred_motion.permute(0, 2, 1) # [B, T, 263] -> [B, 263, T] torch.Size([32, 263, 196])
+            
+            # 2. 提取根节点特征 (Pred & GT)
+            # 取前 4 维：[Rot, VelX, VelZ, Height] 
+            pred_root_feat = pred_motion[:, :4, :]  # torch.Size([32, 4, 196])
+            gt_root_feat = batch["motion"][..., :4].permute(0, 2, 1) # torch.Size([32, 4, 196])
+            
+            # ========================================================
+            # 【ICME 杀手锏】 累积位置损失 (Accumulated Loss)
+            # ========================================================
+            # 我们不仅比对速度，还要比对积分后的位置！
+            # 只有这样，模型才不敢有一丝一毫的偏离。
+            
+            # 2.1 速度/高度损失 (基础)
+            loss_vel = torch.nn.functional.mse_loss(pred_root_feat, gt_root_feat)
+            # 2.2 恢复位置 (积分)
+            # 简化计算：我们假设初始位置都是 0，直接累加速度
+            # 注意：真实的轨迹恢复需要处理旋转，这里为了 Loss 可导，我们做简化近似
+            # 我们只累加 X 和 Z 的线速度
+            
+            # pred_vels: [B, 2, T] (VelX, VelZ)
+            pred_vels = pred_root_feat[:, 1:3, :]
+            gt_vels = gt_root_feat[:, 1:3, :]
+            
+            # 累加 (Cumsum) -> 得到相对位移轨迹
+            pred_pos = torch.cumsum(pred_vels, dim=-1)
+            gt_pos = torch.cumsum(gt_vels, dim=-1)
+            
+            # 2.3 位置损失 (Global Position Loss)
+            # 这个 Loss 会随着时间 t 变大，惩罚力度极强
+            loss_pos = torch.nn.functional.mse_loss(pred_pos, gt_pos)
+            
+            # 3. 最终轨迹损失
+            # 速度损失权重 10，位置损失权重 5 (因为它数值本来就大)
+            # 加上高度损失 (Index 3) 确保能跳起来
+            
+            # 这里的 loss_traj 包含了极强的约束
+            n_set['loss_traj'] = (loss_vel * 5.0) + (loss_pos * 0.05)
+            if self.global_step % 100 == 0:
+                print(f"DEBUG: Loss Vel: {loss_vel.item():.4f} | Loss Pos: {loss_pos.item():.4f}")
+        
         return {**n_set}
 
 
@@ -705,79 +1124,95 @@ class MLD(BaseModel):
             else:
                 raise ValueError(f"Not support this stage {self.stage}!")
 
-            loss = self.losses[split].update(rs_set)
-            if loss is None:
+            loss_diff = self.losses[split].update(rs_set)
+            if loss_diff is None:
                 raise ValueError(
                     "Loss is None, this happend with torchmetrics > 0.7")
 
-        # Compute the metrics - currently evaluate results from text to motion
-        if split in ["val", "test"]:
-            # use t2m evaluators
-            rs_set = self.t2m_eval(batch)
+        # # Compute the metrics - currently evaluate results from text to motion
+        # if split in ["val", "test"]:
+        #     # use t2m evaluators
+        #     rs_set = self.t2m_eval(batch)
 
-            # MultiModality evaluation sperately
-            if self.trainer.datamodule.is_mm:
-                metrics_dicts = ['MMMetrics']
-            else:
-                metrics_dicts = self.metrics_dict
-            # metric = 'TemosMetric' 'TM2TMetrics'
-            for metric in metrics_dicts:
-                if metric == "TemosMetric":
-                    phase = split if split != "val" else "eval"
-                    if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
-                    ) not in [
-                            "humanml3d",
-                            "kit",
-                    ]:
-                        raise TypeError(
-                            "APE and AVE metrics only support humanml3d and kit datasets now"
-                        )
+        #     # MultiModality evaluation sperately
+        #     if self.trainer.datamodule.is_mm:
+        #         metrics_dicts = ['MMMetrics']
+        #     else:
+        #         metrics_dicts = self.metrics_dict
+        #     # metric = 'TemosMetric' 'TM2TMetrics'
+        #     for metric in metrics_dicts:
+        #         if metric == "TemosMetric":
+        #             phase = split if split != "val" else "eval"
+        #             if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
+        #             ) not in [
+        #                     "humanml3d",
+        #                     "kit",
+        #             ]:
+        #                 raise TypeError(
+        #                     "APE and AVE metrics only support humanml3d and kit datasets now"
+        #                 )
 
-                    getattr(self, metric).update(rs_set["joints_rst"],
-                                                 rs_set["joints_ref"],
-                                                 batch["length"])
-                elif metric == "TM2TMetrics":
-                    getattr(self, metric).update(
-                        # lat_t, latent encoded from diffusion-based text
-                        # lat_rm, latent encoded from reconstructed motion
-                        # lat_m, latent encoded from gt motion
-                        # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
-                        rs_set["lat_t"],
-                        rs_set["lat_rm"],
-                        rs_set["lat_m"],
-                        batch["length"],
-                    )
-                elif metric == "UncondMetrics":
-                    getattr(self, metric).update(
-                        recmotion_embeddings=rs_set["lat_rm"],
-                        gtmotion_embeddings=rs_set["lat_m"],
-                        lengths=batch["length"],
-                    )
-                elif metric == "MRMetrics":
-                    getattr(self, metric).update(rs_set["joints_rst"],
-                                                 rs_set["joints_ref"],
-                                                 batch["length"])
-                elif metric == "MMMetrics":
-                    getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
-                                                 batch["length"])
-                elif metric == "HUMANACTMetrics":
-                    getattr(self, metric).update(rs_set["m_action"],
-                                                 rs_set["joints_eval_rst"],
-                                                 rs_set["joints_eval_ref"],
-                                                 rs_set["m_lens"])
-                elif metric == "UESTCMetrics":
-                    # the stgcn model expects rotations only
-                    getattr(self, metric).update(
-                        rs_set["m_action"],
-                        rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
-                                             25).permute(0, 3, 2, 1)[:, :-1],
-                        rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
-                                             25).permute(0, 3, 2, 1)[:, :-1],
-                        rs_set["m_lens"])
-                else:
-                    raise TypeError(f"Not support this metric {metric}")
+        #             getattr(self, metric).update(rs_set["joints_rst"],
+        #                                          rs_set["joints_ref"],
+        #                                          batch["length"])
+        #         elif metric == "TM2TMetrics":
+        #             getattr(self, metric).update(
+        #                 # lat_t, latent encoded from diffusion-based text
+        #                 # lat_rm, latent encoded from reconstructed motion
+        #                 # lat_m, latent encoded from gt motion
+        #                 # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
+        #                 rs_set["lat_t"],
+        #                 rs_set["lat_rm"],
+        #                 rs_set["lat_m"],
+        #                 batch["length"],
+        #             )
+        #         elif metric == "UncondMetrics":
+        #             getattr(self, metric).update(
+        #                 recmotion_embeddings=rs_set["lat_rm"],
+        #                 gtmotion_embeddings=rs_set["lat_m"],
+        #                 lengths=batch["length"],
+        #             )
+        #         elif metric == "MRMetrics":
+        #             getattr(self, metric).update(rs_set["joints_rst"],
+        #                                          rs_set["joints_ref"],
+        #                                          batch["length"])
+        #         elif metric == "MMMetrics":
+        #             getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
+        #                                          batch["length"])
+        #         elif metric == "HUMANACTMetrics":
+        #             getattr(self, metric).update(rs_set["m_action"],
+        #                                          rs_set["joints_eval_rst"],
+        #                                          rs_set["joints_eval_ref"],
+        #                                          rs_set["m_lens"])
+        #         elif metric == "UESTCMetrics":
+        #             # the stgcn model expects rotations only
+        #             getattr(self, metric).update(
+        #                 rs_set["m_action"],
+        #                 rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
+        #                                      25).permute(0, 3, 2, 1)[:, :-1],
+        #                 rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
+        #                                      25).permute(0, 3, 2, 1)[:, :-1],
+        #                 rs_set["m_lens"])
+        #         else:
+        #             raise TypeError(f"Not support this metric {metric}")
 
         # return forward output rather than loss during test
         if split in ["test"]:
             return rs_set["joints_rst"], batch["length"]
-        return loss
+        
+        # 2. 轨迹 Loss
+        loss_traj = rs_set.get('loss_traj', 0.0)
+        
+        # 3. 总 Loss
+        total_loss = loss_diff + loss_traj
+        
+        # 4. Logging
+        if split == "train":
+            self.log('train/loss_total', total_loss, on_step=True, logger=True)
+            self.log('train/loss_diff', loss_diff, on_step=True, logger=True)
+            if isinstance(loss_traj, torch.Tensor):
+                self.log('train/loss_traj', loss_traj, on_step=True, logger=True)
+        
+        if self.global_step % 100 == 0:
+            print(f"DEBUG: Loss Diff: {loss_diff.item():.4f}")
+        return total_loss

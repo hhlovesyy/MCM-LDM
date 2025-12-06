@@ -1609,76 +1609,159 @@ class Text2MotionDatasetV2(data.Dataset):
     def __len__(self):
         return len(self.name_list) - self.pointer
 
+    # def __getitem__(self, item):
+    #     idx = self.pointer + item
+    #     data = self.data_dict[self.name_list[idx]]
+    #     motion, m_length, text_list = data["motion"], data["length"], data[
+    #         "text"]
+    #     # Randomly select a caption
+    #     text_data = random.choice(text_list)
+    #     caption, tokens = text_data["caption"], text_data["tokens"]
+
+    #     if len(tokens) < self.max_text_len:
+    #         # pad with "unk"
+    #         tokens = ["sos/OTHER"] + tokens + ["eos/OTHER"]
+    #         sent_len = len(tokens)
+    #         tokens = tokens + ["unk/OTHER"
+    #                            ] * (self.max_text_len + 2 - sent_len)
+    #     else:
+    #         # crop
+    #         tokens = tokens[:self.max_text_len]
+    #         tokens = ["sos/OTHER"] + tokens + ["eos/OTHER"]
+    #         sent_len = len(tokens)
+    #     pos_one_hots = []
+    #     word_embeddings = []
+    #     for token in tokens:
+    #         word_emb, pos_oh = self.w_vectorizer[token]
+    #         pos_one_hots.append(pos_oh[None, :])
+    #         word_embeddings.append(word_emb[None, :])
+    #     pos_one_hots = np.concatenate(pos_one_hots, axis=0)
+    #     word_embeddings = np.concatenate(word_embeddings, axis=0)
+
+    #     # Crop the motions in to times of 4, and introduce small variations
+    #     if self.unit_length < 10:
+    #         coin2 = np.random.choice(["single", "single", "double"])
+    #     else:
+    #         coin2 = "single"
+
+    #     if coin2 == "double":
+    #         m_length = (m_length // self.unit_length - 1) * self.unit_length
+    #     elif coin2 == "single":
+    #         m_length = (m_length // self.unit_length) * self.unit_length
+    #     idx = random.randint(0, len(motion) - m_length)
+    #     motion = motion[idx:idx + m_length]
+    #     "Z Normalization"
+    #     motion = (motion - self.mean) / self.std
+
+    #     # # padding
+    #     # if m_length < self.max_motion_length:
+    #     #     motion = np.concatenate(
+    #     #         [
+    #     #             motion,
+    #     #             np.zeros((self.max_motion_length - m_length, motion.shape[1])),
+    #     #         ],
+    #     #         axis=0,
+    #     #     )
+    #     # print(word_embeddings.shape, motion.shape, m_length)
+    #     # print(tokens)
+
+    #     # debug check nan
+    #     if np.any(np.isnan(motion)):
+    #         raise ValueError("nan in motion")
+
+    #     return (
+    #         word_embeddings,
+    #         pos_one_hots,
+    #         caption,
+    #         sent_len,
+    #         motion,
+    #         m_length,
+    #         "_".join(tokens),
+    #     )
+    #     # return caption, motion, m_length
     def __getitem__(self, item):
-        idx = self.pointer + item
-        data = self.data_dict[self.name_list[idx]]
-        motion, m_length, text_list = data["motion"], data["length"], data[
-            "text"]
-        # Randomly select a caption
-        text_data = random.choice(text_list)
-        caption, tokens = text_data["caption"], text_data["tokens"]
+    # 【鲁棒性策略 1】增加重试机制
+        # 如果当前样本处理失败，尝试随机获取另一个样本，最多重试 3 次
+        # 避免因为脏数据导致训练中断
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 如果是重试，随机挑选一个索引；如果是第一次，用传入的 item
+                current_idx = item if attempt == 0 else random.randint(0, len(self.name_list) - 1)
+                
+                idx = self.pointer + current_idx
+                data = self.data_dict[self.name_list[idx]]
+                motion, m_length, text_list = data["motion"], data["length"], data["text"]
+                
+                # Randomly select a caption
+                text_data = random.choice(text_list)
+                caption, tokens = text_data["caption"], text_data["tokens"]
 
-        if len(tokens) < self.max_text_len:
-            # pad with "unk"
-            tokens = ["sos/OTHER"] + tokens + ["eos/OTHER"]
-            sent_len = len(tokens)
-            tokens = tokens + ["unk/OTHER"
-                               ] * (self.max_text_len + 2 - sent_len)
-        else:
-            # crop
-            tokens = tokens[:self.max_text_len]
-            tokens = ["sos/OTHER"] + tokens + ["eos/OTHER"]
-            sent_len = len(tokens)
-        pos_one_hots = []
-        word_embeddings = []
-        for token in tokens:
-            word_emb, pos_oh = self.w_vectorizer[token]
-            pos_one_hots.append(pos_oh[None, :])
-            word_embeddings.append(word_emb[None, :])
-        pos_one_hots = np.concatenate(pos_one_hots, axis=0)
-        word_embeddings = np.concatenate(word_embeddings, axis=0)
+                if len(tokens) < self.max_text_len:
+                    # pad with "unk"
+                    tokens = ["sos/OTHER"] + tokens + ["eos/OTHER"]
+                    sent_len = len(tokens)
+                    tokens = tokens + ["unk/OTHER"] * (self.max_text_len + 2 - sent_len)
+                else:
+                    # crop
+                    tokens = tokens[:self.max_text_len]
+                    tokens = ["sos/OTHER"] + tokens + ["eos/OTHER"]
+                    sent_len = len(tokens)
+                
+                pos_one_hots = []
+                word_embeddings = []
+                for token in tokens:
+                    word_emb, pos_oh = self.w_vectorizer[token]
+                    pos_one_hots.append(pos_oh[None, :])
+                    word_embeddings.append(word_emb[None, :])
+                pos_one_hots = np.concatenate(pos_one_hots, axis=0)
+                word_embeddings = np.concatenate(word_embeddings, axis=0)
 
-        # Crop the motions in to times of 4, and introduce small variations
-        if self.unit_length < 10:
-            coin2 = np.random.choice(["single", "single", "double"])
-        else:
-            coin2 = "single"
+                # Crop the motions
+                if self.unit_length < 10:
+                    coin2 = np.random.choice(["single", "single", "double"])
+                else:
+                    coin2 = "single"
 
-        if coin2 == "double":
-            m_length = (m_length // self.unit_length - 1) * self.unit_length
-        elif coin2 == "single":
-            m_length = (m_length // self.unit_length) * self.unit_length
-        idx = random.randint(0, len(motion) - m_length)
-        motion = motion[idx:idx + m_length]
-        "Z Normalization"
-        motion = (motion - self.mean) / self.std
+                if coin2 == "double":
+                    m_length = (m_length // self.unit_length - 1) * self.unit_length
+                elif coin2 == "single":
+                    m_length = (m_length // self.unit_length) * self.unit_length
+                
+                idx_start = random.randint(0, len(motion) - m_length)
+                motion = motion[idx_start:idx_start + m_length]
+                
+                # 【鲁棒性策略 2】安全的 Z-Normalization
+                # 防止 self.std 中有 0 导致除以 0 产生 NaN/Inf
+                # 给分母加一个极小值 (epsilon)
+                epsilon = 1e-8
+                motion = (motion - self.mean) / (self.std + epsilon)
 
-        # # padding
-        # if m_length < self.max_motion_length:
-        #     motion = np.concatenate(
-        #         [
-        #             motion,
-        #             np.zeros((self.max_motion_length - m_length, motion.shape[1])),
-        #         ],
-        #         axis=0,
-        #     )
-        # print(word_embeddings.shape, motion.shape, m_length)
-        # print(tokens)
+                # 【鲁棒性策略 3】检查 NaN 并触发重试
+                if np.any(np.isnan(motion)) or np.any(np.isinf(motion)):
+                    # 打印警告但不报错，继续下一次循环（重试）
+                    bad_file_name = self.name_list[idx]
+                    print(f"\n[BAD DATA FOUND] File: {bad_file_name} (Index: {idx}) contains NaN or Inf.")
+                    print(f"-> You should remove '{bad_file_name}' from your split file (val.txt/train.txt).")
+                    continue # 跳过本次，进入下一次循环尝试新样本
 
-        # debug check nan
-        if np.any(np.isnan(motion)):
-            raise ValueError("nan in motion")
+                # 如果一切正常，返回数据
+                return (
+                    word_embeddings,
+                    pos_one_hots,
+                    caption,
+                    sent_len,
+                    motion,
+                    m_length,
+                    "_".join(tokens),
+                )
 
-        return (
-            word_embeddings,
-            pos_one_hots,
-            caption,
-            sent_len,
-            motion,
-            m_length,
-            "_".join(tokens),
-        )
-        # return caption, motion, m_length
+            except Exception as e:
+                # 捕获其他可能的错误（如索引越界、字典key不存在等）
+                # print(f"[Error] Failed to load item {current_idx}: {e}. Retrying...")
+                continue # 继续尝试下一个随机样本
+        
+        raise ValueError(f"Fatal Error: Failed to load valid data after {max_retries} retries. Please check your dataset mean/std files.")
 
 
 """For use of training baseline"""

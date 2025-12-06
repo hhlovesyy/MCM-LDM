@@ -149,7 +149,7 @@ def list_cut_average(ll, intervals):
 
 
 def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset='humanml', figsize=(3, 3), fps=120,
-                   radius=3, vis_mode='default', gt_frames=[], view_mode='genshin_impact'):
+                   radius=3, vis_mode='default', gt_frames=[], view_mode='genshin_impact', gt_trajec=None):
     matplotlib.use('Agg')
 
     title = '\n'.join(wrap(title, 20))
@@ -208,6 +208,53 @@ def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset='humanml', 
         ax.set_yticklabels([])
         ax.set_zticklabels([])
         # --- 设置结束 ---
+
+        # ========================================================
+        # 【新增代码】绘制轨迹线
+        # ========================================================
+        # 逻辑：因为角色被固定在 (0,0)，所以轨迹线需要相对于角色当前位置进行反向平移
+        # 当前角色的绝对位置是 trajec[index]
+        # 轨迹上任意一点 p 的相对位置 = p - trajec[index]
+        
+        # 1. 计算相对轨迹 (X 和 Z)
+        rel_traj_x = trajec[:, 0] - trajec[index, 0]
+        rel_traj_z = trajec[:, 1] - trajec[index, 1]
+        
+        # 2. 绘制整条轨迹线 (地面 Y=0)
+        # 红色虚线表示完整路径
+        ax.plot(rel_traj_x, np.zeros_like(rel_traj_x), rel_traj_z, 
+                color='red', linewidth=1.5, linestyle='--', alpha=0.6)
+        
+        # ========================================================
+        # 【新增：绘制目标轨迹 (绿色)】
+        # ========================================================
+        if gt_trajec is not None:
+            # 这里的逻辑很关键：
+            # 我们的视图中心是“当前生成的角色位置”。
+            # 我们想看的是：“目标轨迹”相对于“当前角色”在哪里。
+            # 所以平移量依然是 trajec[index] (生成角色的当前位置)
+            
+            # 比如：如果目标希望我在 (10, 10)，但我实际走到了 (12, 12)
+            # 那么绿线上的点应该是 (10-12, 10-12) = (-2, -2)
+            # 这样在图上，我会看到绿线在我身后 (-2, -2) 的位置，表示我走偏了
+            # print("now we should plot gt trajec")
+            rel_gt_x = gt_trajec[:, 0] - trajec[index, 0]
+            rel_gt_z = gt_trajec[:, 1] - trajec[index, 1]
+            
+            ax.plot(rel_gt_x, np.zeros_like(rel_gt_x), rel_gt_z,
+                    color='green', linewidth=2.0, linestyle=':', alpha=0.8, label='Target Path')
+            
+            # 标记目标的起点和终点
+            ax.scatter(rel_gt_x[0], 0, rel_gt_z[0], c='green', s=10, marker='o')
+            ax.scatter(rel_gt_x[-1], 0, rel_gt_z[-1], c='green', s=10, marker='x')
+        # ========================================================
+        
+        # 3. 标记起点 (Green) 和 终点 (Blue)
+        ax.scatter(rel_traj_x[0], 0, rel_traj_z[0], c='green', s=20, marker='o', label='Start')
+        ax.scatter(rel_traj_x[-1], 0, rel_traj_z[-1], c='blue', s=20, marker='x', label='End')
+        
+        # 4. (可选) 绘制“已经走过的路” (实线) vs “还没走的路” (虚线)
+        # 如果你想区分过去和未来，可以用切片 rel_traj_x[:index] 和 rel_traj_x[index:] 分别绘制
 
         # [核心修复] 在每一帧，根据当前轨迹，动态地重绘地面！
         # 地面的坐标 = 固定的世界边界 - 当前帧的轨迹偏移
