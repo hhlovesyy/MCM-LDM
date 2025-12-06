@@ -68,7 +68,7 @@ TEST:
   FACT: 1
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
   # MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
-  MULTI_MODAL_TEXT_PROMPT: 'Crouching while walking.'
+  MULTI_MODAL_TEXT_PROMPT: 'Crouching while walking. obstacle, right'
   MULTI_MODAL_IMAGE_PATH: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene/scene_images/Dumuqiao/01.jpg'
   CFG_STYLE : 10.0
   CFG_SCENE : 5.0
