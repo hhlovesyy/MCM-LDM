@@ -47,8 +47,8 @@ def recover_root_rot_pos(data):
     # global_vel_x = r_vel_x * np.cos(r_rot) + r_vel_z * np.sin(r_rot)
     # global_vel_z = r_vel_z * np.cos(r_rot) - r_vel_x * np.sin(r_rot)
 
-    global_vel_x = r_vel_x * np.cos(r_rot) - r_vel_z * np.sin(r_rot) # 这里的 + 改成 -
-    global_vel_z = r_vel_z * np.cos(r_rot) + r_vel_x * np.sin(r_rot) # 这里的 - 改成 +
+    global_vel_x = r_vel_x * np.cos(r_rot) - r_vel_z * np.sin(r_rot) 
+    global_vel_z = r_vel_z * np.cos(r_rot) + r_vel_x * np.sin(r_rot)
     
     root_x = np.cumsum(global_vel_x)
     root_z = np.cumsum(global_vel_z)

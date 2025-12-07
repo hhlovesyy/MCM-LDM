@@ -4,7 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-NAME: finetuneBaseline1206_Stage2
+NAME: finetuneBaseline1207_Stage2
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -32,7 +32,8 @@ TRAIN:
 
   RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
-  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/finetuneBaseline1206/checkpoints/epoch=199.ckpt'
+  # PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/finetuneBaseline1206/checkpoints/epoch=199.ckpt'
+  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/finetuneBaseline1207_Stage1/checkpoints/epoch=169.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
     LR: 5e-5 # Learning rate
