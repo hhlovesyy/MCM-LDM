@@ -193,6 +193,7 @@ class MLD(BaseModel):
         self.scene_norm = nn.LayerNorm(512)
         # Output Norm (最关键！对齐分布！)
         self.style_norm = nn.LayerNorm(512)
+        
 
         # 【ICME 改动】根据配置加载分类器
         if cfg.LOSS.USE_SCENE_CLS:
@@ -208,12 +209,12 @@ class MLD(BaseModel):
 
         # self._get_t2m_evaluator(cfg)
 
-        # if cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
-        #     self.optimizer = AdamW(lr=cfg.TRAIN.OPTIM.LR,
-        #                            params=self.parameters())
-        # else:
-        #     raise NotImplementedError(
-        #         "Do not support other optimizer for now.")
+        if cfg.TRAIN.OPTIM.TYPE.lower() == "adamw":
+            self.optimizer = AdamW(lr=cfg.TRAIN.OPTIM.LR,
+                                   params=self.parameters())
+        else:
+            raise NotImplementedError(
+                "Do not support other optimizer for now.")
 
         if cfg.LOSS.TYPE == "mld":
             self._losses = MetricCollection({
@@ -239,47 +240,49 @@ class MLD(BaseModel):
 
         self.feats2joints = datamodule.feats2joints
         self.joints2feats = datamodule.joints2feats
-
-    def configure_optimizers(self):
-        # 1. 慢速组：Denoiser (预训练好的)
-        denoiser_params = list(self.denoiser.parameters())
         
-        # 2. 快速组：新加入的所有模块 (需要大火猛炒)
-        # 包括: FiLM MLP, Embedding, 以及两个 LayerNorm
-        adapter_params = []
 
-        # 添加 Projector
-        if hasattr(self, "scene_projector"):
-            adapter_params.extend(list(self.scene_projector.parameters()))
+    # def configure_optimizers(self):
+    #     # 从配置文件中读取两组学习率，并提供默认值以防万一
+    #     lr_denoiser = self.cfg.TRAIN.OPTIM.get("LR_DENOISER", 1e-5)
+    #     lr_adapter = self.cfg.TRAIN.OPTIM.get("LR_ADAPTER", 5e-4)
 
-        # 【新增】图像 Projector
-        if hasattr(self, "scene_image_projector"):
-            adapter_params.extend(list(self.scene_image_projector.parameters()))
-        
-        # 显式添加模块，防止漏掉
-        if hasattr(self, "film_mlp"):
-            adapter_params.extend(list(self.film_mlp.parameters()))
-            print(f"DEBUG: Added film_mlp params ({len(list(self.film_mlp.parameters()))} tensors)")
-            
-        if hasattr(self, "scene_norm"):
-            adapter_params.extend(list(self.scene_norm.parameters()))
-            
-        if hasattr(self, "style_norm"):
-            adapter_params.extend(list(self.style_norm.parameters()))
+    #     print(f"Optimizer Config --> LR for Denoiser: {lr_denoiser}, LR for Adapter: {lr_adapter}")
 
-        # 3. 构造优化器
-        optimizer = torch.optim.AdamW([
-            # 旧参数：微火慢炖
-            {"params": denoiser_params, "lr": 1e-5}, 
-            
-            # 新参数：大火爆炒 (这里放心地给大 LR)
-            {"params": adapter_params, "lr": 5e-4}, 
-        ], weight_decay=0.0)
+    #     # 1. Denoiser 参数组
+    #     denoiser_params = list(self.denoiser.parameters())
         
-        # 打印一下参数组长度，确认是否加上了
-        print(f"Optimizer initialized. Fast Group Size: {len(adapter_params)}")
+    #     # 2. Adapter (新模块) 参数组
+    #     adapter_params = []
+    #     # (这部分代码保持不变)
+    #     if hasattr(self, "scene_projector"):
+    #         adapter_params.extend(list(self.scene_projector.parameters()))
+    #     if hasattr(self, "scene_image_projector"):
+    #         adapter_params.extend(list(self.scene_image_projector.parameters()))
+    #     if hasattr(self, "film_mlp"):
+    #         adapter_params.extend(list(self.film_mlp.parameters()))
+    #     if hasattr(self, "scene_norm"):
+    #         adapter_params.extend(list(self.scene_norm.parameters()))
+    #     if hasattr(self, "style_norm"):
+    #         adapter_params.extend(list(self.style_norm.parameters()))
+
+    #     # 3. 构造参数组列表
+    #     param_groups = [
+    #         {"params": denoiser_params, "lr": lr_denoiser},
+    #         {"params": adapter_params, "lr": lr_adapter},
+    #     ]
+
+    #     # 4. 实例化优化器
+    #     optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0)
         
-        return {"optimizer": optimizer}
+    #     print(f"Optimizer initialized. Denoiser Group Size: {len(denoiser_params)}, Adapter Group Size: {len(adapter_params)}")
+        
+    #     return {"optimizer": optimizer}
+        
+    # def configure_optimizers(self):
+    #     # 只训练 Denoiser，学习率设得很小
+    #     optimizer = torch.optim.AdamW(self.denoiser.parameters(), lr=1e-6)
+    #     return {"optimizer": optimizer}
 
     def _get_t2m_evaluator(self, cfg):
         """
@@ -365,7 +368,7 @@ class MLD(BaseModel):
         return z
     
 # test    
-    def forward(self, batch):
+    def forward_allModel3Branch(self, batch):
         lengths = batch["length"]
         
         # 1. 准备基础数据
@@ -430,15 +433,21 @@ class MLD(BaseModel):
             
             # --- D. FiLM Modulation ---
             scene_feat_norm = self.scene_norm(scene_feat) # 记得 Norm, scene_feat的维度是torch.Size([1, 512])
-            film_params = self.film_mlp(scene_feat_norm)
-            gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
-            
-            gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1)
-            beta = beta_raw.unsqueeze(1)
-            
-            # 这里的 motion_emb 是原始的 Style
-            filmed_emb = gamma * motion_emb + beta
-            
+            if self.cfg.TRAIN.ABLATION.FUSION_MODE == "film":
+                film_params = self.film_mlp(scene_feat_norm)
+                gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
+                
+                gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1)
+                beta = beta_raw.unsqueeze(1)
+                
+                # 这里的 motion_emb 是原始的 Style
+                filmed_emb = gamma * motion_emb + beta
+            elif self.cfg.TRAIN.ABLATION.FUSION_MODE == "add":
+                filmed_emb = motion_emb + scene_feat_norm.unsqueeze(1)
+            else:
+                raise NotImplementedError(
+                    f"Unknown fusion mode: {self.cfg.model.ABLATION.FUSION_MODE}"
+                )
             # 归一化 (给 Denoiser 用的)
             style_raw_normed = self.style_norm(motion_emb) # 纯 Style
             style_mix_normed = self.style_norm(filmed_emb) # Style + Scene
@@ -503,6 +512,214 @@ class MLD(BaseModel):
             
         joints = self.feats2joints(feats_rst.detach().cpu())
         return remove_padding(joints, lengths)
+    
+
+    def forward_wo_sceneLoss(self, batch):
+        print("Forward w/o scene classification loss...")
+        lengths = batch["length"]
+        # style
+        motion = batch["style_motion"].clone()
+        motion[...,:3] = 0
+
+
+        # content
+        content_motion = batch['content_motion']
+        content_motion = (content_motion - self.mean.to(content_motion.device))/self.std.to(content_motion.device)
+
+        # trajectory
+        trans_motion = content_motion.clone() # [NOTE]原来的仓库也是把归一化之后的轨迹做处理，但是归一化之后的轨迹是不是丢失了本来的一些信息？用还原之后的原来动作的trajectory会不会更好？训练和推理都是
+        # 
+        content_motion[...,:3] = 0
+
+
+        scale = batch["tag_scale"]
+        lengths1 = [content_motion.shape[1]]* content_motion.shape[0]
+        
+        if self.cfg.TEST.COUNT_TIME:
+            self.starttime = time.time()
+            
+        if self.stage in ['diffusion', 'vae_diffusion']:\
+            #add style text in test
+            
+            
+            # content motion
+            with torch.no_grad():
+                z, dist_m = self.vae.encode(content_motion.float(), lengths1)
+            uncond_tokens = torch.cat([z, z], dim = 1).permute(1,0,2)
+            motion_emb_content = uncond_tokens
+
+            # style motion
+            lengths11 = [motion.shape[1]]* motion.shape[0]
+
+# for motion input (bs,60,22,3)->(bs,22,3,60)
+            # motion_seq = feats_ref*std + mean
+            motion_seq = motion.unsqueeze(-1).permute(0,2,3,1)
+
+
+            motion_emb = self.motionclip.encoder({'x': motion_seq.float(),
+                            'y': torch.zeros(motion_seq.shape[0], dtype=int, device=motion_seq.device),
+                            'mask': lengths_to_mask(lengths11, device=motion_seq.device)})["mu"]
+            motion_emb = motion_emb.unsqueeze(1)
+
+            # trajectory
+            trans_cond = trans_motion[...,:3]
+            trans_uncond = torch.zeros(trans_cond.shape).to(motion_seq.device)
+            uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
+            # uncond_trans = torch.cat([trans_uncond, trans_uncond], dim=0)
+            # uncond_trans = torch.cat([trans_uncond, trans_cond], dim=0)
+
+            has_image = batch["has_image"] # tensor([True], device='cuda:0')
+            use_image_for_inference = has_image.item()
+            print("use_image_for_inference :", use_image_for_inference)
+            scene_feat = None
+            if not use_image_for_inference:
+                scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
+                with torch.no_grad():
+                    text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
+                    clip_feat = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
+                scene_feat = self.scene_projector(clip_feat) # [Batch, 512]
+                # scene_feat_norm = self.scene_norm(scene_feat)
+            else:
+                scene_images = batch.get("scene_image").to(motion_seq.device) # torch.Size([1, 3, 224, 224])
+                with torch.no_grad():
+                    vision_out = self.scene_vision_encoder(pixel_values=scene_images)
+                    image_feat_raw = vision_out.pooler_output # [B, 768]
+                image_feat = self.scene_image_projector(image_feat_raw) # [B, 512]
+                scene_feat = image_feat
+                
+
+            # scene_feat_norm = self.scene_norm(scene_feat)
+            scene_scalar = 5.0
+            film_params = self.film_mlp(scene_feat * scene_scalar)
+            gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
+            gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1) # [B, 1, 512]
+            beta = beta_raw.unsqueeze(1)                       # [B, 1, 512]
+            # motion_emb = torch.zeros_like(motion_emb) # 先试试不要style
+            
+            filmed_emb = gamma * motion_emb + beta
+            adapted_style_normed = self.style_norm(filmed_emb)
+
+            # D. 构造 CFG 输入
+            # Uncond 分支：给全 0 (代表"无风格")
+            # Cond 分支：给 Adapted Style
+            uncond_style = torch.zeros_like(adapted_style_normed)
+            
+            # 拼接顺序：[Uncond, Cond], 这个是场景指导后的style
+            motion_emb_cfg = torch.cat([uncond_style, adapted_style_normed], dim=0)
+ 
+
+            scene_feat_reshaped = scene_feat.unsqueeze(1)
+            uncond_scene = torch.zeros_like(scene_feat_reshaped)
+            scene_emb_cfg = torch.cat([uncond_scene, scene_feat_reshaped], dim=0)  # 其实目前的去噪网络用不到这一项，以防后面可能需要就放进来了
+
+            # three conditions
+            multi_cond_emb = [motion_emb_content, motion_emb_cfg, uncond_trans, scene_emb_cfg]
+
+
+            z = self._diffusion_reverse(multi_cond_emb, lengths, scale)
+
+        elif self.stage in ['vae']:
+            motions = batch['motion']
+            z, dist_m = self.vae.encode(motions, lengths)
+
+        with torch.no_grad():
+            feats_rst = self.vae.decode(z, lengths)
+            # feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
+
+        joints = self.feats2joints(feats_rst.detach().cpu())
+
+        return remove_padding(joints, lengths)
+    
+    def forward_step1_warmup_withOurSceneDataset(self, batch):
+        print("forward_step1_warmup_withOurSceneDataset")
+        lengths = batch["length"]
+        # style
+        motion = batch["style_motion"].clone()
+        motion[...,:3] = 0
+
+
+        # content
+        content_motion = batch['content_motion']
+        content_motion = (content_motion - self.mean.to(content_motion.device))/self.std.to(content_motion.device)
+
+        # trajectory
+        trans_motion = content_motion.clone()
+        # 
+        content_motion[...,:3] = 0
+
+
+        scale = batch["tag_scale"]
+        lengths1 = [content_motion.shape[1]]* content_motion.shape[0]
+        
+        if self.cfg.TEST.COUNT_TIME:
+            self.starttime = time.time()
+            
+        if self.stage in ['diffusion', 'vae_diffusion']:\
+            #add style text in test
+            
+            
+            # content motion
+            with torch.no_grad():
+                z, dist_m = self.vae.encode(content_motion.float(), lengths1)
+            uncond_tokens = torch.cat([z, z], dim = 1).permute(1,0,2)
+            motion_emb_content = uncond_tokens
+
+            # style motion
+            lengths11 = [motion.shape[1]]* motion.shape[0]
+
+# for motion input (bs,60,22,3)->(bs,22,3,60)
+            # motion_seq = feats_ref*std + mean
+            motion_seq = motion.unsqueeze(-1).permute(0,2,3,1)
+
+
+            motion_emb = self.motionclip.encoder({'x': motion_seq.float(),
+                            'y': torch.zeros(motion_seq.shape[0], dtype=int, device=motion_seq.device),
+                            'mask': lengths_to_mask(lengths11, device=motion_seq.device)})["mu"]
+            motion_emb = motion_emb.unsqueeze(1)
+
+            # cfree
+            uncond_motion_emb = torch.zeros(motion_emb.shape).to(motion_seq.device)
+            motion_emb = torch.cat([uncond_motion_emb, motion_emb], dim=0)
+
+            # gendurations = torch.ones((12, 1), dtype=int) * 100
+            # generation = self.motionclip.generate(motion_emb.permute(1,0,2), gendurations,
+            #                     is_amass=True,
+            #                     is_clip_features=True)
+            # fff = generation['output_xyz']
+            # fff = fff.permute(0,3,1,2)
+            # fff = fff.cpu().numpy()
+            # np.save("eee.npy",fff)
+
+            # trajectory
+            trans_cond = trans_motion[...,:3]
+            uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
+
+            # three conditions
+            multi_cond_emb = [motion_emb_content, motion_emb, uncond_trans]
+
+
+            z = self._diffusion_reverse(multi_cond_emb, lengths, scale)
+
+        elif self.stage in ['vae']:
+            motions = batch['motion']
+            z, dist_m = self.vae.encode(motions, lengths)
+
+        with torch.no_grad():
+            feats_rst = self.vae.decode(z, lengths)
+            # feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
+
+        joints = self.feats2joints(feats_rst.detach().cpu())
+
+        return remove_padding(joints, lengths)
+
+    # 学习CLIP和FiLM调控的forward函数
+    def forward(self, batch):
+        if self.cfg.LOSS.USE_SCENE_CLS == False and self.cfg.TRAIN.ABLATION.FUSION_MODE == "film":
+            return self.forward_wo_sceneLoss(batch)
+        elif self.cfg.LOSS.USE_SCENE_CLS == True and self.cfg.TRAIN.ABLATION.FUSION_MODE == "film":
+            # return self.forward_allModel3Branch(batch)
+            return self.forward_wo_sceneLoss(batch)
+        
 
     def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None):
         # 1. 自动判断 CFG 模式
@@ -732,43 +949,79 @@ class MLD(BaseModel):
             
         scene_feat = scene_feat_raw.unsqueeze(1) # [B, 1, 512]
 
-        # 【新增：对style motion进行随机的corrupt，为了强迫模型看scene的信息】
-        if self.cfg.LOSS.USE_SCENE_CLS:
-            corruption_mask = torch.rand(bsz, 1, 1, device=self.device) < self.cfg.LOSS.CORRUPTION_PROB 
-            # 生成随机缩放系数 (0.1 ~ 0.6)，让 Style 变得很弱
-            scaling_factor = 0.1 + 0.5 * torch.rand(bsz, 1, 1, device=self.device)
-            motion_emb = torch.where(corruption_mask, motion_emb_raw * scaling_factor, motion_emb_raw)  # torch.where(condition, x, y),如果condition符合，取x，否则取y
+        # # 【新增：对style motion进行随机的corrupt，为了强迫模型看scene的信息】
+        # if self.cfg.LOSS.USE_SCENE_CLS:
+        #     corruption_mask = torch.rand(bsz, 1, 1, device=self.device) < self.cfg.LOSS.CORRUPTION_PROB 
+        #     # 生成随机缩放系数 (0.1 ~ 0.6)，让 Style 变得很弱
+        #     scaling_factor = 0.1 + 0.5 * torch.rand(bsz, 1, 1, device=self.device)
+        #     motion_emb = torch.where(corruption_mask, motion_emb_raw * scaling_factor, motion_emb_raw)  # torch.where(condition, x, y),如果condition符合，取x，否则取y
+        motion_emb = motion_emb_raw
 
+        # 默认全部保留
+        mask_style = torch.zeros(bsz, dtype=torch.bool, device=self.device)
+        mask_scene = torch.zeros(bsz, dtype=torch.bool, device=self.device)
+        probs = torch.rand(bsz, device=self.device)
+        # 设定阈值
+        # [0, 0.5): Keep Both
+        # [0.5, 0.7): Drop Style (Keep Scene Only) -> 强迫模型看 Beta
+        mask_style[probs >= 0.5] = True 
+        mask_style[probs >= 0.7] = False # 0.7以上 Style 恢复回来
 
-        mask_style = torch.rand(bsz, device=self.device) < self.guidance_uncodp
+        # [0.7, 0.9): Drop Scene (Keep Style Only) -> 退化为 MCM-LDM
+        mask_scene[probs >= 0.7] = True
+        mask_scene[probs >= 0.9] = False # 0.9以上 Scene 恢复回来
+
+        # [0.9, 1.0): Drop Both (Uncond)
+        mask_style[probs >= 0.9] = True
+        mask_scene[probs >= 0.9] = True
+
+        # 应用 Mask
         motion_emb[mask_style] = 0 
-
-        # 10% 概率完全丢弃 Scene (Uncond Scene)
-        mask_scene = torch.rand(bsz, device=self.device) < 0.1 # 【NOTE:先写死成0.1，后面会做成可以炼丹的超参】
         scene_feat[mask_scene] = 0
 
         # trans condition
         trans_cond = batch["motion"][...,:3]  # torch.Size([32, 40, 3])
-        traj_drop_mask = torch.rand(trans_cond.shape[0], 1, 1, device=trans_cond.device) > 0.5
-        trans_cond = trans_cond * traj_drop_mask  # 尝试让生成的动作“偏离轨迹”，看一下效果# 2.没有轨迹的学习
+        # traj_drop_mask = torch.rand(trans_cond.shape[0], 1, 1, device=trans_cond.device) > 0.5
+        # trans_cond = trans_cond * traj_drop_mask  # 尝试让生成的动作“偏离轨迹”，看一下效果# 2.没有轨迹的学习
 
-        # 3. 生成 FiLM 参数
-        scene_feat_norm = self.scene_norm(scene_feat)  # 这句归一化应该是必不可少的，不然尺度都对不上
-        film_params = self.film_mlp(scene_feat_norm)  # torch.Size([32, 1, 1024])
-        gamma_raw, beta_raw = film_params.chunk(2, dim=-1)  # 两个都是torch.Size([32, 1, 512])
+        if self.cfg.TRAIN.ABLATION.FUSION_MODE == "film":
+            # 3. 生成 FiLM 参数
+            scene_feat_norm = self.scene_norm(scene_feat)  # 这句归一化应该是必不可少的，不然尺度都对不上
+            film_params = self.film_mlp(scene_feat_norm)  # torch.Size([32, 1, 1024])
+            # 【修正开始：强制让被 Mask 的样本不产生 FiLM 调制】
+            # 这一步非常重要！确保当没有 Scene 时，FiLM 是 Identity (gamma=1, beta=0)
+            # 这里的 mask_scene 维度是 [B]，需要扩展为 [B, 1, 1] 才能乘 film_params
+            mask_scene_expanded = mask_scene.unsqueeze(1).unsqueeze(2).float() # [B, 1, 1]
+            
+            # 如果 mask 为 1 (True)，则让 film_params 变 0
+            film_params = film_params * (1 - mask_scene_expanded)
+            # 【修正结束】
+            gamma_raw, beta_raw = film_params.chunk(2, dim=-1)  # 两个都是torch.Size([32, 1, 512])
+            
+            # 维度对齐 [Batch, 1, 512]，在刚开始train的时候，gamma是1，beta是0，相当于一个zero映射，不破坏网络本来的学习
+            gamma = (1.0 + torch.tanh(gamma_raw)) # [Batch, 1, 512]
+            beta = beta_raw                 # [Batch, 1, 512]
+
+            # 执行融合 (先 Mask Style，后 FiLM)
+            # 1. 如果 Style 被 Mask，Scene 没被 Mask -> Output = Beta (纯场景)
+            # 2. 如果 Style 没 Mask，Scene 被 Mask -> Output = Style (纯风格)
+            # 3. 如果都存在 -> Output = Modulated Style (融合)
+            # 4. 如果都 Mask -> Output = 0 (无条件)
+            adapted_style_emb = gamma * motion_emb + beta  # torch.Size([32, 1, 512])  注意：这里用的 motion_emb 可能是被 Corrupt 或 Mask 过的
+        elif self.cfg.TRAIN.FUSION_MODE == "add":
+            # a. 为了公平比较，也对 scene_feat 做归一化
+            scene_feat_norm = self.scene_norm(scene_feat)
+            
+            # b. 直接相加。因为 motion_emb 和 scene_feat 在这之前已经被 mask 过了，
+            #    所以这里的逻辑是天然正确的：
+            # 当 Style Masked -> 0 + scene_feat = scene_feat (纯场景)
+            # 当 Scene Masked -> motion_emb + 0 = motion_emb (纯风格)
+            adapted_style_emb = motion_emb + scene_feat_norm
+        else:
+            raise ValueError(f"Unsupported fusion mode: {self.cfg.TRAIN.FUSION_MODE}. Should be 'film' or 'add'.")
         
-        # 维度对齐 [Batch, 1, 512]，在刚开始train的时候，gamma是1，beta是0，相当于一个zero映射，不破坏网络本来的学习
-        gamma = (1.0 + torch.tanh(gamma_raw)) # [Batch, 1, 512]
-        beta = beta_raw                 # [Batch, 1, 512]
-
-        # 执行融合 (先 Mask Style，后 FiLM)
-        # 1. 如果 Style 被 Mask，Scene 没被 Mask -> Output = Beta (纯场景)
-        # 2. 如果 Style 没 Mask，Scene 被 Mask -> Output = Style (纯风格)
-        # 3. 如果都存在 -> Output = Modulated Style (融合)
-        # 4. 如果都 Mask -> Output = 0 (无条件)
-        adapted_style_emb = gamma * motion_emb + beta  # torch.Size([32, 1, 512])  注意：这里用的 motion_emb 可能是被 Corrupt 或 Mask 过的
         adapted_style_emb = self.style_norm(adapted_style_emb)
-
+ 
         # three condition
         # multi_cond_emb = [cond_emb, motion_emb, trans_cond] # 复习一下： cond_emb：内容（torch.Size([32, 7, 256])），motion_emb：风格（torch.Size([32, 1, 512])），trans_cond：轨迹（torch.Size([32, 40, 3])）
         # scene_emb: 我们新增的场景的自然语言描述：torch.Size([32, 1, 512])
@@ -827,8 +1080,46 @@ class MLD(BaseModel):
             loss_scene = torch.nn.functional.cross_entropy(logits, scene_ids)
 
             n_set['loss_scene'] = loss_scene * self.cfg.LOSS.LAMBDA_SCENE
+            n_set['style_mask'] = mask_style
+            n_set['scene_mask'] = mask_scene
         
         return {**n_set}
+
+
+    # def train_diffusion_forward(self, batch):
+    #     feats_ref = batch["motion"]
+    #     feats_content = batch["motion"].clone()
+    #     feats_content[...,:3] = 0.0
+    #     lengths = batch["length"]
+        
+    #     # content condition
+    #     with torch.no_grad():
+    #         z, dist = self.vae.encode(feats_ref, lengths)
+    #         z_content, dist = self.vae.encode(feats_content, lengths)
+    #         cond_emb = z_content.permute(1,0,2)            
+    #     # style condition
+    #     motion_seq = feats_ref*self.std + self.mean
+    #     motion_seq[...,:3]=0.0
+    #     motion_seq = motion_seq.unsqueeze(-1).permute(0,2,3,1)
+    #     motion_emb = self.motionclip.encoder({'x': motion_seq,
+    #                     'y': torch.zeros(motion_seq.shape[0], dtype=int, device='cuda:{}'.format(self.cfg["DEVICE"][0])),
+    #                     'mask': lengths_to_mask(lengths, device='cuda:{}'.format(self.cfg["DEVICE"][0]))})["mu"]
+    #     motion_emb = motion_emb.unsqueeze(1)
+    #     mask_uncond = torch.rand(motion_emb.shape[0]) < self.guidance_uncodp
+    #     motion_emb[mask_uncond, ...] = 0
+        
+
+
+    #     # trans condition
+    #     trans_cond = batch["motion"][...,:3]
+
+    #     # three condition
+    #     multi_cond_emb = [cond_emb, motion_emb, trans_cond]
+
+
+    #     # diffusion process return with noise and noise_pred
+    #     n_set = self._diffusion_process(z, multi_cond_emb, lengths)
+    #     return {**n_set}
 
 
 
@@ -1042,8 +1333,38 @@ class MLD(BaseModel):
             if loss_diff is None:
                 raise ValueError(
                     "Loss is None, this happend with torchmetrics > 0.7")
-            loss_scene = rs_set.get("loss_scene", 0.0)
-            total_loss = loss_diff + loss_scene
+            loss_scene = rs_set.get("loss_scene", torch.tensor(0.0).to(loss_diff.device)) 
+            # 获取 scene_mask，它告诉我们哪些样本的 Scene 条件被 drop 掉了 (True)
+            if split == 'train' and rs_set.get('scene_mask', None) is not None:
+                scene_mask = rs_set['scene_mask'] # shape: [B]
+            else:
+                scene_mask = torch.zeros(rs_set['noise_pred'].shape[0], dtype=torch.bool, device=self.device)
+            # is_scene_present 的地方是 True，代表 Scene 条件存在
+            is_scene_present = ~scene_mask 
+            
+            # 如果当前 batch 中，没有任何一个样本是需要学习 Scene 的，
+            # 那么 loss_scene 应该是 0，我们也不需要做任何特殊处理。
+            if not is_scene_present.any():
+                total_loss = loss_diff + loss_scene # loss_scene is 0 here
+            else:
+                # 【核心逻辑】
+                # 对于那些 Scene 条件存在的样本，我们降低 loss_diff 的权重。
+                # 这是一种“软性”的对比：我们不直接计算特征差异，而是调整学习目标。
+                
+                # 这是一个近似，但非常有效：
+                # 我们计算一下这个 batch 里，有多少比例的样本是带 Scene 的
+                scene_ratio = is_scene_present.float().mean()
+                
+                # 根据这个比例，我们动态调整 loss_diff 的权重
+                # Scene 样本越多，loss_diff 的权重就越低
+                diffusion_penalty_factor = self.cfg.LOSS.get("DIFFUSION_PENALTY", 0.5)
+                
+                # (1 - scene_ratio) * 1.0  => 对没有 scene 的样本，权重是 1.0
+                # scene_ratio * penalty_factor => 对有 scene 的样本，权重是 penalty_factor
+                # 这是一个平滑的、在 batch 级别上的权重调整
+                dynamic_diff_weight = (1 - scene_ratio) * 1.0 + scene_ratio * diffusion_penalty_factor
+                
+                total_loss = loss_diff * dynamic_diff_weight + loss_scene
 
         # # Compute the metrics - currently evaluate results from text to motion
         # if split in ["val", "test"]:

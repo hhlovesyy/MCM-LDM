@@ -1762,12 +1762,19 @@ class Scene100StyleDataset(data.Dataset):
         motion = torch.tensor(motion).float() # 转 Tensor
 
         scene_id = self.SCENE_TO_ID[scene_label]
-        
+
         # 2. 获取 Scene Text (LLM Description)
         # 如果字典里没找到，就回退到原始 Label
         if scene_label in SCENE_DESCRIPTIONS:
+            # 80%的概率是SCENE_DESCRIPTIONS[scene_label][-2]，20%的概率是随机选
+            random_prob = random.random() # [0.0, 1.0)
+            if  random_prob < 0.8:
+                scene_text_raw = SCENE_DESCRIPTIONS[scene_label][-2]
+            else:
+                scene_text_raw = random.choice(SCENE_DESCRIPTIONS[scene_label])
             # 随机选一条，增加数据的多样性
-            scene_text_raw = random.choice(SCENE_DESCRIPTIONS[scene_label])
+            # scene_text_raw = random.choice(SCENE_DESCRIPTIONS[scene_label])
+            # scene_text_raw = scene_text_raw
         else:
             # Fallback
             scene_text_raw = f"A person moving in {scene_label} environment."
@@ -1785,17 +1792,18 @@ class Scene100StyleDataset(data.Dataset):
         has_image = False
         scene_image = torch.zeros(3, 224, 224) # 默认全黑
         
-        if os.path.exists(scene_dir):
-            files = [f for f in os.listdir(scene_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
-            if len(files) > 0:
-                # 随机选一张
-                img_name = random.choice(files)
-                try:
-                    img = Image.open(os.path.join(scene_dir, img_name)).convert("RGB")
-                    scene_image = self.image_transform(img)
-                    has_image = True
-                except:
-                    pass # 读取失败就还是全黑
+        # if os.path.exists(scene_dir):
+        #     files = [f for f in os.listdir(scene_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+        #     if len(files) > 0:
+        #         # 随机选一张
+        #         img_name = random.choice(files)
+        #         try:
+        #             img = Image.open(os.path.join(scene_dir, img_name)).convert("RGB")
+        #             scene_image = self.image_transform(img)
+        #             has_image = True
+        #         except:
+        #             pass # 读取失败就还是全黑
+        has_image = False
         
         # -----------------------------------------------------------
         # 返回值 (Tuple) - 注意顺序！

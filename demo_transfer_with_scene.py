@@ -227,7 +227,7 @@ def main():
     logger.info("Loading checkpoints from {}".format(cfg.TEST.CHECKPOINTS))
     state_dict = torch.load(cfg.TEST.CHECKPOINTS,
                             map_location="cpu")["state_dict"]
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(state_dict, strict=False)
     # model.load_state_dict(state_dict, strict=False)
     logger.info("model {} loaded".format(cfg.model.model_type))
     model.sample_mean = cfg.TEST.MEAN

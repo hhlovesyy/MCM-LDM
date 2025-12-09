@@ -147,6 +147,14 @@ def parse_args(phase="train"):
             help="output dir",
         )
         group.add_argument(
+            "--output_path",
+            type=str,
+            required=False,
+            default=None,
+            help="output path for evaluation",
+        )
+        
+        group.add_argument(
             "--allinone",
             action="store_true",
             required=False,
@@ -244,6 +252,13 @@ def parse_args(phase="train"):
         cfg.TEST.FOLDER = params.out_dir if params.dir else cfg.TEST.FOLDER
         cfg.DEMO.REPLICATION = params.replication
         cfg.DEMO.OUTALL = params.allinone
+        # 🌟 关键新增逻辑：处理 --output_path 🌟
+        if params.output_path is not None:
+            # TODO: 将 "cfg.DEMO.SAVE_PATH_FOR_EVAL" 替换为您实际的配置字段
+            cfg.DEMO.SAVE_PATH_FOR_EVAL = params.output_path
+            print(f"Overriding evaluation output path with: {params.output_path}")
+        else:
+            cfg.DEMO.SAVE_PATH_FOR_EVAL = None
 
     if phase == "render":
         if params.npy:

@@ -5,12 +5,12 @@
 # ==============================================================================
 
 # 基础配置路径
-CONFIG_MLD="./configs/config_mld_humanml3d.yaml"
+CONFIG_MLD="./configs/config_mld_humanml3d_with_scene.yaml"
 CONFIG_ASSETS="./configs/assets.yaml"
 SCALE="2.5"
 
 # 模型名称 (用于生成输出文件名的一部分)
-EXP_NAME="SceMoDiff_Evaluation" # 假设您有一个统一的实验名称
+EXP_NAME="SceMoDiff_Evaluation_3" # 假设您有一个统一的实验名称
 EVAL_ID=0
 
 # 期望的输出基础目录（两个生成脚本的输出应该都在这个目录下）

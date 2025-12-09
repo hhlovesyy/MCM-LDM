@@ -23,7 +23,38 @@ from mld.utils.logger import create_logger
 from visual import visual_pos  
 
 
-
+SCENE_CONFIG = {
+    # 1. 独木桥 (Dumuqiao)
+    "Dumuqiao": "Walking on a narrow bridge.",
+    # 2. 低矮通道 (DiAiTongDao)
+    "DiAiTongDao": "Crouching while walking.",
+    # 3. 水坑地面 (ShuiKengDiMian)
+    "ShuiKengDiMian": "Walking on muddy ground.",
+    # 4. 玻璃房间 (BoLiFangJian)
+    "BoLiFangJian": "Walking in a glass room.",
+    # 5. T台走秀 (T_Stage)
+    "T_Stage":"Fashion model walking.",
+    # 6. 拥挤场合 (CroudedPlace)
+    "CroudedPlace": "Walking through a crowd.",
+    # 7. 低矮天花板 (DiAiTianhuaban)
+    "DiAiTianhuaban": "Walking under a low ceiling.",
+    # 8. 酒吧/醉酒 (Bar)
+    "Bar": "Drunk walking.",
+    # 9. 雪地/沙地 (WalkInSnowOrSand)
+    "WalkInSnowOrSand": "Walking in deep snow.",
+    # 10. 摸黑 (Dark)
+    "Dark": "Walking in the dark.",
+    # 11. 左倾 (LeanLeft)
+    "LeanLeft": "Leaning left.",
+    # 12. 潮湿地面 (WetFloor)
+    "WetFloor": "Slippery floor.",
+    # 13. 暴风雨 (BaoFengYu)
+    "BaoFengYu": "Walking in strong wind.",
+    # 14. 冰面 (IcyRoad)
+    "IcyRoad": "Walking on ice."
+}
+SCENE_NAMES = list(SCENE_CONFIG.keys())
+SCENE_TEXTS = list(SCENE_CONFIG.values())
 
 
 
@@ -43,6 +74,8 @@ def main():
     3 
 
     """
+    print("Available scenes for style transfer:", SCENE_NAMES)
+    print("Corresponding descriptions:", SCENE_TEXTS)
     # parse options
     cfg = parse_args(phase="demo")
     cfg.FOLDER = cfg.TEST.FOLDER
@@ -84,15 +117,15 @@ def main():
     logger.info("Loading checkpoints from {}".format(cfg.TEST.CHECKPOINTS))
     state_dict = torch.load(cfg.TEST.CHECKPOINTS,
                             map_location="cpu")["state_dict"]
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(state_dict, strict=False)
     logger.info("model {} loaded".format(cfg.model.model_type))
     model.sample_mean = cfg.TEST.MEAN
     model.fact = cfg.TEST.FACT
     model.to(device)
     model.eval()
 
-
-
+    import random
+    random_scene_text = random.choice(SCENE_TEXTS)
 
 
     # MOTION = cfg.DEMO.MOTION
@@ -139,8 +172,12 @@ def main():
                 texts_lst = []
 
                 # prepare batch data
-                batch = {"length": lengths, "style_motion": style_motion, "tag_scale": scale, "content_motion": content_motion}
-                joints,_ = model(batch)
+                batch = {"length": lengths, "style_motion": style_motion, "tag_scale": scale, "content_motion": content_motion,
+                        # "scene_text": [random_scene_text], # 每次都随机挑一个
+                        "scene_text": [""],
+                        "has_image": torch.tensor([False], device=device),
+                        "scene_image": torch.zeros(1, 3, 224, 224, device=device)}
+                joints = model(batch)
                 # npypath = str(output_dir /
                 #             f"{content_file_name}_{style_file_name}_{str(lengths[0])}_scale_{str(scale).replace('.','-')}.npy")
                 # np.save(npypath, joints[0].detach().cpu().numpy())

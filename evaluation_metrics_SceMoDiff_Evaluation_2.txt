@@ -1,0 +1,17 @@
+--- Evaluation Metrics for SceMoDiff_Evaluation_2 ---
+Run Date: SceMoDiff_Evaluation_2
+=========================================
+FMD (fid_gen): 49.62874092990842
+CRA (accuracy_gen_top1): 0.221875
+SRA (accuracy_trans_top1): 0.5222222222222223
+Loading PKL: /root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceMoDiff_Evaluation_2/crafmd-0_expname_SceMoDiff_Evaluation_2_scale_2-5.pkl...
+Evaluating 1600 samples...
+  0%|          | 0/1600 [00:00<?, ?it/s] 22%|██▏       | 345/1600 [00:00<00:00, 3442.61it/s] 45%|████▍     | 719/1600 [00:00<00:00, 3615.35it/s] 68%|██████▊   | 1081/1600 [00:00<00:00, 3579.83it/s] 91%|█████████▏| 1463/1600 [00:00<00:00, 3673.87it/s]100%|██████████| 1600/1600 [00:00<00:00, 3635.04it/s]
+
+========================================
+RESULTS for crafmd-0_expname_SceMoDiff_Evaluation_2_scale_2-5.pkl
+Evaluated samples: 1600
+========================================
+TSI: 1.3943
+FSF: 2.1289
+========================================
