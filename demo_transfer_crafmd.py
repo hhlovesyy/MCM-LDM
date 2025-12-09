@@ -59,11 +59,17 @@ def main():
     eval_name = "content"
     eval_id = 0
 
-    # chekpoints_str = cfg.TEST.CHECKPOINTS.split("/")[-1].split(".")[0].split("=")[1]
-    save_path = Path(os.path.join(cfg.FOLDER, str(cfg.model.model_type), str(cfg.NAME)))
-    save_path.mkdir(parents=True, exist_ok=True)
-    save_path = os.path.join(save_path, eval_name+'-'+str(eval_id)+'_expname_'+str(cfg.NAME)+"_scale_"+str(cfg.DEMO.scale).replace('.','-') + '.pkl')
-    
+    logger.info("cfg.DEMO.SAVE_PATH_FOR_EVAL: {}".format(cfg.DEMO.SAVE_PATH_FOR_EVAL))
+    # 如果有提供保存的路径，使用保存的路径，并创建文件夹，给出logger的信息
+    if cfg.DEMO.SAVE_PATH_FOR_EVAL is not None:
+         save_path = cfg.DEMO.SAVE_PATH_FOR_EVAL
+    else:
+        # chekpoints_str = cfg.TEST.CHECKPOINTS.split("/")[-1].split(".")[0].split("=")[1]
+        save_path = Path(os.path.join(cfg.FOLDER, str(cfg.model.model_type), str(cfg.NAME)))
+        save_path.mkdir(parents=True, exist_ok=True)
+        save_path = os.path.join(save_path, eval_name+'-'+str(eval_id)+'_expname_'+str(cfg.NAME)+"_scale_"+str(cfg.DEMO.scale).replace('.','-') + '.pkl')
+    # 打印一下save_path，确认没有问题，用logger.info
+    logger.info(f"save_path: {save_path}")
 
     # cuda options
     if cfg.ACCELERATOR == "gpu":
@@ -134,7 +140,7 @@ def main():
 
                 # prepare batch data
                 batch = {"length": lengths, "style_motion": style_motion, "tag_scale": scale, "content_motion": content_motion}
-                joints = model(batch)
+                joints,_ = model(batch)
                 # npypath = str(output_dir /
                 #             f"{content_file_name}_{style_file_name}_{str(lengths[0])}_scale_{str(scale).replace('.','-')}.npy")
                 # np.save(npypath, joints[0].detach().cpu().numpy())

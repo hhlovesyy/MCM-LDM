@@ -50,3 +50,5 @@ Thumbs.db
 style_translator_dataset.pt
 /visual_pkl
 /local_clip_model
+
+/demo
