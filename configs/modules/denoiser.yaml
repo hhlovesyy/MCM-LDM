@@ -20,3 +20,4 @@ denoiser:
     nfeats: ${DATASET.NFEATS}
     nclasses: ${DATASET.NCLASSES}
     ablation: ${TRAIN.ABLATION}
+    use_update_baseline: ${SCENE_MODIFF_ABLATION.UPDATE_BASELINE}

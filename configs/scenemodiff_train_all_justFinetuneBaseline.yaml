@@ -4,8 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-# 消融实验的路径
-NAME: SceneMoDiff_Ablation_FinetuneBaseline_notUpdate
+NAME: scenemoDiff_1210_TrainAll_JustFinetuneBaseline_NotUpdate
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -17,13 +16,15 @@ ACCELERATOR: 'gpu'
 DEVICE: [0]
 
 SCENE_MODIFF_ABLATION:
-  FUSION_MODE: "mlp"  # 消融的话是“mlp”
-  USE_SCENE_CLS: True     # 是否使用场景分类 Loss，消融掉的话是False
+  FUSION_MODE: "film"  # 消融的话是“mlp”
+  USE_SCENE_CLS: True      # 是否使用场景分类 Loss，消融掉的话是False
   LAMBDA_SCENE: 0.2       # 场景分类 Loss 的权重，如果测试消融FiLM的话，这个值不要改；如果要尝试炼丹，估计先试试改这个值
   DIFFUSION_PENALTY: 0.5  # 这个值先别炼丹了，估计没什么用，这个指的是有场景的样本会把 diffsion loss往下压一点点，让模型更关注场景
   UPDATE_BASELINE: False  # 保持这个就挺好，这个是论文里面写的那个涨点模块，没崩了就一直开着吧
 
-  JUST_FINETUNE_BASELINE: True # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
+  JUST_FINETUNE_BASELINE: True # 只微调 baseline 部分，没有新增模块，只有这个里面是True
+
+
 
 #####################################
 # The following are training settings
@@ -39,15 +40,19 @@ TRAIN:
   # Size of batches
   BATCH_SIZE: 32
   # Total epochs for training
-  END_EPOCH: 500
+  END_EPOCH: 200
 
   RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
-  # PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
   PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
+  # PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll/checkpoints/epoch=69.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
-    LR: 1e-5 # Learning rate
+    LR: 2e-5 # Learning rate
+    # 【关键】为 Denoiser 设置一个很小的学习率，进行微调
+    LR_DENOISER: 1.0e-5
+    # 【关键】可以适当降低新模块的学习率，因为它们已经 warm-up 过了
+    LR_ADAPTER: 1.0e-4
   # Ablation study configurations.
   ABLATION:
     SKIP_CONNECT: True
@@ -69,7 +74,7 @@ EVAL:
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=149.ckpt'
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_JustFinetuneBaseline_NotUpdate/checkpoints/epoch=74.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage_withNewLossFunc/checkpoints/epoch=49.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
@@ -78,12 +83,11 @@ TEST:
   NUM_SAMPLES: 1
   FACT: 1
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
-  # MULTI_MODAL_TEXT_PROMPT: 'Walking on a narrow bridge.'
-  # MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.' # 'Walking on a narrow bridge.'
-  MULTI_MODAL_TEXT_PROMPT: 'Walking under a low ceiling.'
+  # MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
+  MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
   MULTI_MODAL_IMAGE_PATH: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene/scene_images/Dumuqiao/01.jpg'
-  CFG_STYLE : 2.5
-  CFG_SCENE : 5.0
+  CFG_STYLE : 10.0
+  CFG_SCENE : 10.0
 
 #####################################
 # The following are basic datasets settings
@@ -111,11 +115,11 @@ LOSS:
   LAMBDA_PRIOR: 0.0
   DIST_SYNC_ON_STEP: False # Sync Losses on step when distributed trained
 
-  USE_SCENE_CLS: True       # 【总开关】是否使用场景分类 Loss
-  LAMBDA_SCENE: 0.3        # 【权重】分类 Loss 的权重
-  CORRUPTION_PROB: 0.5      # 【策略】训练时有多大概率破坏 Style，强迫模型学 Scene
+  USE_SCENE_CLS: False      # 【总开关】是否使用场景分类 Loss
+  LAMBDA_SCENE: 0.2       # 【权重】分类 Loss 的权重
+  CORRUPTION_PROB: 0.7      # 【策略】训练时有多大概率破坏 Style，强迫模型学 Scene
 
-#####################################
+#####################################`
 # The following are basic model settings
 #####################################
 model:
@@ -135,7 +139,7 @@ model:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 50
+  SACE_CHECKPOINT_EPOCH: 25
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True
@@ -145,4 +149,4 @@ LOGGER:
     RESUME_ID: null
   
 TRAIN_STRTEGY:
-  MULTI_MODAL_FUSION: "select"  # 会使用图像/文本的一侧，概率各50%, 也可以设置为 "text" 或 "image"(表示为纯文本或者纯图像)
+  MULTI_MODAL_FUSION: "text"  # 会使用图像/文本的一侧，概率各50%, 也可以设置为 "text" 或 "image"(表示为纯文本或者纯图像)

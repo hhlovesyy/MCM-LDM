@@ -22,8 +22,24 @@ from mld.utils.logger import create_logger
 
 from visual import visual_pos  
 
+SCENE_LIST = sorted([
+    "BaoFengYu",        # 暴风雨
+    "Bar",              # 酒吧
+    "BoLiFangJian",     # 玻璃房间
+    "CroudedPlace",     # 拥挤
+    "Dark",             # 黑暗
+    "DiAiTianhuaban",   # 低矮天花板
+    "DiAiTongDao",      # 低矮通道
+    "Dumuqiao",         # 独木桥
+    "IcyRoad",          # 冰面
+    "LeanLeft",         # 左倾
+    "ShuiKengDiMian",   # 水坑
+    "T_Stage",          # T台
+    "WalkInSnowOrSand", # 雪地/沙地
+    "WetFloor"          # 湿地
+])
 
-SCENE_CONFIG = {
+SCENE_DESCRIPTIONS = {
     # 1. 独木桥 (Dumuqiao)
     "Dumuqiao": "Walking on a narrow bridge.",
     # 2. 低矮通道 (DiAiTongDao)
@@ -53,9 +69,6 @@ SCENE_CONFIG = {
     # 14. 冰面 (IcyRoad)
     "IcyRoad": "Walking on ice."
 }
-SCENE_NAMES = list(SCENE_CONFIG.keys())
-SCENE_TEXTS = list(SCENE_CONFIG.values())
-
 
 
 def main():
@@ -74,8 +87,6 @@ def main():
     3 
 
     """
-    print("Available scenes for style transfer:", SCENE_NAMES)
-    print("Corresponding descriptions:", SCENE_TEXTS)
     # parse options
     cfg = parse_args(phase="demo")
     cfg.FOLDER = cfg.TEST.FOLDER
@@ -125,7 +136,6 @@ def main():
     model.eval()
 
     import random
-    random_scene_text = random.choice(SCENE_TEXTS)
 
 
     # MOTION = cfg.DEMO.MOTION
@@ -138,6 +148,8 @@ def main():
     save_all["id"]=[]
     save_all["label_content"]=[]
     save_all["label_style"]=[]
+    save_all["label_scene"] = [] # <--- 【新增】用于存储 GT 场景标签
+    save_all["scene_id"] = []    # <--- 【新增】用于存储 GT 场景的数字 ID
 
     for content in os.listdir(content_path):
 
@@ -165,6 +177,9 @@ def main():
             style_motion = np.array([style_motion])
             style_motion = torch.tensor(style_motion).to(device)
 
+            random_scene_name = random.choice(SCENE_LIST)
+            scene_text = SCENE_DESCRIPTIONS[random_scene_name]
+            scene_id = SCENE_LIST.index(random_scene_name) # 获取场景对应的数字ID
 
             with torch.no_grad():
                 rep_lst = []    
@@ -173,8 +188,8 @@ def main():
 
                 # prepare batch data
                 batch = {"length": lengths, "style_motion": style_motion, "tag_scale": scale, "content_motion": content_motion,
-                        # "scene_text": [random_scene_text], # 每次都随机挑一个
-                        "scene_text": [""],
+                        "scene_text": [scene_text], # 每次都随机挑一个
+                        # "scene_text": [""],
                         "has_image": torch.tensor([False], device=device),
                         "scene_image": torch.zeros(1, 3, 224, 224, device=device)}
                 joints = model(batch)
@@ -186,6 +201,8 @@ def main():
                 save_all["id"].append(idid)
                 save_all["label_content"].append(content_file_name.split("-")[-1])
                 save_all["label_style"].append(style_file_name.split("-")[-1])
+                save_all["label_scene"].append(random_scene_name) # <--- 【新增】
+                save_all["scene_id"].append(scene_id)             # <--- 【新增】
 
 
     

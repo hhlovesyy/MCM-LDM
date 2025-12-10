@@ -1,0 +1,3 @@
+--- Evaluation Metrics for SceMoDiff_Evaluation_MLPandLoss ---
+Run Date: Wed Dec 10 19:38:04 CST 2025
+=========================================

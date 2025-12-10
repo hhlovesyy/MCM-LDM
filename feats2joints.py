@@ -16,10 +16,10 @@ from visual import visual_pos
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_dir", type=str, required=False, default="/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_test_feats", help="Folder containing .npy (263 dims)")
-    parser.add_argument("--output_dir", type=str, required=False, default="/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_test_joints", help="Folder to save .npy (22x3 joints)")
+    parser.add_argument("--output_dir", type=str, required=False, default="/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_test_joints_vis", help="Folder to save .npy (22x3 joints)")
     parser.add_argument("--mean_path", type=str, required=False,default="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Mean.npy", help="Path to Mean.npy")
     parser.add_argument("--std_path", type=str, required=False, default="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Std.npy", help="Path to Std.npy")
-    parser.add_argument("--vis_count", type=int, default=3, help="Visualize first N samples to check")
+    parser.add_argument("--vis_count", type=int, default=50, help="Visualize first N samples to check")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)

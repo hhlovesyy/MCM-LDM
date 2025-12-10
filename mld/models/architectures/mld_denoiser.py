@@ -244,6 +244,7 @@ class MldDenoiser(nn.Module):
                  text_encoded_dim: int = 256,
                  motion_encoded_dim: int = 512,
                  nclasses: int = 10,
+                 use_update_baseline: bool = False,
                  **kwargs) -> None:
 
         super().__init__()
@@ -307,6 +308,8 @@ class MldDenoiser(nn.Module):
         self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
         # self.scene_adapter = SceneStyleAdapterFiLM(style_dim=self.latent_dim, scene_dim=512)
         self.scene_adapter = SceneStyleAdaptorSimple(style_dim=self.latent_dim, scene_dim=512)
+        self.use_update_baseline = use_update_baseline
+        print("Use update baseline:", self.use_update_baseline)
 
 
     def forward(self,
@@ -356,8 +359,15 @@ class MldDenoiser(nn.Module):
         
         # to dit blocks (N, T, D)
         xseq = self.query_pos(xseq).permute(1,0,2) # torch.Size([32, 13, 256])
-        for block in self.blocks:
-            xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
+
+        combined_emb = style_emb_latent + trans_emb
+        if self.use_update_baseline:
+            for block in self.blocks:
+                xseq = block(xseq, combined_emb, combined_emb)
+        else:
+            # print("not use update baseline")
+            for block in self.blocks:
+                xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
         sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
        
 

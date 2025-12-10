@@ -5,7 +5,7 @@
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
 # 消融实验的路径
-NAME: SceneMoDiff_Ablation_FinetuneBaseline_notUpdate
+NAME: SceneMoDiff_Ablation_FinetuneBaseline
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -17,11 +17,11 @@ ACCELERATOR: 'gpu'
 DEVICE: [0]
 
 SCENE_MODIFF_ABLATION:
-  FUSION_MODE: "mlp"  # 消融的话是“mlp”
-  USE_SCENE_CLS: True     # 是否使用场景分类 Loss，消融掉的话是False
+  FUSION_MODE: "film"  # 消融的话是“mlp”
+  USE_SCENE_CLS: False      # 是否使用场景分类 Loss，消融掉的话是False
   LAMBDA_SCENE: 0.2       # 场景分类 Loss 的权重，如果测试消融FiLM的话，这个值不要改；如果要尝试炼丹，估计先试试改这个值
   DIFFUSION_PENALTY: 0.5  # 这个值先别炼丹了，估计没什么用，这个指的是有场景的样本会把 diffsion loss往下压一点点，让模型更关注场景
-  UPDATE_BASELINE: False  # 保持这个就挺好，这个是论文里面写的那个涨点模块，没崩了就一直开着吧
+  UPDATE_BASELINE: True  # 保持这个就挺好，这个是论文里面写的那个涨点模块，没崩了就一直开着吧
 
   JUST_FINETUNE_BASELINE: True # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
 
@@ -69,8 +69,9 @@ EVAL:
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=149.ckpt'
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_JustFinetuneBaseline_NotUpdate/checkpoints/epoch=74.ckpt'
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_JustFinetuneBaseline/checkpoints/epoch=49.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_JustFinetuneBaseline_NotUpdate/checkpoints/epoch=74.ckpt'
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
   BATCH_SIZE: 128 # training Batch size
@@ -78,9 +79,9 @@ TEST:
   NUM_SAMPLES: 1
   FACT: 1
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
-  # MULTI_MODAL_TEXT_PROMPT: 'Walking on a narrow bridge.'
+  MULTI_MODAL_TEXT_PROMPT: 'Walking on a narrow bridge.'
   # MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.' # 'Walking on a narrow bridge.'
-  MULTI_MODAL_TEXT_PROMPT: 'Walking under a low ceiling.'
+  # MULTI_MODAL_TEXT_PROMPT: 'Walking on ice.'
   MULTI_MODAL_IMAGE_PATH: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene/scene_images/Dumuqiao/01.jpg'
   CFG_STYLE : 2.5
   CFG_SCENE : 5.0

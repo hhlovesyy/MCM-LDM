@@ -4,7 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-NAME: scenemoDiff_1210_TrainAll_Recover
+NAME: scenemoDiff_1210_TrainAll_LOSS0_2_100Epoch
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -14,6 +14,17 @@ DEBUG: False
 ACCELERATOR: 'gpu'
 # Index of GPUs eg. [0] or [0,1,2,3]
 DEVICE: [0]
+
+SCENE_MODIFF_ABLATION:
+  FUSION_MODE: "film"  # 消融的话是“mlp”
+  USE_SCENE_CLS: True      # 是否使用场景分类 Loss，消融掉的话是False
+  LAMBDA_SCENE: 0.2       # 场景分类 Loss 的权重，如果测试消融FiLM的话，这个值不要改；如果要尝试炼丹，估计先试试改这个值
+  DIFFUSION_PENALTY: 0.5  # 这个值先别炼丹了，估计没什么用，这个指的是有场景的样本会把 diffsion loss往下压一点点，让模型更关注场景
+  UPDATE_BASELINE: True  # 保持这个就挺好，这个是论文里面写的那个涨点模块，没崩了就一直开着吧
+
+  JUST_FINETUNE_BASELINE: False # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
+
+
 
 #####################################
 # The following are training settings
@@ -33,8 +44,8 @@ TRAIN:
 
   RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
-  # PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
-  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll/checkpoints/epoch=69.ckpt'
+  PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
+  # PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll/checkpoints/epoch=69.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
     LR: 2e-5 # Learning rate
@@ -128,7 +139,7 @@ model:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 10
+  SACE_CHECKPOINT_EPOCH: 25
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True
