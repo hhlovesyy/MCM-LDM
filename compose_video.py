@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 # MoviePy v2.x 导入
-from moviepy import VideoFileClip, ImageClip, clips_array, TextClip, CompositeVideoClip
+from moviepy import VideoFileClip, ImageClip, clips_array, TextClip, CompositeVideoClip, ColorClip
 
 def main():
     parser = argparse.ArgumentParser()
@@ -14,66 +14,80 @@ def main():
         
     files = config['files']
     cols = config['grid_cols']
-    padding = int(config['padding']) # 确保是整数
+    padding = int(config['padding'])
     
     clips = []
+    
+    # --- 1. 加载素材 ---
     for fname in files:
-        # 1. 加载素材
         if fname.endswith('.mp4'):
             clip = VideoFileClip(fname)
         else:
             clip = ImageClip(fname).with_duration(5) 
             
-        # 2. 调整大小 (Resize)
+        # 调整大小
         try:
+            target_width = 512
             if hasattr(clip, 'resized'):
-                clip = clip.resized(width=512)
+                clip = clip.resized(width=target_width)
             else:
-                clip = clip.resize(width=512)
+                clip = clip.resize(width=target_width)
         except Exception as e:
             print(f"Warning: Resize failed for {fname}: {e}")
             
-        # 3. 【核心修复】添加边距 (Padding)
-        # 在这里给每个 Clip 加边框，替代 clips_array 的 padding 参数
-        # margin值 = padding / 2，这样两个视频并排时，中间的间距就是 padding
+        # 添加边距 (Margin)
         margin_size = int(padding / 2)
         try:
+            # 确保 margin 也是整数
             if hasattr(clip, 'with_margin'):
-                # MoviePy v2.x
                 clip = clip.with_margin(margin_size, color=(255, 255, 255))
             else:
-                # MoviePy v1.x
                 clip = clip.margin(margin_size, color=(255, 255, 255))
         except Exception as e:
             print(f"Warning: Margin failed: {e}")
-        
-        # 4. 加标签 (跳过以防报错)
-        if config['draw_labels']:
-            pass 
             
         clips.append(clip)
-        
-    # 5. 补齐网格
+
+    if not clips:
+        print("No clips loaded.")
+        return
+
+    # --- 2. 补齐网格 (Fix NoneType Error) ---
     rows = (len(clips) + cols - 1) // cols
     grid = []
+    
+    # 获取参考尺寸和时长，用于创建空白占位符
+    ref_w, ref_h = clips[0].size
+    ref_duration = clips[0].duration
+    
     for r in range(rows):
         row_clips = clips[r*cols : (r+1)*cols]
+        
+        # 填充空白
         while len(row_clips) < cols:
-            row_clips.append(None) 
+            # 创建一个白色的空白片段代替 None
+            try:
+                # MoviePy v2写法: ColorClip(size=..., color=..., duration=...)
+                blank = ColorClip(size=(ref_w, ref_h), color=(255, 255, 255), duration=ref_duration)
+            except:
+                # 备用写法
+                blank = ColorClip(size=(ref_w, ref_h), color=(255, 255, 255)).with_duration(ref_duration)
+                
+            row_clips.append(blank)
+            
         grid.append(row_clips)
         
-    # 6. 拼接
-    # 【核心修复】移除了 padding 参数，保留 bg_color
+    # --- 3. 拼接 ---
     try:
         final_clip = clips_array(grid, bg_color=(255, 255, 255))
     except TypeError:
-        # 如果 bg_color 也报错（极少数版本），就只传 grid
         final_clip = clips_array(grid)
     
-    # 7. 输出
-    # codec='libx264' 确保兼容性
-    final_clip.write_videofile(config['output_path'], fps=24, codec='libx264')
-    print(f"Montage saved to {config['output_path']}")
+    # --- 4. 输出 ---
+    # 使用 libx264 编码，fps 24
+    output_path = config['output_path']
+    final_clip.write_videofile(output_path, fps=24, codec='libx264')
+    print(f"Montage saved to {output_path}")
 
 if __name__ == "__main__":
     main()

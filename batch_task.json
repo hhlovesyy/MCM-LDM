@@ -3,23 +3,15 @@
     "content_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_motion",
     "style_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/style_motion",
     "contents": [
-        "walk_and_turn.npy",
-        "walk_circle.npy"
+        "walk_and_turn.npy"
     ],
     "styles": [
-        "hands_high.npy",
-        "open_leg.npy"
+        "old.npy"
     ],
     "scenes": [
-        "Dumuqiao",
-        "BaoFengYu",
-        "DiAiTongDao",
-        "Dark",
-        "ShuiKengDiMian",
-        "WetFloor",
-        "T_Stage"
+        "Dumuqiao"
     ],
-    "render_mp4": false,
+    "render_mp4": true,
     "scalars": [
         0.0,
         0.5,
@@ -28,5 +20,5 @@
         2.0,
         3.0
     ],
-    "output_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0116"
+    "output_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0242"
 }

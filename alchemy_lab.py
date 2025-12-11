@@ -875,11 +875,10 @@ elif mode == "沪爷工具箱":
     
     tab1, tab2 = st.tabs(["🧩 批量排列组合 (Matrix Gen)", "🎞️ 视频拼贴 (Montage)"])
     
-    # --- Tab 1: 批量生成 ---
     with tab1:
         st.subheader("1. 配置生成矩阵")
         
-        # A. 选择 Checkpoint (基础)
+        # A. 选择 Checkpoint
         exp_root = os.path.join(ROOT_DIR, "experiments", "mld")
         if os.path.exists(exp_root):
             exps = sorted(os.listdir(exp_root), key=lambda x: os.path.getmtime(os.path.join(exp_root, x)), reverse=True)
@@ -895,7 +894,7 @@ elif mode == "沪爷工具箱":
         
         col_c, col_s, col_p = st.columns(3)
         
-        # B. 选择 Content & Style (多选)
+        # B. 选择 Content & Style
         demo_root = os.path.join(ROOT_DIR, "demo")
         subdirs = [d for d in os.listdir(demo_root) if os.path.isdir(os.path.join(demo_root, d))]
         
@@ -911,10 +910,9 @@ elif mode == "沪爷工具箱":
             s_files = [f for f in os.listdir(s_path) if f.endswith('.npy')]
             sel_styles = st.multiselect("选择 Style (多选)", s_files, default=s_files[:1], key="tb_s")
         
-        # 加一个是否渲染MP4的按钮
-        render_mp4 = st.checkbox("渲染 MP4 视频", value=True, key="tb_render_mp4")
+        render_mp4 = st.checkbox("顺便生成 MP4 视频 (会变慢)", value=True, key="tb_render_mp4")
 
-        # C. 选择 Scene (多选)
+        # C. 选择 Scene
         SCENE_KEYS = [
             "Dumuqiao", "DiAiTongDao", "ShuiKengDiMian", "BoLiFangJian", "T_Stage", 
             "CroudedPlace", "DiAiTianhuaban", "Bar", "WalkInSnowOrSand", "Dark", 
@@ -923,7 +921,7 @@ elif mode == "沪爷工具箱":
         with col_p:
             sel_scenes = st.multiselect("选择 Scene (多选)", SCENE_KEYS, default=["Dumuqiao"], key="tb_sc")
         
-        # D. Scalar 设置 (大功能2)
+        # D. Scalar 设置
         st.divider()
         st.write("🔧 Scene Scalar 设置 (插值实验)")
         do_interpolation = st.checkbox("开启 Scalar 插值 (0.0 -> 3.0)", value=False)
@@ -931,7 +929,8 @@ elif mode == "沪爷工具箱":
             scalar_list_str = st.text_input("Scalar 列表 (逗号分隔)", "0.0, 0.5, 1.0, 1.5, 2.0, 3.0")
             scalars = [float(x.strip()) for x in scalar_list_str.split(',')]
         else:
-            scalars = [3.0] # 默认值
+            # 默认只跑 3.0 看效果
+            scalars = [3.0]
             
         # E. 生成按钮
         if st.button("🚀 开始批量生成 (Batch Generate)", type="primary"):
@@ -939,7 +938,21 @@ elif mode == "沪爷工具箱":
                 st.error("请完善选择！")
                 st.stop()
                 
-            # 1. 生成 Task Config JSON
+            # 1. 自动定位该 Checkpoint 对应的 launcher_config.yaml
+            # 这是一个关键修复：必须用训练时的配置，否则模型结构对不上，Scene模块可能会失效
+            ckpt_dir_abs = os.path.dirname(sel_ckpt)       # .../checkpoints
+            exp_dir_abs = os.path.dirname(ckpt_dir_abs)    # .../ExperimentName
+            potential_yaml = os.path.join(exp_dir_abs, "launcher_config.yaml")
+            
+            if os.path.exists(potential_yaml):
+                launcher_yaml = potential_yaml
+                st.success(f"✅ 成功锁定实验配置: `{os.path.basename(launcher_yaml)}`")
+            else:
+                # 兜底
+                launcher_yaml = os.path.join(ROOT_DIR, "configs", "scenemodiff_train_LiandanBase.yaml")
+                st.warning(f"⚠️ 未找到专属配置，使用兜底配置: `{os.path.basename(launcher_yaml)}` (可能导致效果不佳!)")
+
+            # 2. 生成 Task JSON
             task_config = {
                 "checkpoint": sel_ckpt,
                 "content_dir": c_path,
@@ -956,31 +969,45 @@ elif mode == "沪爷工具箱":
             with open(task_json_path, 'w') as f:
                 json.dump(task_config, f, indent=4)
                 
-            # 2. 准备 Config yaml (借用 launcher_config)
-            launcher_yaml = os.path.join(ROOT_DIR, "configs", "scenemodiff_train_LiandanBase.yaml") # 兜底
-            if os.path.exists(os.path.join(os.path.dirname(sel_ckpt), "../launcher_config.yaml")):
-                launcher_yaml = os.path.join(os.path.dirname(sel_ckpt), "../launcher_config.yaml")
-                
-            # 3. 运行新的 Python 脚本
-            # 我们需要创建一个新的脚本 batch_gen.py (我会把代码给你)
-            # 3. 运行新的 Python 脚本
+            # 3. 构造命令 (关键：日志重定向)
             batch_script = os.path.join(ROOT_DIR, "batch_gen.py")
-            # 加上 --nodebug 防止 tqdm 甚至报错
-            cmd = f"python {batch_script} --task_json {task_json_path} --cfg {launcher_yaml} --cfg_assets {ASSETS_FILE}"
+            log_file = os.path.join(ROOT_DIR, "batch_gen.log") # 定义日志文件
             
-            # 生成 Session Name
+            # 使用 > log_file 2>&1 把所有输出（包括print）写入文件
+            # 加上 --nodebug 关闭 tqdm 的动态刷新
+            python_cmd = f"python {batch_script} --task_json {task_json_path} --cfg {launcher_yaml} --cfg_assets {ASSETS_FILE}"
+            final_cmd = f"{python_cmd} > {log_file} 2>&1"
+
             session_id = f"batch_gen_{datetime.datetime.now().strftime('%H%M%S')}"
             
-            run_in_screen(cmd, session_id)
+            # 4. 运行
+            run_in_screen(final_cmd, session_id)
             
-            st.success("🚀 批量生成任务已启动！")
+            st.success("🚀 任务已启动！")
+            st.info(f"读取权重: {sel_ckpt}") # 修复了之前的 st.info 语法错误
+            st.info(f"结果输出: `{task_config['output_dir']}`")
+            st.warning("⚠️ 请展开下方日志查看器，确认 Scalar 是否正确注入！")
+
+    # --- 日志查看器 (新增) ---
+    st.divider()
+    with st.expander("🔍 实时日志查看器 (不再乱码)", expanded=True):
+        log_file = os.path.join(ROOT_DIR, "batch_gen.log")
+        col_l1, col_l2 = st.columns([1, 5])
+        with col_l1:
+            if st.button("🔄 刷新日志"):
+                pass
+        with col_l2:
+            st.caption(f"正在读取: {log_file}")
             
-            # 【新增】显示直达指令
-            st.markdown("### 🔍 监控指令 (复制到 Terminal 运行):")
-            st.code(f"screen -D -r {session_id}", language="bash")
-            
-            st.info(f"结果将输出至: `{task_config['output_dir']}`")
-            st.caption("提示：在 Screen 中按 `Ctrl+A` 然后按 `D` 可以退出查看并保持后台运行。")
+        if os.path.exists(log_file):
+            try:
+                # 读取最后 100 行
+                lines = subprocess.check_output(f"tail -n 100 {log_file}", shell=True).decode("utf-8", errors='ignore')
+                st.code(lines, language="text")
+            except Exception as e:
+                st.error(f"日志读取失败: {e}")
+        else:
+            st.info("日志文件尚未生成，请点击开始生成...")
 
     # --- Tab 2: 视频拼贴 ---
     with tab2:

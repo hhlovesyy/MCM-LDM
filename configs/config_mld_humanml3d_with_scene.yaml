@@ -78,8 +78,8 @@ TEST:
   NUM_SAMPLES: 1
   FACT: 1
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
-  # MULTI_MODAL_TEXT_PROMPT: 'Walking on a narrow bridge.'
-  MULTI_MODAL_TEXT_PROMPT: 'Leaning left.'
+  MULTI_MODAL_TEXT_PROMPT: 'Walking on a narrow bridge.'
+  # MULTI_MODAL_TEXT_PROMPT: 'Leaning left.'
   # MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.' # 'Walking on a narrow bridge.'
   # MULTI_MODAL_TEXT_PROMPT: 'Walking under a low ceiling.'
   # MULTI_MODAL_TEXT_PROMPT: 'Walking in the dark.'
