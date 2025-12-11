@@ -4,7 +4,7 @@ ACCELERATOR: 'gpu'
 DEVICE: [0]
 
 SCENE_MODIFF_ABLATION:
-  FUSION_MODE: "mlp"  # 消融的话是“mlp”
+  FUSION_MODE: "film"  # 消融的话是“mlp”
   USE_SCENE_CLS: True      # 是否使用场景分类 Loss，消融掉的话是False
   LAMBDA_SCENE: 0.2       # 场景分类 Loss 的权重，如果测试消融FiLM的话，这个值不要改；如果要尝试炼丹，估计先试试改这个值
   DIFFUSION_PENALTY: 0.5  # 这个值先别炼丹了，估计没什么用，这个指的是有场景的样本会把 diffsion loss往下压一点点，让模型更关注场景

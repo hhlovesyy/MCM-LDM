@@ -7,6 +7,7 @@ import copy  # <--- 新增这一行！非常重要！
 import time
 import glob
 import re
+import json
 
 # ================= 配置路径 =================
 ROOT_DIR = "/root/autodl-tmp/MyRepository/MCM-LDM"
@@ -14,6 +15,7 @@ CONFIG_DIR = os.path.join(ROOT_DIR, "configs")
 BASE_YAML_PATH = os.path.join(CONFIG_DIR, "scenemodiff_train_LiandanBase.yaml")
 TRAIN_SCRIPT = os.path.join(ROOT_DIR, "train.py")
 ASSETS_FILE = os.path.join(CONFIG_DIR, "assets.yaml")
+STATE_FILE = os.path.join(ROOT_DIR, "alchemy_state.json") # 保存状态的文件
 
 # ================= 页面设置 =================
 st.set_page_config(page_title="沪爷 智能炼丹炉", layout="wide", page_icon="🔥")
@@ -21,9 +23,45 @@ st.set_page_config(page_title="沪爷 智能炼丹炉", layout="wide", page_icon
 st.title("🔥 沪爷 智能炼丹控制台")
 st.markdown("Varsapura！上海萨普！")
 
-# ================= 左侧导航栏 =================
-mode = st.sidebar.radio("选择模式", ["我要炼丹 (Training)", "我要推理 (Inference)", "我要评估 (Eval)", "看看你的：渲染 (Render)"])
+# ================= 状态持久化函数 (小功能1) =================
+def save_state(key, value):
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, 'r') as f:
+                data = json.load(f)
+        else:
+            data = {}
+        data[key] = value
+        with open(STATE_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"State save failed: {e}")
 
+def load_state(key, default=None):
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, 'r') as f:
+                data = json.load(f)
+            return data.get(key, default)
+    except:
+        pass
+    return default
+
+# 初始化 Session State (从文件加载)
+if 'init_loaded' not in st.session_state:
+    st.session_state.last_exp_name = load_state('last_exp_name', "SceneMo_Default")
+    st.session_state.last_mode = load_state('last_mode', "炼丹 (Training)")
+    st.session_state.init_loaded = True
+
+# ================= 左侧导航栏 =================
+modes = ["我要炼丹 (Training)", "我要推理 (Inference)", "我要评估 (Eval)", "看看你的：渲染 (Render)", "沪爷工具箱", "我要玩原神！"]
+# 自动选中上次的模式
+default_mode_idx = modes.index(st.session_state.last_mode) if st.session_state.last_mode in modes else 0
+mode = st.sidebar.radio("选择模式", modes, index=default_mode_idx)
+
+# 保存当前模式选择
+if mode != st.session_state.last_mode:
+    save_state('last_mode', mode)
 # ================= 功能函数 =================
 def load_yaml(path):
     with open(path, 'r') as f:
@@ -37,8 +75,23 @@ def run_in_screen(command, session_name):
     """在 Screen 会话中后台运行命令"""
     # -dmS 创建一个 detached session
     # bash -c '...; exec bash' 让任务跑完后窗口不关闭，方便查看报错
-    full_cmd = f"screen -dmS {session_name} bash -c 'cd {ROOT_DIR}; {command}; echoW ----------------Task Finished----------------; exec bash'"
+    full_cmd = f"screen -dmS {session_name} bash -c 'cd {ROOT_DIR}; {command}; echo ----------------Task Finished----------------; exec bash'"
     subprocess.Popen(full_cmd, shell=True)
+
+
+
+# ================= 小功能2: 进程查看器 =================
+st.sidebar.divider()
+st.sidebar.subheader("进程监控 (Process Monitor)")
+if st.sidebar.checkbox("显示 Python 进程"):
+    try:
+        # 查找包含 'train.py' 或 'demo' 的 python 进程
+        cmd = "ps -ef | grep python | grep -v grep | grep -E 'train.py|demo|render|eval'"
+        proc_output = subprocess.check_output(cmd, shell=True).decode("utf-8")
+        st.sidebar.code(proc_output if proc_output else "无相关进程运行")
+        st.sidebar.caption("提示：使用 `kill -9 PID` 终止进程")
+    except:
+        st.sidebar.warning("查询进程失败")
 
 # ================= 1. 炼丹模式 =================
 if mode == "我要炼丹 (Training)":
@@ -148,7 +201,9 @@ if mode == "我要炼丹 (Training)":
         batch_size = st.number_input("Batch Size", value=int(train_config.get('BATCH_SIZE', 32)))
         end_epoch = st.number_input("End Epoch", value=int(train_config.get('END_EPOCH', 100)))
         
-        exp_name = st.text_input("Experiment NAME (文件夹名)", key="k_exp_name")
+        # exp_name = st.text_input("Experiment NAME (文件夹名)", key="k_exp_name")
+        exp_name = st.text_input("Experiment NAME", value=st.session_state.last_exp_name)
+
 
     # ================= 预览与执行 =================
     st.divider()
@@ -181,6 +236,7 @@ if mode == "我要炼丹 (Training)":
         # 2. 保存 YAML 到实验目录
         new_yaml_path = os.path.join(exp_dir, "launcher_config.yaml")
         save_yaml(new_config, new_yaml_path)
+        save_state('last_exp_name', exp_name)
         st.info(f"📄 配置已保存: {new_yaml_path}")
         
         # 3. 构造命令
@@ -196,7 +252,7 @@ if mode == "我要炼丹 (Training)":
         - **Session**: `{screen_name}`
         - **Config**: `{new_yaml_path}`
         
-        查看进度: `screen -r {screen_name}`
+        查看进度: `screen -D -r {screen_name}`
         """)
     
 elif mode == "我要推理 (Inference)":
@@ -325,7 +381,7 @@ elif mode == "我要推理 (Inference)":
             
             # 使用正则替换 scene_scalar = x.x
             # 假设源码里是 scene_scalar = 1.0 或 scene_scalar=1.0
-            new_code = re.sub(r"scene_scalar\s*=\s*[\d\.]+", f"scene_scalar = {scene_scalar}", code_content)
+            new_code = re.sub(r"DEFAULT_SCALAR_VAL\s*=\s*[\d\.]+", f"DEFAULT_SCALAR_VAL = {scene_scalar}", code_content)
             
             with open(mld_py_path, 'w', encoding='utf-8') as f:
                 f.write(new_code)
@@ -359,7 +415,7 @@ elif mode == "我要推理 (Inference)":
         
         **Check Progress:**
         ```bash
-        screen -r {screen_name}
+        screen -D -r {screen_name}
         ```
         *(推理结果会保存在 /root/autodl-tmp/MyRepository/MCM-LDM/results/mld 下面，可以去查看)*
         """)
@@ -743,6 +799,272 @@ elif mode == "看看你的：渲染 (Render)":
                     st.error(f"读取日志失败: {e}")
             else:
                 st.warning("日志文件尚未生成")
+
+elif mode ==  "我要玩原神！":
+    st.header("☕ 赛博休息室 (Cyber Lounge)")
+    st.markdown("炼丹太累了？模型还在跑？不如... **启动！**")
+    
+    st.info("💡 提示：由于云游戏通常禁止 Iframe 嵌入，如果下方窗口无法加载，请点击【🚀 极速启动】跳转游玩。")
+
+    # 定义游戏列表
+    games = [
+        {
+            "name": "云·原神 (Genshin Cloud)",
+            "img": "https://upload-os-bbs.hoyolab.com/upload/2025/10/09/189410651/2bc99939f22736a99711676d19e8481d_7407059174228803606.png", # 官网图
+            "url": "https://ys.mihoyo.com/cloud/#/",
+            "desc": "异世相遇，尽享美味。网页版直接玩，无需下载。"
+        },
+        {
+            "name": "云·星穹铁道 (SR Cloud)",
+            "img": "https://upload-os-bbs.hoyolab.com/upload/2023/04/30/32436303/08665ec33163976368a0d4197d54882e_3608120779189690477.png",
+            "url": "https://sr.mihoyo.com/cloud/",
+            "desc": "银河列车，即刻出发。但这回合还没结束！"
+        },
+        {
+            "name": "绝区零 (ZZZ)",
+            "img": "https://n.sinaimg.cn/spider20241206/650/w1440h810/20241206/b6fa-fcb1051e317effb2a1f9b63e72b4a0dd.jpg",
+            "url": "https://zzz.mihoyo.com/", 
+            "desc": "好久不见，绳匠。虽然网页云端可能还没全开，先去官网看看？"
+        }
+    ]
+
+    # 布局：三列展示
+    cols = st.columns(3)
+    
+    for i, game in enumerate(games):
+        with cols[i]:
+            st.subheader(game["name"])
+            # 显示封面图 (如果加载失败也没事，只是装饰)
+            try:
+                st.image(game["img"], use_container_width=True)
+            except:
+                st.warning("图片加载失败")
+                
+            st.caption(game["desc"])
+            
+            # 跳转按钮 (最稳的方案)
+            st.link_button(f"🚀 启动 {game['name']}", game["url"], type="primary")
+
+    st.divider()
+
+    # 尝试嵌入 (For Fun)
+    st.subheader("🖥️ 尝试原地嵌入 (Experimental)")
+    target_game = st.selectbox("选择要尝试嵌入的游戏", [g["name"] for g in games])
+    target_url = next(g["url"] for g in games if g["name"] == target_game)
+    
+    if st.checkbox("尝试强制加载 (可能会白屏/拒绝连接)", value=False):
+        st.markdown(f'<iframe src="{target_url}" width="100%" height="800px" style="border:none;"></iframe>', unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="padding: 20px; border: 2px dashed #444; border-radius: 10px; text-align: center; color: #666;">
+            嵌入模式已关闭 (通常云游戏会拦截嵌入请求)<br>建议使用上方的跳转按钮
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 甚至可以加一个白噪音/音乐播放器（如果你有mp3链接的话）
+    st.divider()
+    st.caption("🎵 休息一下，为了更好的炼丹。")
+
+elif mode == "沪爷工具箱":
+    st.header("🧰 智能Demo生成工坊 (The Factory)")
+    
+    st.markdown("""
+    这里集成了 **排列组合生成**、**标量插值 (Scalar Interpolation)** 和 **视频拼贴 (Montage)** 功能。
+    用于一键产出 Demo 视频或 PPT 素材。
+    """)
+    
+    tab1, tab2 = st.tabs(["🧩 批量排列组合 (Matrix Gen)", "🎞️ 视频拼贴 (Montage)"])
+    
+    # --- Tab 1: 批量生成 ---
+    with tab1:
+        st.subheader("1. 配置生成矩阵")
+        
+        # A. 选择 Checkpoint (基础)
+        exp_root = os.path.join(ROOT_DIR, "experiments", "mld")
+        if os.path.exists(exp_root):
+            exps = sorted(os.listdir(exp_root), key=lambda x: os.path.getmtime(os.path.join(exp_root, x)), reverse=True)
+            sel_exp = st.selectbox("选择实验权重", exps, key="tb_exp")
+            ckpt_dir = os.path.join(exp_root, sel_exp, "checkpoints")
+            if os.path.exists(ckpt_dir):
+                ckpts = glob.glob(os.path.join(ckpt_dir, "*.ckpt"))
+                sel_ckpt = st.selectbox("选择 CKPT", ckpts, format_func=os.path.basename, key="tb_ckpt")
+            else:
+                sel_ckpt = None
+        
+        st.divider()
+        
+        col_c, col_s, col_p = st.columns(3)
+        
+        # B. 选择 Content & Style (多选)
+        demo_root = os.path.join(ROOT_DIR, "demo")
+        subdirs = [d for d in os.listdir(demo_root) if os.path.isdir(os.path.join(demo_root, d))]
+        
+        with col_c:
+            c_dir = st.selectbox("Content 来源目录", subdirs, index=0, key="tb_cdir")
+            c_path = os.path.join(demo_root, c_dir)
+            c_files = [f for f in os.listdir(c_path) if f.endswith('.npy')]
+            sel_contents = st.multiselect("选择 Content (多选)", c_files, default=c_files[:1], key="tb_c")
+            
+        with col_s:
+            s_dir = st.selectbox("Style 来源目录", subdirs, index=min(1, len(subdirs)-1), key="tb_sdir")
+            s_path = os.path.join(demo_root, s_dir)
+            s_files = [f for f in os.listdir(s_path) if f.endswith('.npy')]
+            sel_styles = st.multiselect("选择 Style (多选)", s_files, default=s_files[:1], key="tb_s")
+        
+        # 加一个是否渲染MP4的按钮
+        render_mp4 = st.checkbox("渲染 MP4 视频", value=True, key="tb_render_mp4")
+
+        # C. 选择 Scene (多选)
+        SCENE_KEYS = [
+            "Dumuqiao", "DiAiTongDao", "ShuiKengDiMian", "BoLiFangJian", "T_Stage", 
+            "CroudedPlace", "DiAiTianhuaban", "Bar", "WalkInSnowOrSand", "Dark", 
+            "LeanLeft", "WetFloor", "BaoFengYu", "IcyRoad"
+        ]
+        with col_p:
+            sel_scenes = st.multiselect("选择 Scene (多选)", SCENE_KEYS, default=["Dumuqiao"], key="tb_sc")
+        
+        # D. Scalar 设置 (大功能2)
+        st.divider()
+        st.write("🔧 Scene Scalar 设置 (插值实验)")
+        do_interpolation = st.checkbox("开启 Scalar 插值 (0.0 -> 3.0)", value=False)
+        if do_interpolation:
+            scalar_list_str = st.text_input("Scalar 列表 (逗号分隔)", "0.0, 0.5, 1.0, 1.5, 2.0, 3.0")
+            scalars = [float(x.strip()) for x in scalar_list_str.split(',')]
+        else:
+            scalars = [3.0] # 默认值
+            
+        # E. 生成按钮
+        if st.button("🚀 开始批量生成 (Batch Generate)", type="primary"):
+            if not (sel_contents and sel_styles and sel_scenes and sel_ckpt):
+                st.error("请完善选择！")
+                st.stop()
+                
+            # 1. 生成 Task Config JSON
+            task_config = {
+                "checkpoint": sel_ckpt,
+                "content_dir": c_path,
+                "style_dir": s_path,
+                "contents": sel_contents,
+                "styles": sel_styles,
+                "scenes": sel_scenes,
+                "render_mp4": render_mp4,
+                "scalars": scalars,
+                "output_dir": os.path.join(ROOT_DIR, "results/mld", f"BatchGen_{datetime.datetime.now().strftime('%m%d_%H%M')}")
+            }
+            
+            task_json_path = os.path.join(ROOT_DIR, "batch_task.json")
+            with open(task_json_path, 'w') as f:
+                json.dump(task_config, f, indent=4)
+                
+            # 2. 准备 Config yaml (借用 launcher_config)
+            launcher_yaml = os.path.join(ROOT_DIR, "configs", "scenemodiff_train_LiandanBase.yaml") # 兜底
+            if os.path.exists(os.path.join(os.path.dirname(sel_ckpt), "../launcher_config.yaml")):
+                launcher_yaml = os.path.join(os.path.dirname(sel_ckpt), "../launcher_config.yaml")
+                
+            # 3. 运行新的 Python 脚本
+            # 我们需要创建一个新的脚本 batch_gen.py (我会把代码给你)
+            # 3. 运行新的 Python 脚本
+            batch_script = os.path.join(ROOT_DIR, "batch_gen.py")
+            # 加上 --nodebug 防止 tqdm 甚至报错
+            cmd = f"python {batch_script} --task_json {task_json_path} --cfg {launcher_yaml} --cfg_assets {ASSETS_FILE}"
+            
+            # 生成 Session Name
+            session_id = f"batch_gen_{datetime.datetime.now().strftime('%H%M%S')}"
+            
+            run_in_screen(cmd, session_id)
+            
+            st.success("🚀 批量生成任务已启动！")
+            
+            # 【新增】显示直达指令
+            st.markdown("### 🔍 监控指令 (复制到 Terminal 运行):")
+            st.code(f"screen -D -r {session_id}", language="bash")
+            
+            st.info(f"结果将输出至: `{task_config['output_dir']}`")
+            st.caption("提示：在 Screen 中按 `Ctrl+A` 然后按 `D` 可以退出查看并保持后台运行。")
+
+    # --- Tab 2: 视频拼贴 ---
+    with tab2:
+        st.subheader("2. 视频/图片拼贴 (Montage)")
+        st.caption("将多个渲染好的 MP4/PNG 拼成网格，用于 PPT 展示。")
+        
+        # === 文件夹选择逻辑 (二级联动) ===
+        montage_root = os.path.join(ROOT_DIR, "results", "mld")
+        
+        # 1. 第一级：选择实验文件夹
+        if os.path.exists(montage_root):
+            exp_dirs = [d for d in os.listdir(montage_root) if os.path.isdir(os.path.join(montage_root, d))]
+            exp_dirs = sorted(exp_dirs, key=lambda x: os.path.getmtime(os.path.join(montage_root, x)), reverse=True)
+        else:
+            exp_dirs = []
+            
+        if not exp_dirs:
+            st.warning("⚠️ 没找到实验结果文件夹")
+            st.stop()
+            
+        target_exp_name = st.selectbox("Step A: 选择实验文件夹", exp_dirs, key="montage_exp")
+        target_exp_path = os.path.join(montage_root, target_exp_name)
+        
+        # 2. 第二级：选择子文件夹 (通常是 _pkl 结尾的)
+        if os.path.exists(target_exp_path):
+            subdirs = [d for d in os.listdir(target_exp_path) if os.path.isdir(os.path.join(target_exp_path, d))]
+            subdirs = sorted(subdirs, key=lambda x: os.path.getmtime(os.path.join(target_exp_path, x)), reverse=True)
+            
+            # 加上“当前目录”选项，防止视频直接在根目录下
+            ROOT_OPTION = "Current Directory (.)"
+            subdir_options = [ROOT_OPTION] + subdirs
+            
+            target_subdir_name = st.selectbox("Step B: 选择素材子文件夹", subdir_options, key="montage_subdir")
+            
+            if target_subdir_name == ROOT_OPTION:
+                target_dir = target_exp_path
+            else:
+                target_dir = os.path.join(target_exp_path, target_subdir_name)
+                
+            st.info(f"📂 素材读取路径: `{target_dir}`")
+        else:
+            st.error("路径不存在")
+            st.stop()
+        
+        if os.path.exists(target_dir):
+            files = sorted(glob.glob(os.path.join(target_dir, "*.mp4")) + glob.glob(os.path.join(target_dir, "*.png")))
+            if files:
+                st.write(f"找到 {len(files)} 个素材文件")
+                
+                # 选择要拼接的文件
+                selected_files = st.multiselect("选择要拼接的文件 (按顺序)", files, default=files[:4], format_func=os.path.basename)
+                
+                if selected_files:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        grid_cols = st.number_input("网格列数", 2, 5, 2)
+                        padding = st.number_input("页边距 (px)", 0, 100, 10)
+                    with c2:
+                        title_text = st.text_input("大标题 (可选)", "SceneMoDiff Demo")
+                        draw_labels = st.checkbox("自动标注文件名", True)
+                    
+                    if st.button("🎬 开始拼接 (Compose)", type="primary"):
+                        # 生成拼接配置
+                        compose_config = {
+                            "files": selected_files,
+                            "grid_cols": grid_cols,
+                            "padding": padding,
+                            "title": title_text,
+                            "draw_labels": draw_labels,
+                            "output_path": os.path.join(target_dir, "Montage_Result.mp4")
+                        }
+                        
+                        compose_json_path = os.path.join(ROOT_DIR, "compose_task.json")
+                        with open(compose_json_path, 'w') as f:
+                            json.dump(compose_config, f, indent=4)
+                            
+                        # 调用拼接脚本 (需要安装 moviepy: pip install moviepy)
+                        compose_script = os.path.join(ROOT_DIR, "compose_video.py")
+                        cmd = f"python {compose_script} --task_json {compose_json_path}"
+                        
+                        run_in_screen(cmd, "montage_task")
+                        st.success("拼接任务已启动！")
+            else:
+                st.warning("文件夹为空")
 
 # ================= 侧边栏监控 =================
 st.sidebar.divider()

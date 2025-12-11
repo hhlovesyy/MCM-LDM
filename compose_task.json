@@ -1,0 +1,21 @@
+{
+    "files": [
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_hands_high_Sc_BaoFengYu_v0.0_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_hands_high_Sc_BaoFengYu_v0.5_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_hands_high_Sc_BaoFengYu_v1.0_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_hands_high_Sc_Dumuqiao_v0.0_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_open_leg_Sc_BaoFengYu_v0.0_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_hands_high_Sc_Dumuqiao_v1.0_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_hands_high_Sc_Dumuqiao_v0.5_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_open_leg_Sc_BaoFengYu_v0.5_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_open_leg_Sc_Dumuqiao_v0.0_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_open_leg_Sc_Dumuqiao_v0.5_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_open_leg_Sc_BaoFengYu_v1.0_mesh.png",
+        "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/C_walk_and_turn_S_open_leg_Sc_Dumuqiao_v1.0_mesh.png"
+    ],
+    "grid_cols": 2,
+    "padding": 10,
+    "title": "SceneMoDiff Demo",
+    "draw_labels": true,
+    "output_path": "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0035/test_pkl/Montage_Result.mp4"
+}

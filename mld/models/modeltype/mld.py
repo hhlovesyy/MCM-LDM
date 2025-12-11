@@ -47,6 +47,8 @@ import torch.nn as nn
 
 from .base import BaseModel
 
+DEFAULT_SCALAR_VAL = 1.0 
+
 class SimpleClassifier(nn.Module):
     def __init__(self, input_dim=512, num_classes=14):
         super().__init__()
@@ -602,7 +604,14 @@ class MLD(BaseModel):
                 
 
             # scene_feat_norm = self.scene_norm(scene_feat)
-            scene_scalar = 4.0
+            scene_scalar = batch.get("scene_scalar", DEFAULT_SCALAR_VAL) 
+            
+            # 如果传入的是 Tensor (单个数)，转为 float，防止乘法广播出问题
+            if isinstance(scene_scalar, torch.Tensor):
+                scene_scalar = scene_scalar.item()
+                
+            print(f"DEBUG: Using scene_scalar = {scene_scalar}") # 调试用，跑通后可注释
+            
             film_params = self.film_mlp(scene_feat * scene_scalar)
             gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
             gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1) # [B, 1, 512]
@@ -719,7 +728,7 @@ class MLD(BaseModel):
 
         with torch.no_grad():
             feats_rst = self.vae.decode(z, lengths)
-            feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
+            # feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
 
         joints = self.feats2joints(feats_rst.detach().cpu())
 

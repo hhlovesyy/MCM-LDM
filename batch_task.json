@@ -1,0 +1,32 @@
+{
+    "checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_LOSS0_2_100Epoch/checkpoints/epoch=74.ckpt",
+    "content_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_motion",
+    "style_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/style_motion",
+    "contents": [
+        "walk_and_turn.npy",
+        "walk_circle.npy"
+    ],
+    "styles": [
+        "hands_high.npy",
+        "open_leg.npy"
+    ],
+    "scenes": [
+        "Dumuqiao",
+        "BaoFengYu",
+        "DiAiTongDao",
+        "Dark",
+        "ShuiKengDiMian",
+        "WetFloor",
+        "T_Stage"
+    ],
+    "render_mp4": false,
+    "scalars": [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0
+    ],
+    "output_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0116"
+}
