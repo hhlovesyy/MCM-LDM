@@ -5,12 +5,12 @@
 # ==============================================================================
 
 # 基础配置路径
-CONFIG_MLD="./configs/use_for_evaluation.yaml"
+CONFIG_MLD="/root/autodl-tmp/MyRepository/MCM-LDM/configs/eval_temp_SceneMo_1211_1835_Full_FiLM_Loss.yaml"
 CONFIG_ASSETS="./configs/assets.yaml"
 SCALE="2.5"
 
 # 模型名称 (用于生成输出文件名的一部分)
-EXP_NAME="SceneMoDiff_Ablation_Res_FinetuneBaseline2200" # 假设您有一个统一的实验名称
+EXP_NAME="SceneMo_1211_1835_Full_FiLM_Loss_Eval" # 假设您有一个统一的实验名称
 EVAL_ID=0
 
 # 期望的输出基础目录（两个生成脚本的输出应该都在这个目录下）

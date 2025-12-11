@@ -71,7 +71,7 @@ TEST:
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=149.ckpt'
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_JustFinetuneBaseline/checkpoints/epoch=49.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_JustFinetuneBaseline_NotUpdate/checkpoints/epoch=74.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_JustFinetuneBaseline_NotUpdate/checkpoints/epoch=24.ckpt'
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
   BATCH_SIZE: 128 # training Batch size

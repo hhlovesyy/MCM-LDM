@@ -6,7 +6,7 @@
 # 定义 Python 脚本路径
 TRAIN_SCRIPT="/root/autodl-tmp/MyRepository/MCM-LDM/evaluate_sca.py"
 
-CONFIG_FILE="configs/config_mld_humanml3d_with_scene.yaml"
+CONFIG_FILE="/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/SceneMo_1211_1835_Full_FiLM_Loss/launcher_config.yaml"
 ASSETS_FILE="configs/assets.yaml"
 BATCH_SIZE="32"
 DEBUG_MODE="--nodebug"

@@ -286,7 +286,9 @@ if __name__ == '__main__':
     print(f"Collate fn: {collate_fn.__name__ if collate_fn else 'None'}")
     DEVICE = 'cuda:{}'.format(cfg["DEVICE"][0])
 
-    evaluate_sca("/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceneMoDiff_Ablation_Res_FinetuneBaseline2200/crafmd-0_expname_SceneMoDiff_Ablation_Res_FinetuneBaseline2200_scale_2-5.pkl", 
+    input_path = "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceneMo_1211_1835_Full_FiLM_Loss_Eval/crafmd-0_expname_SceneMo_1211_1835_Full_FiLM_Loss_Eval_scale_2-5.pkl"
+
+    evaluate_sca(input_path, 
                  "checkpoints/1204/scene_classifier.pth", 
                  "checkpoints/motionclip_checkpoint/motionclip.pth.tar", datamodule, DEVICE)
     # 运行debug的版本

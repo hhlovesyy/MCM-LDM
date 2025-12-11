@@ -602,7 +602,7 @@ class MLD(BaseModel):
                 
 
             # scene_feat_norm = self.scene_norm(scene_feat)
-            scene_scalar = 1.0
+            scene_scalar = 4.0
             film_params = self.film_mlp(scene_feat * scene_scalar)
             gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
             gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1) # [B, 1, 512]
