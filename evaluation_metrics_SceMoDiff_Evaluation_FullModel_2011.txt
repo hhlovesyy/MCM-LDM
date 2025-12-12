@@ -1,17 +1,0 @@
---- Evaluation Metrics for SceMoDiff_Evaluation_FullModel_2011 ---
-Run Date: SceMoDiff_Evaluation_FullModel_2011
-=========================================
-FMD (fid_gen): 59.73098615865331
-CRA (accuracy_gen_top1): 0.25375
-SRA (accuracy_trans_top1): 0.4766666666666667
-Loading PKL: /root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceMoDiff_Evaluation_FullModel_2011/crafmd-0_expname_SceMoDiff_Evaluation_FullModel_2011_scale_2-5.pkl...
-Evaluating 1600 samples...
-  0%|          | 0/1600 [00:00<?, ?it/s] 11%|█▏        | 181/1600 [00:00<00:00, 1803.51it/s] 28%|██▊       | 440/1600 [00:00<00:00, 2263.03it/s] 44%|████▎     | 698/1600 [00:00<00:00, 2407.28it/s] 60%|█████▉    | 954/1600 [00:00<00:00, 2464.68it/s] 76%|███████▌  | 1213/1600 [00:00<00:00, 2509.76it/s] 92%|█████████▏| 1476/1600 [00:00<00:00, 2548.53it/s]100%|██████████| 1600/1600 [00:00<00:00, 2462.55it/s]
-
-========================================
-RESULTS for crafmd-0_expname_SceMoDiff_Evaluation_FullModel_2011_scale_2-5.pkl
-Evaluated samples: 1600
-========================================
-TSI: 0.6117
-FSF: 1.8872
-========================================

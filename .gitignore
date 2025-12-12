@@ -52,3 +52,4 @@ style_translator_dataset.pt
 /local_clip_model
 
 /demo
+evaluation_metrics*.txt

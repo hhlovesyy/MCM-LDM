@@ -1,17 +1,0 @@
---- Evaluation Metrics for SceneMo_1211_1835_Full_FiLM_Loss_Eval ---
-Run Date: SceneMo_1211_1835_Full_FiLM_Loss_Eval
-=========================================
-FMD (fid_gen): 104.51538386250104
-CRA (accuracy_gen_top1): 0.16125
-SRA (accuracy_trans_top1): 0.1711111111111111
-Loading PKL: /root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceneMo_1211_1835_Full_FiLM_Loss_Eval/crafmd-0_expname_SceneMo_1211_1835_Full_FiLM_Loss_Eval_scale_2-5.pkl...
-Evaluating 1600 samples...
-  0%|          | 0/1600 [00:00<?, ?it/s] 10%|█         | 164/1600 [00:00<00:00, 1638.51it/s] 26%|██▌       | 419/1600 [00:00<00:00, 2173.20it/s] 41%|████      | 657/1600 [00:00<00:00, 2266.92it/s] 56%|█████▌    | 899/1600 [00:00<00:00, 2323.64it/s] 72%|███████▏  | 1148/1600 [00:00<00:00, 2381.12it/s] 88%|████████▊ | 1404/1600 [00:00<00:00, 2441.63it/s]100%|██████████| 1600/1600 [00:00<00:00, 2326.04it/s]
-
-========================================
-RESULTS for crafmd-0_expname_SceneMo_1211_1835_Full_FiLM_Loss_Eval_scale_2-5.pkl
-Evaluated samples: 1600
-========================================
-TSI: 0.0000
-FSF: 3.5926
-========================================

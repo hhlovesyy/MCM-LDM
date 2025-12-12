@@ -47,7 +47,7 @@ import torch.nn as nn
 
 from .base import BaseModel
 
-DEFAULT_SCALAR_VAL = 1.0 
+DEFAULT_SCALAR_VAL = 3.0 
 
 class SimpleClassifier(nn.Module):
     def __init__(self, input_dim=512, num_classes=14):

@@ -34,6 +34,7 @@ SCENE_DESCRIPTIONS = {
     "IcyRoad": "Walking on ice."
 }
 
+
 def main():
     # 1. 解析参数
     # 我们手动构建 parser，因为 mld 的 parse_args 会读取 sys.argv
@@ -55,6 +56,14 @@ def main():
     
     # 强制覆盖 Checkpoint 路径
     cfg.TEST.CHECKPOINTS = task_config['checkpoint']
+
+    # 把所有的cfg的字段输出到dump_cfg.log里面
+    now = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M")
+    dump_dir = Path(task_config['output_dir']) / f"cfg_dump_{now}"
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    with open(dump_dir / "dump_cfg.log", 'w') as f:
+        for key, value in vars(cfg).items():
+            f.write(f"{key}: {value}\n")
     
     # 设置输出目录
     # output_dir = Path(task_config['output_dir'])
@@ -165,7 +174,7 @@ def main():
                         "content_motion": content_tensor,
                         "style_motion": style_tensor,
                         "scene_text": [prompt] * len(lengths),
-                        "tag_scale": cfg.DEMO.scale, # 这里的 scale 是 style 的 scale (默认2.5)
+                        "tag_scale":  2.5, # cfg.DEMO.scale, # 这里的 scale 是 style 的 scale (默认2.5)
                         "scene_scalar": float(scalar_val), # 放入 batch 备用
                         "has_image": torch.tensor([False]).to(device), # 默认不使用图像
                         # 这是一个占位符，防止报错

@@ -1,17 +1,0 @@
---- Evaluation Metrics for SceneMoDiff_Ablation_Res_FinetuneBaseline2200 ---
-Run Date: SceneMoDiff_Ablation_Res_FinetuneBaseline2200
-=========================================
-FMD (fid_gen): 46.04363894811752
-CRA (accuracy_gen_top1): 0.353125
-SRA (accuracy_trans_top1): 0.5355555555555556
-Loading PKL: /root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceneMoDiff_Ablation_Res_FinetuneBaseline2200/crafmd-0_expname_SceneMoDiff_Ablation_Res_FinetuneBaseline2200_scale_2-5.pkl...
-Evaluating 1600 samples...
-  0%|          | 0/1600 [00:00<?, ?it/s] 11%|█         | 175/1600 [00:00<00:00, 1745.78it/s] 27%|██▋       | 439/1600 [00:00<00:00, 2269.71it/s] 44%|████▎     | 699/1600 [00:00<00:00, 2416.58it/s] 59%|█████▉    | 951/1600 [00:00<00:00, 2453.84it/s] 75%|███████▍  | 1197/1600 [00:00<00:00, 2433.10it/s] 91%|█████████▏| 1463/1600 [00:00<00:00, 2505.57it/s]100%|██████████| 1600/1600 [00:00<00:00, 2415.28it/s]
-
-========================================
-RESULTS for crafmd-0_expname_SceneMoDiff_Ablation_Res_FinetuneBaseline2200_scale_2-5.pkl
-Evaluated samples: 1600
-========================================
-TSI: 0.4939
-FSF: 1.8479
-========================================

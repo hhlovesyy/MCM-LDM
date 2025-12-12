@@ -1,17 +1,0 @@
---- Evaluation Metrics for SceneMo_Init_12112040_Eval ---
-Run Date: SceneMo_Init_12112040_Eval
-=========================================
-FMD (fid_gen): 91.9359414529768
-CRA (accuracy_gen_top1): 0.19625
-SRA (accuracy_trans_top1): 0.3
-Loading PKL: /root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceneMo_Init_12112040_Eval/crafmd-0_expname_SceneMo_Init_12112040_Eval_scale_2-5.pkl...
-Evaluating 1600 samples...
-  0%|          | 0/1600 [00:00<?, ?it/s]  6%|▋         | 104/1600 [00:00<00:01, 1032.54it/s] 23%|██▎       | 366/1600 [00:00<00:00, 1961.17it/s] 39%|███▊      | 617/1600 [00:00<00:00, 2209.48it/s] 55%|█████▌    | 883/1600 [00:00<00:00, 2385.19it/s] 72%|███████▏  | 1147/1600 [00:00<00:00, 2476.81it/s] 88%|████████▊ | 1404/1600 [00:00<00:00, 2507.69it/s]100%|██████████| 1600/1600 [00:00<00:00, 2369.63it/s]
-
-========================================
-RESULTS for crafmd-0_expname_SceneMo_Init_12112040_Eval_scale_2-5.pkl
-Evaluated samples: 1600
-========================================
-TSI: 0.0000
-FSF: 2.8593
-========================================

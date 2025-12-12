@@ -734,7 +734,7 @@ elif mode == "看看你的：渲染 (Render)":
         
         # --- 3. 执行按钮 ---
         st.divider()
-        render_script_dir = "/root/autodl-tmp/MyRepository/MotionLCM/MotionLCM"
+        render_script_dir = "/root/autodl-tmp/MyRepository/MCM-LDM"
         bash_script_path = "render_result.sh"
 
         if st.button("🎨 开始渲染 (Run Pipeline)", type="primary"):

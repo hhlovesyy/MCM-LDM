@@ -1,7 +1,7 @@
 {
     "checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_LOSS0_2_100Epoch/checkpoints/epoch=74.ckpt",
-    "content_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_motion",
-    "style_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/style_motion",
+    "content_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/Final_figure_content",
+    "style_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/Final_figure_style",
     "contents": [
         "walk_and_turn.npy"
     ],
@@ -9,16 +9,11 @@
         "old.npy"
     ],
     "scenes": [
-        "Dumuqiao"
+        "BaoFengYu"
     ],
-    "render_mp4": true,
+    "render_mp4": false,
     "scalars": [
-        0.0,
-        0.5,
-        1.0,
-        1.5,
-        2.0,
-        3.0
+        2.0
     ],
-    "output_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_0242"
+    "output_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_1139"
 }

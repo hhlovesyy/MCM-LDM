@@ -1,17 +1,0 @@
---- Evaluation Metrics for SceneMoDiff_Ablation_Res_OnlyFiLM_2139 ---
-Run Date: SceneMoDiff_Ablation_Res_OnlyFiLM_2139
-=========================================
-FMD (fid_gen): 51.173100288287515
-CRA (accuracy_gen_top1): 0.365625
-SRA (accuracy_trans_top1): 0.4811111111111111
-Loading PKL: /root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceneMoDiff_Ablation_Res_OnlyFiLM_2139/crafmd-0_expname_SceneMoDiff_Ablation_Res_OnlyFiLM_2139_scale_2-5.pkl...
-Evaluating 1600 samples...
-  0%|          | 0/1600 [00:00<?, ?it/s] 10%|█         | 167/1600 [00:00<00:00, 1664.57it/s] 26%|██▋       | 420/1600 [00:00<00:00, 2171.09it/s] 42%|████▏     | 673/1600 [00:00<00:00, 2331.11it/s] 58%|█████▊    | 935/1600 [00:00<00:00, 2441.48it/s] 74%|███████▍  | 1180/1600 [00:00<00:00, 2421.75it/s] 89%|████████▉ | 1430/1600 [00:00<00:00, 2445.00it/s]100%|██████████| 1600/1600 [00:00<00:00, 2374.22it/s]
-
-========================================
-RESULTS for crafmd-0_expname_SceneMoDiff_Ablation_Res_OnlyFiLM_2139_scale_2-5.pkl
-Evaluated samples: 1600
-========================================
-TSI: 0.4999
-FSF: 1.8929
-========================================
