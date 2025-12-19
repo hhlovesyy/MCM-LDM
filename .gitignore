@@ -49,3 +49,13 @@ Thumbs.db
 /debug_dumps/
 style_translator_dataset.pt
 /visual_pkl
+/amass_sample
+/demo
+/local_clip_model
+/vis_debug
+/final_output_vis
+evaluation*.txt
+/body_models
+/common
+/human_body_prior
+/tests

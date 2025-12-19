@@ -21,6 +21,7 @@ from mld.models.get_model import get_model
 from mld.utils.logger import create_logger
 
 from visual import visual_pos 
+import json
 
 
 
@@ -49,6 +50,19 @@ def main():
     logger = create_logger(cfg, phase="demo")
 
 
+    path2 = '/root/autodl-tmp/MyRepository/MCM-LDM/vis_debug'
+    import shutil
+    for filename in os.listdir(path2):
+        file_path = os.path.join(path2, filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)  # 删除文件或链接
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path) # 删除子文件夹
+        except Exception as e:
+            print(f'❌ 删除 {file_path} 失败，原因: {e}')
+
+    print(f"✨ {path2} 内容已清理完毕")
 
 
     style_path = cfg.DEMO.style_motion_dir
@@ -81,6 +95,12 @@ def main():
     model.fact = cfg.TEST.FACT
     model.to(device)
     model.eval()
+
+    json_path = "/root/autodl-tmp/MyRepository/MCM-LDM/task_config.json"
+
+    # 使用 with 语句打开文件（这样会自动关闭文件，更安全）
+    with open(json_path, 'r', encoding='utf-8') as f:
+        scene_data = json.load(f)
 
     scale = cfg.DEMO.scale
 
@@ -115,7 +135,7 @@ def main():
                 # prepare batch data
                 batch = {"length": lengths, "style_motion": style_motion, "tag_scale": scale, "content_motion": content_motion}
                 # joints,latents = model(batch)
-                joints = model(batch)
+                joints = model(batch, scene_data)
                 npypath = str(output_dir /
                             f"{content_file_name}_{style_file_name}_{str(lengths[0])}_scale_{str(scale).replace('.','-')}.npy")
                 mp4path = npypath.replace('.npy', '.mp4')
@@ -127,7 +147,7 @@ def main():
                 np.save(npypath, motion)
 
                 # visualization
-                visual_pos(npypath, mp4path)
+                visual_pos(npypath, mp4path, target_pos=model.target_pos.cpu().numpy() if hasattr(model, 'target_pos') else None)
 
                 logger.info(f"Motions are generated here:\n{npypath}")
 

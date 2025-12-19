@@ -149,7 +149,7 @@ def list_cut_average(ll, intervals):
 
 
 def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset='humanml', figsize=(3, 3), fps=120,
-                   radius=3, vis_mode='default', gt_frames=[], view_mode='genshin_impact'):
+                   radius=3, vis_mode='default', gt_frames=[], view_mode='genshin_impact', target_pos=None):
     matplotlib.use('Agg')
 
     title = '\n'.join(wrap(title, 20))
@@ -190,6 +190,7 @@ def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset='humanml', 
     data[..., 2] -= data[:, 0:1, 2]
 
     frame_number = data.shape[0]
+
     
     # 3. 定义 update 函数，这是动画的核心
     def update(index):
@@ -213,6 +214,12 @@ def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset='humanml', 
         # 地面的坐标 = 固定的世界边界 - 当前帧的轨迹偏移
         plot_xzPlane(ax, MINS[0] - trajec[index, 0], MAXS[0] - trajec[index, 0], 0, 
                      MINS[2] - trajec[index, 1], MAXS[2] - trajec[index, 1])
+        # plot_xzPlane(ax, MINS[0], MAXS[0], 0, MINS[2], MAXS[2])
+
+        if target_pos is not None:
+            # Matplotlib 里的坐标系：X=X, Y=Z, Z=Y
+            ax.scatter(target_pos[0], target_pos[1], target_pos[2], 
+                s=50, c='red', marker='o', alpha=1, label="Target Sphere")
 
         # --- 绘制骨架 (与原始脚本一致) ---
         colors_orange = ["#DD5A37", "#D69E00", "#B75A39", "#FF6D00", "#DDB50E"]

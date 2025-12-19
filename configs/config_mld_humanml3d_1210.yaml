@@ -4,7 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-NAME: Varsapura_from_scratch_1218
+NAME: testSDPC12092206
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -30,9 +30,10 @@ TRAIN:
   # Total epochs for training
   END_EPOCH: 2000
 
-  # RESUME: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1216/checkpoints/epoch=49.ckpt' # Resume training from this path
-  RESUME: ''
+  RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
+  PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # pretrained diffusion model path
+  # PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testBaseline0904/checkpoints/epoch=40.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
     LR: 1e-4 # Learning rate
@@ -55,7 +56,7 @@ EVAL:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1218/checkpoints/epoch=49.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testSDPC12092206/checkpoints/epoch=39.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
@@ -69,10 +70,6 @@ TEST:
 #####################################
 DATASET:
   JOINT_TYPE: 'humanml3d' # join type
-
-BASELINEABLATION:
-  TRANSGET4: True
-  CONTENT_DROPOUT: True
 
 #####################################
 # The following are metric settings
@@ -114,7 +111,7 @@ model:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 50
+  SACE_CHECKPOINT_EPOCH: 5
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True
@@ -122,38 +119,3 @@ LOGGER:
     PROJECT: null
     OFFLINE: False
     RESUME_ID: null
-
-TRAJECTORY:
-  # ================= 架构相关 =================
-  # 是否启用强力注入 (Concat 方式)
-  # 如果 False，则回退到原始的 AdaLN 弱注入
-  INJECTION_MODE: 'concat'  # options: 'concat', 'adaln'
-  
-  # 轨迹编码器类型
-  # 'seq': 输出序列 (我们改的那版)
-  # 'pool': 输出单个 Token (MCM-LDM 原版)
-  ENCODER_TYPE: 'seq'
-
-  # ================= 训练策略 =================
-  # 旋转增强 (解决解耦的核心)
-  AUGMENTATION:
-    ENABLED: True
-    ROTATION_RANGE: 90.0  # 角度范围 +/- 90度
-  
-  # 根节点屏蔽 (双重保险,屏蔽263维特征向量的前4维)
-  ROOT_MASKING_DIM4: True
-  
-  # Content Dropout (逼迫模型看轨迹)
-  USE_CONTENT_DROPOUT: True
-  CONTENT_DROPOUT_PROB: 0.5
-
-  # ================= 推理引导 (默认值) =================
-  # 这些可以在推理脚本中覆盖，但这里设个默认值
-  GUIDANCE:
-    ENABLED: True
-    STRENGTH: 2.0
-    GUIDANCE_START : 1000  # 去噪开启引导的开始step和结束step
-    GUIDACE_END: 0
-
-    # 引导模式: 'strict_track' (逐帧跟踪), 'waypoints' (路标), 'obstacle' (避障), 'mixed' (路标+避障)
-    MODE: 'waypoints'

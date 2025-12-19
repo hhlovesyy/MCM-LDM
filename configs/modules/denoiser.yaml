@@ -20,3 +20,4 @@ denoiser:
     nfeats: ${DATASET.NFEATS}
     nclasses: ${DATASET.NCLASSES}
     ablation: ${TRAIN.ABLATION}
+    trajectory_config: ${TRAJECTORY}

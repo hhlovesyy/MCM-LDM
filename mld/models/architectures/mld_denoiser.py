@@ -75,7 +75,57 @@ class TransEncoder(nn.Module):
 
 
 
+class TrajectoryEncoderV2(nn.Module):
+    def __init__(self, input_dim=3, hidden_dim=256, num_layers=2):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        
+        # 1. 简单的 MLP 映射：把 (x,y,z) 映射到 Latent Dim
+        # 也可以用 1D Conv，但 MLP 最直接
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # 2. 轻量级 Transformer (可选，为了提取平滑特征)
+        # 如果你想模型更强，可以保留；想更轻量，这层都可以不要，直接用 MLP
+        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=4, dim_feedforward=512, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # 位置编码 (必须加，因为轨迹有时序)
+        self.pe = build_position_encoding(hidden_dim, position_embedding="learned")
 
+    def forward(self, trajectory, lengths=None, target_len=None):
+        # trajectory: [Batch, Frames, 4]
+        
+        x = self.input_proj(trajectory) # [Batch, Frames, 256]
+        
+        # 加位置编码
+        # 注意 pe 的维度处理，这里简化写
+        if self.pe is not None:
+            # 假设 pe 返回 [Batch, Frames, Dim]
+            x = x + self.pe(x) 
+            
+        # Transformer 处理
+        # 注意：这里我们**不**加 Global Token，也**不**做 Pooling
+        # 我们要的就是序列对序列 (Seq2Seq)
+        mask = lengths_to_mask(lengths, x.device) if lengths is not None else None
+        
+        # output: [Batch, Frames, 256]
+        x = self.transformer(x, src_key_padding_mask=~mask)
+
+        if target_len is not None:
+            # x: [B, Frames, Dim] -> [B, Dim, Frames]
+            x = x.permute(0, 2, 1)
+            
+            # 强制池化到 target_len (例如 7)
+            x = F.adaptive_avg_pool1d(x, output_size=target_len)
+            
+            # 转回来 -> [B, target_len, 256] # target_len = 7
+            x = x.permute(0, 2, 1)
+        
+        return x
 
 
 
@@ -118,6 +168,43 @@ class DiTBlock(nn.Module):
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x # torch.Size([32, 13, 256])
 
+class DiTBlockNew(nn.Module):
+    """
+    Standard DiT block: Condition 'c' controls BOTH Attention and MLP.
+    """
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        
+        # 【修改点】: 现在的 c 要控制一切，所以输出维度从 3x 变成 6x
+        # (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+        # 删除了 self.adaLN_modulation_trans
+
+    def forward(self, x, c): 
+        # x: [Batch, Seq_Len, Dim]
+        # c: [Batch, Dim] (Style + Time)
+        
+        # 一次性切分出 6 个参数
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        
+        # MSA (Self-Attention) Part
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        
+        # MLP Part
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        
+        return x
+
 class MldDenoiser(nn.Module):
 
     def __init__(self,
@@ -141,6 +228,7 @@ class MldDenoiser(nn.Module):
                  text_encoded_dim: int = 256,
                  motion_encoded_dim: int = 512,
                  nclasses: int = 10,
+                 trajectory_config: dict = None,
                  **kwargs) -> None:
 
         super().__init__()
@@ -152,7 +240,7 @@ class MldDenoiser(nn.Module):
         self.abl_plus = False
         self.arch = arch
         self.motion_encoded_dim = motion_encoded_dim
-
+        self.trajectory_config = trajectory_config
 
 
 
@@ -182,11 +270,16 @@ class MldDenoiser(nn.Module):
                 self.latent_dim, position_embedding=position_embedding)
 
 
-
+        if self.trajectory_config.INJECTION_MODE == 'concat':  # 强力注入，我们修改升级后的版本
+            self.blocks = nn.ModuleList([
+                DiTBlockNew( hidden_size=self.latent_dim, num_heads=num_heads, mlp_ratio=4.0) for _ in range(num_layers)
+            ])
+        else:
         # DIT
-        self.blocks = nn.ModuleList([
-            DiTBlock( hidden_size=self.latent_dim, num_heads=num_heads, mlp_ratio=4.0) for _ in range(num_layers)
-        ])
+            self.blocks = nn.ModuleList([
+                DiTBlock( hidden_size=self.latent_dim, num_heads=num_heads, mlp_ratio=4.0) for _ in range(num_layers)
+            ])
+        
 
         # IN
         self.IN = nn.InstanceNorm1d(text_encoded_dim, affine=True)
@@ -200,8 +293,12 @@ class MldDenoiser(nn.Module):
 
         self.linear = nn.Linear(7*256, 6*256)
 
-
-        self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
+        if self.trajectory_config.ENCODER_TYPE == 'seq': # 新的版本，升级轨迹编码器
+            self.trans_Encoder = TrajectoryEncoderV2(input_dim=4, hidden_dim=256, num_layers=2)
+            self.fusion_layer = nn.Linear(self.latent_dim + 256, self.latent_dim)
+        else:
+            self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
+        
 
 
 
@@ -225,7 +322,7 @@ class MldDenoiser(nn.Module):
         # three conditions
         style_emb = encoder_hidden_states[1].permute(1, 0, 2)  # torch.Size([1, 32, 512])
         content_emb = encoder_hidden_states[0].permute(1, 0, 2) # torch.Size([7, 32, 256])
-        trans_cond = encoder_hidden_states[-1] # torch.Size([32, 40, 3])
+        trans_cond = encoder_hidden_states[-1] # torch.Size([32, 40, 4])
         
         # content        
         content_emb_latent = content_emb
@@ -237,26 +334,44 @@ class MldDenoiser(nn.Module):
         content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256) # torch.Size([32, 6, 256])
         content_emb_latent = content_emb_latent.permute(1,0,2) # torch.Size([6, 32, 256])
         # concatenation with sample
-        xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
+        # xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
 
         # style encoder
         style_emb_latent = self.emb_proj_st(style_emb) # torch.Size([1, 32, 256])
         style_emb_latent = time_emb + style_emb_latent
-        style_emb_latent = style_emb_latent.squeeze() # torch.Size([32, 256])
+        style_emb_latent = style_emb_latent.squeeze(0) # torch.Size([32, 256])
 
-        # trajectory encoder
-        trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
-        trans_emb = trans_emb + time_emb
-        trans_emb = trans_emb.squeeze() # torch.Size([32, 256])
+        if self.trajectory_config.INJECTION_MODE == "concat":
+
+            latent_len = sample.shape[0]  # 7
+            # trajectory encoder
+            trans_emb = self.trans_Encoder(trans_cond, lengths, target_len=latent_len) # torch.Size([32, 7, 256])
+            # trans_emb = trans_emb + time_emb
+            # trans_emb = trans_emb.squeeze() # torch.Size([32, 256])
+            sample = self.query_pos(sample)  # torch.Size([7, 32, 256])
+
+            # 这里 query_pos 是类似 build_position_encoding 的正弦编码
+            # sample = sample + sample_pe 
+            xseq = torch.cat((content_emb_latent, trans_emb.permute(1,0,2), sample), axis=0)  # torch.Size([6 + 7 + 7, 32, 256])
+        else:
+            xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
+            trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
+            trans_emb = trans_emb + time_emb
+            trans_emb = trans_emb.squeeze(0) # torch.Size([32, 256]) 
+            xseq = self.query_pos(xseq)
         
         # to dit blocks (N, T, D)
-        xseq = self.query_pos(xseq).permute(1,0,2) # torch.Size([32, 13, 256])
-        for block in self.blocks:
-            xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
-        sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
-       
+        xseq = xseq.permute(1,0,2) # torch.Size([32, 20, 256])
+        if self.trajectory_config.INJECTION_MODE == "concat":
+            for block in self.blocks:
+                xseq = block(xseq, style_emb_latent) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
+            sample = xseq[:,-sample.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
+        else:
+            for block in self.blocks:
+                xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
+            sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
 
-        return (sample, )        
+        return (sample, )    # torch.Size([32, 7, 256])
 
 
 class EmbedAction(nn.Module):
