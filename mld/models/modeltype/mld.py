@@ -102,51 +102,117 @@ def calculate_trajectory_correct(data):
     
     return pred_pos
 
-def debug_plot_trajectory(target_traj, pred_traj, target_pos=None, save_path="debug_traj.png", obstacle_info=None):
+def debug_plot_trajectory(target_traj, pred_traj, scene_data=None, save_path="debug_traj.png", interval=20):
     """
-    绘制轨迹对比图 (XZ 平面俯视图)
-    target_traj: [Length, 3] numpy array (Global Target)
-    pred_traj:   [Length, 3] numpy array (Generated Root)
+    绘制轨迹对比图 (XZ 平面俯视图)，包含障碍物、关键帧指引点和偏差连线。
     
+    Args:
+        target_traj: [Length, 3] numpy array (Global Target, 物理坐标)
+        pred_traj:   [Length, 3] numpy array (Generated Root, 物理坐标)
+        scene_data:  dict, 包含环境信息 (obstacles)
+        interval:    int, 绘制关键点的间隔帧数
     """
-    plt.figure(figsize=(10, 10))
+    fig, ax = plt.subplots(figsize=(10, 10))
     
-    # 1. 画目标轨迹 (红色虚线)
+    # ================= 0. 数据预处理与对齐 =================
+    # 为了公平对比形状，我们将生成轨迹的起点平移到目标轨迹的起点
+    # 这样可以消除 VAE 解码时的初始绝对位置偏差
+    if target_traj is not None and pred_traj is not None:
+        start_offset = target_traj[0] - pred_traj[0]
+        # 只平移 X 和 Z，保持 Y 不变 (其实画图只看 XZ)
+        pred_traj_aligned = pred_traj + start_offset
+    else:
+        pred_traj_aligned = pred_traj
+
+    # ================= 1. 画障碍物 (Environment) =================
+    if scene_data and 'environment' in scene_data:
+        obstacles = scene_data['environment']['obstacles']
+        for obs in obstacles:
+            # 解析中心点 [x, z]
+            cx, cz = obs['center']
+            
+            if obs['type'] == 'cylinder':
+                # 画圆 (半透明灰色填充 + 红色边框)
+                radius = obs['radius']
+                circle = patches.Circle((cx, cz), radius, 
+                                      facecolor='gray', edgecolor='red', 
+                                      alpha=0.3, linewidth=2, label='Obstacle')
+                ax.add_patch(circle)
+                
+            elif obs['type'] == 'box':
+                # 画矩形 (Matplotlib 的 Rectangle 接受左下角坐标)
+                # 兼容 size (w, h, d) 或 extent (w, d)
+                if 'extent' in obs:
+                    w, d = obs['extent']
+                elif 'size' in obs:
+                    w, d = obs['size'][0], obs['size'][2]
+                else:
+                    continue # 无法解析
+                
+                # 计算左下角
+                rect_x = cx - w / 2
+                rect_z = cz - d / 2
+                rect = patches.Rectangle((rect_x, rect_z), w, d, 
+                                       facecolor='gray', edgecolor='blue', 
+                                       alpha=0.3, linewidth=2, label='Obstacle')
+                ax.add_patch(rect)
+
+    # ================= 2. 画完整轨迹 (Trajectories) =================
+    # 目标轨迹 (红色虚线)
     if target_traj is not None:
-        plt.plot(target_traj[:, 0]-target_traj[0, 0], target_traj[:, 2]-target_traj[0,2], 'r--', linewidth=2, label='Target (Guidance)')
-        plt.scatter(target_traj[0, 0], target_traj[0, 2], c='red', marker='x', s=100, label='Target Start')
+        ax.plot(target_traj[:, 0], target_traj[:, 2], 'r--', linewidth=2, alpha=0.6, label='Target Path')
+        # 起点
+        ax.scatter(target_traj[0, 0], target_traj[0, 2], c='red', marker='x', s=150, label='Target Start', zorder=5)
 
-    # 2. 画生成轨迹 (蓝色实线)
-    plt.plot(pred_traj[:, 0], pred_traj[:, 2], 'b-', linewidth=2, label='Generated (Output)')
-    plt.scatter(pred_traj[0, 0], pred_traj[0, 2], c='blue', marker='o', s=100, label='Gen Start')
+    # 生成轨迹 (蓝色实线)
+    if pred_traj_aligned is not None:
+        ax.plot(pred_traj_aligned[:, 0], pred_traj_aligned[:, 2], 'b-', linewidth=3, alpha=0.8, label='Generated Path')
+        # 起点
+        ax.scatter(pred_traj_aligned[0, 0], pred_traj_aligned[0, 2], c='blue', marker='o', s=100, label='Gen Start', zorder=5)
 
-    target_pos_np = target_pos.detach().cpu().numpy()
-    # 点一个target pos的点
-    plt.scatter(target_pos_np[0], target_pos_np[2], c='red',marker='x', s=100, label="target pos")
+    # ================= 3. 画关键引导点 (Guidance Keypoints) =================
+    # 我们不仅画点，还画出“偏差连线”，这样你能直观看到 Guidance 拉扯的方向
+    if target_traj is not None and pred_traj_aligned is not None:
+        length = len(target_traj)
+        # 生成关键帧索引：0, 20, 40... 以及最后一帧
+        indices = list(range(0, length, interval))
+        if indices[-1] != length - 1:
+            indices.append(length - 1)
+            
+        # 提取关键点坐标
+        t_pts = target_traj[indices]
+        p_pts = pred_traj_aligned[indices]
+        
+        # A. 画目标点 (红色空心圆)
+        ax.scatter(t_pts[:, 0], t_pts[:, 2], s=100, facecolors='none', edgecolors='red', linewidth=2, label='Guide Points', zorder=10)
+        
+        # B. 画实际到达点 (蓝色实心点)
+        ax.scatter(p_pts[:, 0], p_pts[:, 2], s=60, c='blue', marker='o', zorder=10)
+        
+        # C. 画误差连线 (灰色细线)
+        # 这条线越长，说明该处的 Guidance 效果越差，或者 Content 阻力越大
+        for tx, tz, px, pz in zip(t_pts[:, 0], t_pts[:, 2], p_pts[:, 0], p_pts[:, 2]):
+            ax.plot([tx, px], [tz, pz], color='gray', linestyle=':', linewidth=1, alpha=0.7)
 
-    # 画障碍物
-    if obstacle_info is not None:
-        circle = plt.Circle(
-            (obstacle_info['center'][0], obstacle_info['center'][1]), 
-            obstacle_info['radius'], 
-            color='black', alpha=0.3, label='Obstacle'
-        )
-        plt.gca().add_patch(circle)
+    # ================= 4. 图表设置 =================
+    ax.set_title(f"Trajectory Debug (Interval={interval})", fontsize=14)
+    ax.set_xlabel("X Position (meters)")
+    ax.set_ylabel("Z Position (meters)")
     
-    # 3. 标注终点
-    plt.scatter(pred_traj[-1, 0], pred_traj[-1, 2], c='blue', marker='^', s=100)
+    # 强制等比例，否则圆会变成椭圆
+    ax.set_aspect('equal')
+    ax.grid(True, linestyle='--', alpha=0.5)
     
-    plt.title("Trajectory Control Check (Top-down View)")
-    plt.xlabel("X Position (meters)")
-    plt.ylabel("Z Position (meters)")
-    plt.legend()
-    plt.grid(True)
-    plt.axis('equal') # 保证圆看起来是圆的
-    
+    # 处理图例去重 (防止多个障碍物导致图例重复)
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys(), loc='best')
+
     # 保存
-    plt.savefig(save_path)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=100)
     plt.close()
-    print(f"[Debug] Trajectory plot saved to {save_path}")
+    print(f"[Debug] Visualization saved to {save_path}")
 
 class MLD(BaseModel):
     """
@@ -599,7 +665,7 @@ class MLD(BaseModel):
 
         return trans_cond_norm, target_global_pos
     
-    def compute_spatial_guidance(self, latents, t, target_global_pos, encoder_hidden_states, lengths):
+    def compute_spatial_guidance(self, latents, t, target_global_pos, encoder_hidden_states, lengths, interval):
         with torch.enable_grad():
             latents = latents.detach().requires_grad_(True)
             
@@ -635,12 +701,7 @@ class MLD(BaseModel):
             # 这样消除了“起点不一致”带来的巨大 Loss。
             pred_traj_centered = calculate_pos - calculate_pos[:, 0:1, :]
             target_traj_centered = target_global_pos - target_global_pos[:, 0:1, :]
-            
-            # ================== 【修改点 2: 稀疏关键点约束】 ==================
-            # 不要每一帧都算 Loss，那是强迫症。
-            # 每隔 interval 帧算一次，给模型“呼吸”的空间，缓解滑步。
-            interval = 20  # 每 1 秒检查一次 (假设 20fps)
-            
+              
             # 生成索引: [0, 20, 40, ..., last_frame]
             seq_len = calculate_pos.shape[1]
             key_indices = torch.arange(0, seq_len, interval, device=latents.device)
@@ -682,37 +743,10 @@ class MLD(BaseModel):
             trans_motion = content_motion.clone()
             content_motion[...,:3] = 0
             
-
-
         scale = batch["tag_scale"]
         lengths1 = [content_motion.shape[1]]* content_motion.shape[0]
 
-        # # -----------------------------------------------------------
-        # # 【修改点 1】: 强制替换轨迹为自定义形状 (验证解耦性)
-        # # -----------------------------------------------------------
-        # custom_shape = 'circle'      # 'circle' or 'line'
-        
-        # # 直接完全遵循轨迹，效果很差，但也可以试试
-        # if self.cfg.TRAJECTORY.GUIDANCE.MODE in ['strict_track', 'mixed', 'waypoints'] and self.cfg.TRAJECTORY.ENABLED:
-        #     # 生成自定义轨迹特征 [B, L, 4] 和 全局目标 [B, L, 3]
-        #     # 注意长度要和 content 保持一致 (lengths[0])
-        #     custom_trans_cond, target_global_pos = self.generate_custom_trajectory(
-        #         batch_size=content_motion.shape[0], 
-        #         length=content_motion.shape[1], 
-        #         estimated_speed=avg_speed,
-        #         estimated_height=pelvis_height,
-        #         shape_type=custom_shape,
-        #         device=content_motion.device,
-        #     )
-        #     # 替换 trans_motion 的前4维
-        #     # 构造一个符合 Trajectory Encoder 输入的 tensor
-        #     # 假设 Trajectory Encoder 需要 [B, L, 4]
-        #     trans_cond_input = custom_trans_cond
-        # ==========================================
-        # 🔥 核心接入点：轨迹生成 🔥
-        # ==========================================
         target_global_pos = None # 用于 Guidance
-        trans_cond_norm = None   # 用于 Denoiser Input
         
         if scene_data is not None and self.cfg.TRAJECTORY.ENABLED:
             raw_content = batch['content_motion'].clone()  # 使用未归一化的数据
@@ -805,15 +839,6 @@ class MLD(BaseModel):
             uncond_motion_emb = torch.zeros(motion_emb.shape).to(motion_seq.device)
             motion_emb = torch.cat([uncond_motion_emb, motion_emb], dim=0)
 
-            # gendurations = torch.ones((12, 1), dtype=int) * 100
-            # generation = self.motionclip.generate(motion_emb.permute(1,0,2), gendurations,
-            #                     is_amass=True,
-            #                     is_clip_features=True)
-            # fff = generation['output_xyz']
-            # fff = fff.permute(0,3,1,2)
-            # fff = fff.cpu().numpy()
-            # np.save("eee.npy",fff)
-
             # trajectory
             # trans_cond = trans_motion[...,:3]
             # uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
@@ -868,11 +893,12 @@ class MLD(BaseModel):
                 debug_plot_trajectory(
                     target_traj_np[:min_len] if target_traj_np is not None else None, 
                     pred_root_traj_np[:min_len],
-                    self.target_pos,
+                    # self.target_pos,
+                    scene_data = scene_data,
                     # save_path=f"vis_debug/traj_step_n.png"
                     # 每个样本给个不同的文件名
                     save_path=f"vis_debug/traj_debug_{name}.png",
-                    obstacle_info=self.obstacle_info
+                    interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
                 )
             except Exception as e:
                 print(f"[Warning] Failed to plot trajectory: {e}")
@@ -909,17 +935,6 @@ class MLD(BaseModel):
         
         # 【新增】定义我们的引导目标
         use_guidance = self.cfg.TRAJECTORY.GUIDANCE.ENABLED
-        use_keypoint_guidance = True
-        target_joint_idx = 0  # pelvis
-        target_frame_idx = lengths[0] - 1  # 第 100 帧
-        self.target_pos = torch.tensor([-3.5, 0.0, 0.0]) # 目标位置
-        # 2. 障碍物 (斥力) - 挡在中间
-        self.obstacle_info = {
-            'center': [0.0, 2.0], # 在 X=0, Z=2 处
-            'radius': 0.8         # 半径 0.8米
-        }
-        self.obstacle_info = None
-
         # reverse
         for i, t in enumerate(timesteps):
 
@@ -941,19 +956,23 @@ class MLD(BaseModel):
             # 或者是全程做 (精度最高)
             # 1. 【时间调度】: 刚开始(t>600)全是噪声，算出来的几何梯度是不可信的，别乱导！
             # 只有当 t < 600 (动作轮廓大概出来后) 再开始引导
-            for k in range(num_opt_steps):
-                total_grad = torch.zeros_like(latents).to(latents.device)
-                # if target_global_pos is not None:
-                if use_guidance and self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_MODE:
-                    way_guidance_scale = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_GUIDE_STRENGTH
-                    if t < 1001: 
+            start_t = self.cfg.TRAJECTORY.GUIDANCE.GUIDANCE_START # 比如1000
+            end_t = self.cfg.TRAJECTORY.GUIDANCE.GUIDACE_END
+            interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
+            if end_t < t < start_t: 
+                for k in range(num_opt_steps):
+                    total_grad = torch.zeros_like(latents).to(latents.device)
+                    if use_guidance and self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_MODE:
+                        way_guidance_scale = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_GUIDE_STRENGTH
+                        
                         # 计算梯度
                         grad = self.compute_spatial_guidance(
                             latents, 
                             t.unsqueeze(0).repeat(bsz), # expand t
                             target_global_pos, 
                             [h[bsz:] for h in encoder_hidden_states],  # [uncond, cond] -> [cond]
-                            lengths
+                            lengths,
+                            interval=interval
                         )
 
                         grad = grad * way_guidance_scale
@@ -971,87 +990,8 @@ class MLD(BaseModel):
                         latents = latents - step_size * grad
                         latents = latents.detach().requires_grad_(True) # 记得 detach 并重新开启梯度追踪
 
-                        print(f"Step {t.item()} Inner {k}: Loss:", grad.norm())
+                        # print(f"Step {t.item()} Inner {k}: Loss:", grad.norm())
 
-                    # grad = self.compute_keypoint_guidance(
-                    #     latents, 
-                    #     t.unsqueeze(0).repeat(bsz), 
-                    #     target_joint_idx, 
-                    #     target_frame_idx, 
-                    #     self.target_pos,
-                    #     [h[bsz:] for h in encoder_hidden_states], 
-                    #     lengths
-                    # )
-                    
-                    
-                    # 【Debug】打印梯度大小，如果这个值很大(>1)，说明力度太大了
-                    # print(f"Step {t.item()} Grad Norm: {grad.norm().item()}")
-                    
-                    # 【修复】更安全的更新方式：梯度归一化
-                    # 无论梯度多大，我们限制它每次只改动一点点方向
-                    # grad_norm = grad.norm()
-                    # if grad_norm > 1e-8: # 防止除以0
-                    #     grad = grad / grad_norm 
-                    
-                    # 3. 【力度控制】: Latent Space 的步长必须非常小！
-                    # 推荐值: 1.0 ~ 3.0。绝对不要超过 5.0。
-                    # 随着 t 变小，动作越来越确定，可以稍微加大一点力度
-                    # if t > 100:
-                    #     current_scale = 10.0
-                    # else:
-                    #     current_scale = 10.0 # 最后冲刺阶段稍微用力一点
-
-                    # 打印 Log 观察 (必须看到 Scale 后的值是可控的)
-                    # print(f"Step {t.item()} | Raw Norm: {grad_norm:.2f} | Update Norm: {current_scale}")
-
-                    # 然后再乘一个步长，这个步长对应 Latent Space 的距离
-                    # 建议从小一点开始试，比如 20.0，甚至 5.0
-                    # latents = latents - current_scale * grad  # 这里一定是-
-                    # latents = latents.detach()
-                    # total_grad += way_guidance_scale * grad
-            
-            # 2. 障碍物斥力 (Training-free 核心)
-            if use_guidance and t < 1000 and (self.obstacle_info is not None) and False: # 全程避障
-                grad_repel = self.compute_obstacle_guidance(
-                    latents, 
-                    t.view(-1).repeat(bsz), 
-                    self.obstacle_info, 
-                    # 这里的 hidden_states 传入 cond 部分
-                    [h[bsz:] for h in encoder_hidden_states] if self.do_classifier_free_guidance else encoder_hidden_states,
-                    lengths
-                )
-                
-                # 避障通常需要更大的力度，因为它是一堵墙
-                repel_strength = 100.0 # 这里的力度要大！
-                
-                # 累加梯度
-                total_grad += repel_strength * grad_repel
-                
-                # 打印一下看看有没有撞到
-                if i % 10 == 0 and grad_repel.norm() > 0:
-                    print(f"Step {t.item()} | Collision Detected! Repelling...")
-
-            # 3. 更新 Latents
-            # 梯度归一化 (可选，建议做)
-            if use_guidance and False:
-                # print("origin grad norm:", total_grad.norm(), "timestep: ", t)
-                # 设定一个最大步长 (Max Step Size)
-                max_grad_norm = 5.0  # 这个值根据经验调，2.0~10.0 比较合理
-
-                grad_norm = total_grad.norm() # 向量的模长
-
-                # 【关键逻辑】: 只有当梯度超过阈值时，才进行缩放；否则保持原样
-                if grad_norm > max_grad_norm:
-                    # 缩放比例 = 目标 / 当前
-                    scale_factor = max_grad_norm / (grad_norm + 1e-8)
-                    total_grad = total_grad * scale_factor
-                    # 此时模长被压回了 5.0
-                else:
-                    # 如果梯度很小 (比如 0.1)，就保持 0.1
-                    # 这样模型在接近目标时会自然减速收敛，不会震荡
-                    pass
-
-                latents = latents - total_grad
             # if i // 10 ==0:
             #     latent_feature.append()
             # expand the latents if we are doing classifier free guidance

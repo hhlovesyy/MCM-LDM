@@ -55,7 +55,7 @@ EVAL:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1218/checkpoints/epoch=549.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1220/checkpoints/epoch=799.ckpt'
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1218/checkpoints/epoch=349.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
@@ -152,13 +152,14 @@ TRAJECTORY:
   # ================= 推理引导 (默认值) =================
   # 这些可以在推理脚本中覆盖，但这里设个默认值
   GUIDANCE:
-    ENABLED: True
+    ENABLED: False
     STRENGTH: 2.0
     GUIDANCE_START : 1000  # 去噪开启引导的开始step和结束step
     GUIDACE_END: 0
 
     WAYPOINTS_MODE: True # 是否启用关键路点追踪功能
     WAYPOINTS_GUIDE_STRENGTH: 100.0
+    WAYPOINTS_INTERVAL: 10  # 每多少帧做一次路径点的指引
 
     OBSTACLE_MODE: True  # 是否启用避障功能
     OBSTACLE_GUIDE_STRENGTH: 2.0
