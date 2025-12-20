@@ -1,0 +1,95 @@
+NAME: SceneMo_1211_1835_Full_FiLM_Loss
+DEBUG: false
+ACCELERATOR: gpu
+DEVICE:
+- 0
+SCENE_MODIFF_ABLATION:
+  FUSION_MODE: film
+  USE_SCENE_CLS: true
+  LAMBDA_SCENE: 0.5
+  DIFFUSION_PENALTY: 0.5
+  UPDATE_BASELINE: true
+  JUST_FINETUNE_BASELINE: false
+TRAIN:
+  STAGE: diffusion
+  DATASETS:
+  - stylescenedataset
+  NUM_WORKERS: 4
+  BATCH_SIZE: 32
+  END_EPOCH: 100
+  RESUME: ''
+  PRETRAINED_VAE: checkpoints/vae_checkpoint/vae7.ckpt
+  PRETRAINED: checkpoints/denoiser_checkpoint/denoiser.ckpt
+  OPTIM:
+    TYPE: AdamW
+    LR: 2.0e-05
+    LR_DENOISER: 1.0e-05
+    LR_ADAPTER: 0.0001
+  ABLATION:
+    SKIP_CONNECT: true
+    PE_TYPE: mld
+    DIFF_PE_TYPE: mld
+    FUSION_MODE: film
+EVAL:
+  DATASETS:
+  - humanml3d
+  BATCH_SIZE: 32
+  SPLIT: test
+TEST:
+  CHECKPOINTS: /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/SceneMo_1211_1835_Full_FiLM_Loss/checkpoints/epoch=99.ckpt
+  DATASETS:
+  - humanml3d
+  SPLIT: test
+  BATCH_SIZE: 128
+  MEAN: false
+  NUM_SAMPLES: 1
+  FACT: 1
+  MULTI_MODAL_TYPE: text
+  MULTI_MODAL_TEXT_PROMPT: Walking in strong wind.
+  MULTI_MODAL_IMAGE_PATH: /root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene/scene_images/Dumuqiao/01.jpg
+  CFG_STYLE: 10.0
+  CFG_SCENE: 10.0
+DATASET:
+  JOINT_TYPE: humanml3d
+METRIC:
+  TYPE:
+  - TemosMetric
+  - TM2TMetrics
+LOSS:
+  TYPE: mld
+  LAMBDA_LATENT: 1.0e-05
+  LAMBDA_KL: 0.0001
+  LAMBDA_REC: 1.0
+  LAMBDA_GEN: 1.0
+  LAMBDA_CROSS: 1.0
+  LAMBDA_CYCLE: 0.0
+  LAMBDA_PRIOR: 0.0
+  DIST_SYNC_ON_STEP: false
+  USE_SCENE_CLS: false
+  LAMBDA_SCENE: 0.2
+  CORRUPTION_PROB: 0.7
+model:
+  vae: true
+  model_type: mld
+  condition: text
+  latent_dim:
+  - 7
+  - 256
+  ff_size: 1024
+  num_layers: 9
+  num_head: 4
+  droupout: 0.1
+  activation: gelu
+  guidance_scale: 5
+  guidance_uncondp: 0.25
+LOGGER:
+  SACE_CHECKPOINT_EPOCH: 25
+  LOG_EVERY_STEPS: 1
+  VAL_EVERY_STEPS: 100
+  TENSORBOARD: true
+  WANDB:
+    PROJECT: null
+    OFFLINE: false
+    RESUME_ID: null
+TRAIN_STRTEGY:
+  MULTI_MODAL_FUSION: text

@@ -1,0 +1,19 @@
+{
+    "checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll_LOSS0_2_100Epoch/checkpoints/epoch=74.ckpt",
+    "content_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/Final_figure_content",
+    "style_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/demo/Final_figure_style",
+    "contents": [
+        "walk_and_turn.npy"
+    ],
+    "styles": [
+        "old.npy"
+    ],
+    "scenes": [
+        "BaoFengYu"
+    ],
+    "render_mp4": false,
+    "scalars": [
+        2.0
+    ],
+    "output_dir": "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/BatchGen_1212_1139"
+}

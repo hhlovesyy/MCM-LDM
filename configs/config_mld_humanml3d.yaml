@@ -32,6 +32,7 @@ TRAIN:
 
   RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
+  PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
     LR: 1e-4 # Learning rate
@@ -40,6 +41,7 @@ TRAIN:
     SKIP_CONNECT: True
     PE_TYPE: mld
     DIFF_PE_TYPE: mld
+    FUSION_MODE: "film"
 
 #####################################
 # The following are validation settings
@@ -87,6 +89,9 @@ LOSS:
   LAMBDA_CYCLE: 0.0 # Lambda for cycle Losses
   LAMBDA_PRIOR: 0.0
   DIST_SYNC_ON_STEP: False # Sync Losses on step when distributed trained
+  USE_SCENE_CLS: True       # 【总开关】是否使用场景分类 Loss
+  LAMBDA_SCENE: 0.1        # 【权重】分类 Loss 的权重
+  CORRUPTION_PROB: 0.3      # 【策略】训练时有多大概率破坏 Style，强迫模型学 Scene
 
 #####################################
 # The following are basic model settings

@@ -7,7 +7,11 @@
 TRAIN_SCRIPT="/root/autodl-tmp/MyRepository/MCM-LDM/train.py"
 
 # 定义参数
-CONFIG_FILE="configs/config_mld_humanml3d_with_scene.yaml"
+CONFIG_FILE="configs/scenemodiff_train_all_justFinetuneBaseline.yaml"
+# CONFIG_FILE="configs/scenemodiff_train_all.yaml"
+# CONFIG_FILE="configs/scenemodiff_train_onlyFiLM.yaml"
+# CONFIG_FILE="configs/scenemodiff_train_mlp_and_Loss.yaml"
+# CONFIG_FILE="configs/scenemodiff_train_onlyMLP.yaml"
 ASSETS_FILE="configs/assets.yaml"
 BATCH_SIZE="32"
 DEBUG_MODE="--nodebug"
