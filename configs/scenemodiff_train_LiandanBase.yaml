@@ -24,7 +24,7 @@ TRAIN:
 
   RESUME: '' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
-  PRETRAINED: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
+  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1220/checkpoints/epoch=799.ckpt'
   # PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll/checkpoints/epoch=69.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
@@ -130,3 +130,45 @@ LOGGER:
   
 TRAIN_STRTEGY:
   MULTI_MODAL_FUSION: "text"  # 会使用图像/文本的一侧，概率各50%, 也可以设置为 "text" 或 "image"(表示为纯文本或者纯图像)
+
+TRAJECTORY:
+  ENABLED: True  # 是False的话会用content的轨迹
+  # ================= 架构相关 =================
+  # 是否启用强力注入 (Concat 方式)
+  # 如果 False，则回退到原始的 AdaLN 弱注入
+  INJECTION_MODE: 'concat'  # options: 'concat', 'adaln'
+  
+  # 轨迹编码器类型
+  # 'seq': 输出序列 (我们改的那版)
+  # 'pool': 输出单个 Token (MCM-LDM 原版)
+  ENCODER_TYPE: 'seq'
+
+  # ================= 训练策略 =================
+  # 旋转增强 (解决解耦的核心)
+  AUGMENTATION:
+    ENABLED: False
+    ROTATION_RANGE: 90.0  # 角度范围 +/- 90度
+  
+  # 根节点屏蔽 (双重保险,屏蔽263维特征向量的前4维)
+  ROOT_MASKING_DIM4: True
+  
+  # Content Dropout (逼迫模型看轨迹)
+  USE_CONTENT_DROPOUT: True
+  CONTENT_DROPOUT_PROB: 0.15
+
+  # ================= 推理引导 (默认值) =================
+  # 这些可以在推理脚本中覆盖，但这里设个默认值
+  GUIDANCE:
+    ENABLED: True
+    STRENGTH: 2.0
+    GUIDANCE_START : 1000  # 去噪开启引导的开始step和结束step
+    GUIDACE_END: 0
+
+    WAYPOINTS_MODE: True # 是否启用关键路点追踪功能
+    WAYPOINTS_GUIDE_STRENGTH: 100.0
+
+    OBSTACLE_MODE: True  # 是否启用避障功能
+    OBSTACLE_GUIDE_STRENGTH: 2.0
+
+    STRICT_TRACK_MODE: False  # 是否要严格按照轨迹来走（效果比较差，不建议启用）
+    STRICT_TRACK_STRENGTH: 2.0

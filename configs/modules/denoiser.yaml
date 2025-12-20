@@ -21,3 +21,4 @@ denoiser:
     nclasses: ${DATASET.NCLASSES}
     ablation: ${TRAIN.ABLATION}
     use_update_baseline: ${SCENE_MODIFF_ABLATION.UPDATE_BASELINE}
+    trajectory_config: ${TRAJECTORY}

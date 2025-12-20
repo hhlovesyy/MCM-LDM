@@ -71,121 +71,68 @@ class TransEncoder(nn.Module):
         dist = self.seqTransEncoder(xseq,
                                 src_key_padding_mask=~aug_mask)[:dist.shape[0]]
 
-        return dist
+        return dist  # torch.Size([1, 32, 256])
 
 
 
-# # 定义“场景-风格适配器”，并在前向传播时拦截 Style 特征，用 Scene 特征对其进行“物理修正”。
-class SceneStyleAdapter(nn.Module):
-    def __init__(self, style_dim=256, scene_dim=512):
+class TrajectoryEncoderV2(nn.Module):
+    def __init__(self, input_dim=3, hidden_dim=256, num_layers=2):
         super().__init__()
-        # 降维层
-        self.scene_mapper = nn.Sequential(
-            nn.Linear(scene_dim, style_dim),
-            nn.SiLU(),
-            nn.Linear(style_dim, style_dim)
-        )
-        # 门控层 (Channel-wise Gating)
-        self.channel_gate = nn.Sequential(
-            nn.Linear(style_dim * 2, style_dim),
-            nn.Sigmoid()
+        self.hidden_dim = hidden_dim
+        
+        # 1. 简单的 MLP 映射：把 (x,y,z) 映射到 Latent Dim
+        # 也可以用 1D Conv，但 MLP 最直接
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
         )
         
-        self.norm = nn.LayerNorm(style_dim)
+        # 2. 轻量级 Transformer (可选，为了提取平滑特征)
+        # 如果你想模型更强，可以保留；想更轻量，这层都可以不要，直接用 MLP
+        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=4, dim_feedforward=512, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # 位置编码 (必须加，因为轨迹有时序)
+        self.pe = build_position_encoding(hidden_dim, position_embedding="learned")
 
-    def forward(self, style_feat, scene_feat):
-        # style_feat: [Batch, 256]
-        # scene_feat: [Batch, 1, 512]
-        scene_feat = scene_feat.squeeze(1) # torch.Size([32, 512])
+    def forward(self, trajectory, lengths=None, target_len=None):
+        # trajectory: [Batch, Frames, 4]
+        # print("lets check trajectory shape:", trajectory.shape) # lets check trajectory shape
+        x = self.input_proj(trajectory) # [Batch, Frames, 256]
         
-        scene_latent = self.scene_mapper(scene_feat) # [B, 256] torch.Size([32, 256])
+        # 加位置编码
+        # 注意 pe 的维度处理，这里简化写
+        if self.pe is not None:
+            # 假设 pe 返回 [Batch, Frames, Dim]
+            x = x + self.pe(x) 
+            
+        # Transformer 处理
+        # 注意：这里我们**不**加 Global Token，也**不**做 Pooling
+        # 我们要的就是序列对序列 (Seq2Seq)
+        mask = lengths_to_mask(lengths, x.device) if lengths is not None else None
         
-        # 拼接并计算门控
-        cat_feat = torch.cat([style_feat, scene_latent], dim=-1) # torch.Size([32, 512])
-        gate = self.channel_gate(cat_feat) # torch.Size([32, 256])
-        
-        # 融合公式：Style * Gate + Scene * (1-Gate)
-        refined_style = style_feat * gate + scene_latent * (1 - gate)
-        
-        return self.norm(refined_style)
-    
-class SceneStyleAdaptorSimple(nn.Module):
-    def __init__(self, style_dim=256, scene_dim=512):
-        super().__init__()
-        
-        # 【关键步骤 1】LayerNorm
-        # 无论 Scene Embedding 初始化是多少，进来先标准化
-        # 这样 MLP 比较容易学习
-        self.scene_norm = nn.LayerNorm(scene_dim)
-        
-        # 【关键步骤 2】FiLM Generator
-        # 输入 Scene，输出 Gamma (缩放) 和 Beta (平移)
-        # 输出维度是 style_dim * 2
-        self.film_generator = nn.Sequential(
-            nn.Linear(scene_dim, style_dim),
-            nn.SiLU(),
-            nn.Linear(style_dim, style_dim * 2)
-        )
-        
-        # 初始化策略：
-        # 为了让微调开始时模型不崩，我们让 Gamma 接近 0，Beta 接近 0
-        # 这样初始效果是 Identity Mapping (输出 = 输入)
-        # 随着训练，Gamma 和 Beta 会慢慢变大，注入风格
-        nn.init.zeros_(self.film_generator[-1].weight)
-        nn.init.zeros_(self.film_generator[-1].bias)
+        # output: [Batch, Frames, 256]
+        x = self.transformer(x, src_key_padding_mask=~mask)
 
-        # 最后的输出 Norm
-        self.norm = nn.LayerNorm(style_dim)
+        if target_len is not None:
+            # x: [B, Frames, Dim] -> [B, Dim, Frames]
+            x = x.permute(0, 2, 1)
+            
+            # 强制池化到 target_len (例如 7)
+            x = F.adaptive_avg_pool1d(x, output_size=target_len)
+            
+            # 转回来 -> [B, target_len, 256] # target_len = 7
+            x = x.permute(0, 2, 1)
+        
+        return x
 
-    def forward(self, style_feat, scene_feat):
-        # style_feat: [Batch, 256]
-        # scene_feat: [Batch, 1, 512]
-        
-        scene_feat = scene_feat.squeeze(1)
-        
-        # 1. 对齐输入分布
-        scene_feat = self.scene_norm(scene_feat)
-        
-        # 2. 计算 FiLM 参数
-        params = self.film_generator(scene_feat)
-        gamma, beta = params.chunk(2, dim=-1)
-        
-        # 3. FiLM 调制公式
-        # (1 + gamma) 意味着初始时乘以 1，保持原样
-        refined_style = style_feat * (1 + gamma) + beta
-        
-        return self.norm(refined_style)
 
-class SceneStyleAdapterFiLM(nn.Module):
-    def __init__(self, style_dim=256, scene_dim=512):
-        super().__init__()
-        
-        # 【新增】先对 Scene 归一化，解决你的顾虑
-        self.scene_norm = nn.LayerNorm(scene_dim) 
-        
-        # FiLM 生成器
-        self.film_generator = nn.Sequential(
-            nn.Linear(scene_dim, style_dim * 2),
-            nn.SiLU(),
-            nn.Linear(style_dim * 2, style_dim * 2)
-        )
-        self.norm = nn.LayerNorm(style_dim)
-        nn.init.normal_(self.film_generator[-1].weight, mean=0.0, std=0.01)
-        nn.init.constant_(self.film_generator[-1].bias, 0.1) # 甚至加一点 Bias
 
-    def forward(self, style_feat, scene_feat):
-        scene_feat = scene_feat.squeeze(1)
-        
-        # 1. 先归一化 Scene
-        scene_feat = self.scene_norm(scene_feat)
-        
-        # 2. 生成参数
-        film_params = self.film_generator(scene_feat)
-        gamma, beta = film_params.chunk(2, dim=-1)
-        
-        # 3. 调制
-        refined_style = style_feat * (1 + gamma) + beta
-        return self.norm(refined_style)
+
+
+
+
 
 # adaln-zero in dit
 
@@ -221,6 +168,43 @@ class DiTBlock(nn.Module):
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x # torch.Size([32, 13, 256])
 
+class DiTBlockNew(nn.Module):
+    """
+    Standard DiT block: Condition 'c' controls BOTH Attention and MLP.
+    """
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        
+        mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        approx_gelu = lambda: nn.GELU(approximate="tanh")
+        self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        
+        # 【修改点】: 现在的 c 要控制一切，所以输出维度从 3x 变成 6x
+        # (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+        # 删除了 self.adaLN_modulation_trans
+
+    def forward(self, x, c): 
+        # x: [Batch, Seq_Len, Dim]
+        # c: [Batch, Dim] (Style + Time)
+        
+        # 一次性切分出 6 个参数
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        
+        # MSA (Self-Attention) Part
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        
+        # MLP Part
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        
+        return x
+
 class MldDenoiser(nn.Module):
 
     def __init__(self,
@@ -244,7 +228,7 @@ class MldDenoiser(nn.Module):
                  text_encoded_dim: int = 256,
                  motion_encoded_dim: int = 512,
                  nclasses: int = 10,
-                 use_update_baseline: bool = False,
+                 trajectory_config: dict = None,
                  **kwargs) -> None:
 
         super().__init__()
@@ -256,7 +240,7 @@ class MldDenoiser(nn.Module):
         self.abl_plus = False
         self.arch = arch
         self.motion_encoded_dim = motion_encoded_dim
-
+        self.trajectory_config = trajectory_config
 
 
 
@@ -286,11 +270,16 @@ class MldDenoiser(nn.Module):
                 self.latent_dim, position_embedding=position_embedding)
 
 
-
+        if self.trajectory_config.INJECTION_MODE == 'concat':  # 强力注入，我们修改升级后的版本
+            self.blocks = nn.ModuleList([
+                DiTBlockNew( hidden_size=self.latent_dim, num_heads=num_heads, mlp_ratio=4.0) for _ in range(num_layers)
+            ])
+        else:
         # DIT
-        self.blocks = nn.ModuleList([
-            DiTBlock( hidden_size=self.latent_dim, num_heads=num_heads, mlp_ratio=4.0) for _ in range(num_layers)
-        ])
+            self.blocks = nn.ModuleList([
+                DiTBlock( hidden_size=self.latent_dim, num_heads=num_heads, mlp_ratio=4.0) for _ in range(num_layers)
+            ])
+        
 
         # IN
         self.IN = nn.InstanceNorm1d(text_encoded_dim, affine=True)
@@ -304,12 +293,13 @@ class MldDenoiser(nn.Module):
 
         self.linear = nn.Linear(7*256, 6*256)
 
+        if self.trajectory_config.ENCODER_TYPE == 'seq': # 新的版本，升级轨迹编码器
+            self.trans_Encoder = TrajectoryEncoderV2(input_dim=4, hidden_dim=256, num_layers=2)
+            self.fusion_layer = nn.Linear(self.latent_dim + 256, self.latent_dim)
+        else:
+            self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
+        
 
-        self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
-        # self.scene_adapter = SceneStyleAdapterFiLM(style_dim=self.latent_dim, scene_dim=512)
-        self.scene_adapter = SceneStyleAdaptorSimple(style_dim=self.latent_dim, scene_dim=512)
-        self.use_update_baseline = use_update_baseline
-        print("Use update baseline:", self.use_update_baseline)
 
 
     def forward(self,
@@ -318,12 +308,14 @@ class MldDenoiser(nn.Module):
                 encoder_hidden_states,
                 lengths=None,
                 **kwargs):
-
-        sample = sample.permute(1, 0, 2)  # torch.Size([7, 32, 256])
-
-        # time_embedding
+        # 如果是训练，这个sample是原动作加随机timestep噪声的有噪声的动作；如果是推理，这个sample最开始在t=1000的时候是纯噪声，后面是越来越干净的动作
+        sample = sample.permute(1, 0, 2)  # torch.Size([7, 32, 256])，sample是加了噪声的z，原始动作加噪声，有轨迹（完完整整的原始动作）
+        # print("sample.shape:::", sample.shape)  # 推理的时候是[7,1,256]
+        # time_embedding：没动过
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        # print("timestep.shape???? ", timestep.shape) # torch.Size([2])
         timesteps = timestep.expand(sample.shape[1]).clone()  # torch.Size([32])，里面的值比如[10,265,985,...]
+        # print("timesteps.shape!!!", timesteps.shape)
         time_emb = self.time_proj(timesteps)
         time_emb = time_emb.to(dtype=sample.dtype) # torch.Size([32, 256])
         # [1, bs, latent_dim] <= [bs, latent_dim]
@@ -332,8 +324,7 @@ class MldDenoiser(nn.Module):
         # three conditions
         style_emb = encoder_hidden_states[1].permute(1, 0, 2)  # torch.Size([1, 32, 512])
         content_emb = encoder_hidden_states[0].permute(1, 0, 2) # torch.Size([7, 32, 256])
-        trans_cond = encoder_hidden_states[2] # torch.Size([32, 40, 3])
-        # scene_emb = encoder_hidden_states[3] # [B, 1, 512] (新增的)
+        trans_cond = encoder_hidden_states[-1] # torch.Size([32, 40, 4])
         
         # content        
         content_emb_latent = content_emb
@@ -345,33 +336,44 @@ class MldDenoiser(nn.Module):
         content_emb_latent = self.linear(content_emb_latent.reshape(content_emb_latent.shape[0],-1)).reshape(content_emb_latent.shape[0], 6 ,256) # torch.Size([32, 6, 256])
         content_emb_latent = content_emb_latent.permute(1,0,2) # torch.Size([6, 32, 256])
         # concatenation with sample
-        xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
+        # xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
 
-        # style encoder
+        # style encoder： style的也一行没改
         style_emb_latent = self.emb_proj_st(style_emb) # torch.Size([1, 32, 256])
         style_emb_latent = time_emb + style_emb_latent
-        style_emb_latent = style_emb_latent.squeeze() # torch.Size([32, 256])
+        style_emb_latent = style_emb_latent.squeeze(0) # torch.Size([32, 256])
 
-        # trajectory encoder
-        trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
-        trans_emb = trans_emb + time_emb
-        trans_emb = trans_emb.squeeze() # torch.Size([32, 256])
+        if self.trajectory_config.INJECTION_MODE == "concat":
+
+            latent_len = sample.shape[0]  # 7
+            # trajectory encoder
+            trans_emb = self.trans_Encoder(trans_cond, lengths, target_len=latent_len) # torch.Size([32, 7, 256])
+            # trans_emb = trans_emb + time_emb
+            # trans_emb = trans_emb.squeeze() # torch.Size([32, 256])
+            sample = self.query_pos(sample)  # torch.Size([7, 32, 256])
+
+            # 这里 query_pos 是类似 build_position_encoding 的正弦编码
+            # sample = sample + sample_pe 
+            xseq = torch.cat((content_emb_latent, trans_emb.permute(1,0,2), sample), axis=0)  # torch.Size([6 + 7 + 7, 32, 256])
+        else:
+            xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
+            trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])
+            trans_emb = trans_emb + time_emb
+            trans_emb = trans_emb.squeeze(0) # torch.Size([32, 256]) 
+            xseq = self.query_pos(xseq)
         
         # to dit blocks (N, T, D)
-        xseq = self.query_pos(xseq).permute(1,0,2) # torch.Size([32, 13, 256])
-
-        combined_emb = style_emb_latent + trans_emb
-        if self.use_update_baseline:
+        xseq = xseq.permute(1,0,2) # torch.Size([32, 20, 256])
+        if self.trajectory_config.INJECTION_MODE == "concat":
             for block in self.blocks:
-                xseq = block(xseq, combined_emb, combined_emb)
+                xseq = block(xseq, style_emb_latent) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
+            sample = xseq[:,-sample.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
         else:
-            # print("not use update baseline")
             for block in self.blocks:
                 xseq = block(xseq, style_emb_latent, trans_emb) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
-        sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
-       
+            sample = xseq[:,content_emb_latent.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
 
-        return (sample, )        
+        return (sample, )    # torch.Size([32, 7, 256])
 
 
 class EmbedAction(nn.Module):

@@ -21,6 +21,8 @@ from mld.models.get_model import get_model
 from mld.utils.logger import create_logger
 
 from visual import visual_pos 
+import json
+
 
 SCENE_DESCRIPTIONS = {
     # 1. 独木桥 (Dumuqiao)
@@ -200,7 +202,19 @@ def main():
     cfg.Name = "demo--" + cfg.NAME
     logger = create_logger(cfg, phase="demo")
 
+    path2 = '/root/autodl-tmp/MyRepository/MCM-LDM/vis_debug'
+    import shutil
+    for filename in os.listdir(path2):
+        file_path = os.path.join(path2, filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)  # 删除文件或链接
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path) # 删除子文件夹
+        except Exception as e:
+            print(f'❌ 删除 {file_path} 失败，原因: {e}')
 
+    print(f"✨ {path2} 内容已清理完毕")
 
 
     style_path = cfg.DEMO.style_motion_dir
@@ -234,6 +248,12 @@ def main():
     model.fact = cfg.TEST.FACT
     model.to(device)
     model.eval()
+
+    json_path = "/root/autodl-tmp/MyRepository/MCM-LDM/task_config.json"
+
+    # 使用 with 语句打开文件（这样会自动关闭文件，更安全）
+    with open(json_path, 'r', encoding='utf-8') as f:
+        scene_data = json.load(f)
 
     scale = cfg.DEMO.scale
     target_scene_label = "BaoFengYu" #  应该是用不上了，但为了保留字段
@@ -314,7 +334,7 @@ def main():
                         "scene_id": scene_ids_tensor,
                         "has_image": has_image} # torch.Size([1])
                 # joints,latents = model(batch)
-                joints = model(batch)
+                joints = model(batch, scene_data)
                 npypath = str(output_dir /
                             f"{content_file_name}_{style_file_name}.npy")
                 mp4path = npypath.replace('.npy', '.mp4')
