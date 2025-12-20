@@ -289,8 +289,8 @@ def recover_from_ric(data, joints_num):
 # ==========================================
 # Main
 # ==========================================
-if __name__ == "__main__":
-    RAW_DATA_PATH = "/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/new_joints/000011.npy"
+if __name__ == "__main__": # motion_representation 改成了好几个step
+    RAW_DATA_PATH = "/root/autodl-tmp/MyRepository/MCM-LDM/amass_sample/output_joints/B2 - walk to stand_poses.npy"
     REFERENCE_FILE = "/root/autodl-tmp/HumanML3D/HumanML3D/joints/000021.npy"
     OUTPUT_DIR = "./final_output_vis"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -312,7 +312,7 @@ if __name__ == "__main__":
     render_video(aligned_data, os.path.join(OUTPUT_DIR, "2_aligned.mp4"), "2_Aligned")
 
     # 4. Step 3 Extract (Strict Notebook Logic)
-    feature_vec = step3_extract_features(aligned_data)
+    feature_vec = step3_extract_features(aligned_data) # 22，3-  》  263
     print(f"Features: {feature_vec.shape}") # Should be (N-1, 263)
 
     # ... (Step 4 结束) ...

@@ -71,7 +71,7 @@ class TransEncoder(nn.Module):
         dist = self.seqTransEncoder(xseq,
                                 src_key_padding_mask=~aug_mask)[:dist.shape[0]]
 
-        return dist
+        return dist  # torch.Size([1, 32, 256])
 
 
 
@@ -308,10 +308,10 @@ class MldDenoiser(nn.Module):
                 encoder_hidden_states,
                 lengths=None,
                 **kwargs):
+        # 如果是训练，这个sample是原动作加随机timestep噪声的有噪声的动作；如果是推理，这个sample最开始在t=1000的时候是纯噪声，后面是越来越干净的动作
+        sample = sample.permute(1, 0, 2)  # torch.Size([7, 32, 256])，sample是加了噪声的z，原始动作加噪声，有轨迹（完完整整的原始动作）
 
-        sample = sample.permute(1, 0, 2)  # torch.Size([7, 32, 256])
-
-        # time_embedding
+        # time_embedding：没动过
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timesteps = timestep.expand(sample.shape[1]).clone()  # torch.Size([32])，里面的值比如[10,265,985,...]
         time_emb = self.time_proj(timesteps)
@@ -336,7 +336,7 @@ class MldDenoiser(nn.Module):
         # concatenation with sample
         # xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
 
-        # style encoder
+        # style encoder： style的也一行没改
         style_emb_latent = self.emb_proj_st(style_emb) # torch.Size([1, 32, 256])
         style_emb_latent = time_emb + style_emb_latent
         style_emb_latent = style_emb_latent.squeeze(0) # torch.Size([32, 256])

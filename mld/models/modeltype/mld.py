@@ -491,7 +491,7 @@ class MLD(BaseModel):
     def augment_content_rotation(self, features, angle_range):
         """
         对 Content Motion 进行随机的 Y 轴旋转增强。
-        features: [Batch, Frames, 263]
+        features: [Batch, Frames, 263] 原来数据集动作的263维特征向量
         """
         device = features.device
         bs, frames, dims = features.shape
@@ -1127,7 +1127,7 @@ class MLD(BaseModel):
         n_set = {
             "noise": noise, # torch.Size([32, 7, 256])
             "noise_prior": noise_prior,
-            "noise_pred": noise_pred, # torch.Size([32, 7, 256])
+            "noise_pred": noise_pred, # torch.Size([32, 7, 256]) 训练的时候预测噪声就好了，没必要去噪
             "noise_pred_prior": noise_pred_prior,
         }
 
@@ -1174,12 +1174,12 @@ class MLD(BaseModel):
         return rs_set
 # train
     def train_diffusion_forward(self, batch):
-        feats_ref = batch["motion"] # torch.Size([32, 40, 263])
-        feats_content = batch["motion"].clone() # torch.Size([32, 40, 263])
+        feats_ref = batch["motion"] # torch.Size([32, 40, 263])，原始动作，轨迹也是原始动作的轨迹
+        feats_content = batch["motion"].clone() # torch.Size([32, 40, 263])， 这是content
         # 1. 旋转增强 (根据 Config 开关)
         if self.cfg.TRAJECTORY.AUGMENTATION.ENABLED:
             angle = self.cfg.TRAJECTORY.AUGMENTATION.ROTATION_RANGE
-            feats_content = self.augment_content_rotation(feats_content, angle)
+            feats_content = self.augment_content_rotation(feats_content, angle)  # torch.Size([32, 40, 263])
 
         if self.cfg.TRAJECTORY.ROOT_MASKING_DIM4:
             feats_content[...,0:4] = 0.0 # 修改1：把Y的位置也去掉
@@ -1196,13 +1196,13 @@ class MLD(BaseModel):
         
         # content condition
         with torch.no_grad():
-            z, dist = self.vae.encode(feats_ref, lengths) # z:torch.Size([7, 32, 256]), dist: torch.Size([7, 32, 256])
-            z_content, dist = self.vae.encode(feats_content, lengths)
+            z, dist = self.vae.encode(feats_ref, lengths) # z（没去除轨迹，给他加噪声）:torch.Size([7, 32, 256]), dist: torch.Size([7, 32, 256])
+            z_content, dist = self.vae.encode(feats_content, lengths) # z_content（纯动作内容，没轨迹，如果是我们的（开了旋转增强，随机屏蔽50%））是条件，concat到z上，不加噪声，作为强条件
             cond_emb = z_content.permute(1,0,2)  # torch.Size([32, 7, 256])    
             if self.cfg.TRAJECTORY.USE_CONTENT_DROPOUT:
                 cond_emb[mask_content_drop] = 0.0       
-        # style condition
-        motion_seq = feats_ref*self.std + self.mean  # 【QUESTION】看起来风格有做一步反归一化处理，而content并没有被反归一化，是这样么？
+        # style condition：一行没改，本来MotionCLIP（style encoder）也是冻结的，batch里的东西都是归一化的，MotionCLIP吃的动作是反归一化的空间的
+        motion_seq = feats_ref*self.std + self.mean 
         motion_seq[...,:3]=0.0
         motion_seq = motion_seq.unsqueeze(-1).permute(0,2,3,1) # torch.Size([32, 263, 1, 40])
         motion_emb = self.motionclip.encoder({'x': motion_seq,
@@ -1210,7 +1210,7 @@ class MLD(BaseModel):
                         'mask': lengths_to_mask(lengths, device='cuda:{}'.format(self.cfg["DEVICE"][0]))})["mu"] # 一个style被提取成了512维的tensor，torch.Size([32, 512])
         motion_emb = motion_emb.unsqueeze(1) # torch.Size([32, 1, 512])
         mask_uncond = torch.rand(motion_emb.shape[0]) < self.guidance_uncodp # [F,F,...,F,T,F,T,...]
-        motion_emb[mask_uncond, ...] = 0
+        motion_emb[mask_uncond, ...] = 0 # style为什么要随机置空？为了做CFG
         
 
 
@@ -1218,7 +1218,7 @@ class MLD(BaseModel):
         if self.cfg.TRAJECTORY.ROOT_MASKING_DIM4:
             trans_cond = batch["motion"][...,:4]  # torch.Size([32, 40, 4])
         else:
-            trans_cond = batch["motion"][...,:3]  # torch.Size([32, 40, 3])
+            trans_cond = batch["motion"][...,:3]  # torch.Size([32, 40, 3])， 训练的时候轨迹是归一化的！！自然推理的时候轨迹也要归一化（与训练的策略保持一致）
         # three condition
         multi_cond_emb = [cond_emb, motion_emb, trans_cond] # 复习一下： cond_emb：内容（torch.Size([32, 7, 256])），motion_emb：风格（torch.Size([32, 1, 512])），trans_cond：轨迹（torch.Size([32, 40, 4])）
 

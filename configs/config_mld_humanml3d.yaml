@@ -4,7 +4,7 @@
 
 # Experiment name, more details in Section 'Experiment Name Explanation'
 #use 1029_mclip_removestylemlp_transadaln for mld.py
-NAME: Varsapura_from_scratch_1218
+NAME: Varsapura_from_scratch_1220
 # Debug mode. Set to True will enter the debug mode, then the program will
 # 1. use a tiny dataset for trianing and evaluation
 # 2. validate more intensively
@@ -30,12 +30,14 @@ TRAIN:
   # Total epochs for training
   END_EPOCH: 2000
 
-  # RESUME: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1216/checkpoints/epoch=49.ckpt' # Resume training from this path
-  RESUME: ''
+  RESUME: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1218/checkpoints/epoch=499.ckpt' # Resume training from this path
+  # RESUME: ''
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
   OPTIM:
     TYPE: AdamW # Optimizer type
-    LR: 1e-4 # Learning rate
+    # LR: 1e-4 # Learning rate
+    # 课程2，把学习率改为1e-5
+    LR: 1e-5
   # Ablation study configurations.
   ABLATION:
     SKIP_CONNECT: True
@@ -123,29 +125,29 @@ LOGGER:
     OFFLINE: False
     RESUME_ID: null
 
-TRAJECTORY:
+TRAJECTORY: # 如果要改回MCM-LDM的话，改--【】--
   # ================= 架构相关 =================
   # 是否启用强力注入 (Concat 方式)
   # 如果 False，则回退到原始的 AdaLN 弱注入
-  INJECTION_MODE: 'concat'  # options: 'concat', 'adaln'
+  INJECTION_MODE: 'concat'  # options: 'concat', 'adaln'，--【 'adaln'】--
   
-  # 轨迹编码器类型
+  # 轨迹编码器类型：架构层面
   # 'seq': 输出序列 (我们改的那版)
   # 'pool': 输出单个 Token (MCM-LDM 原版)
-  ENCODER_TYPE: 'seq'
+  ENCODER_TYPE: 'seq'  # --【 'pool'】--
 
   # ================= 训练策略 =================
   # 旋转增强 (解决解耦的核心)
-  AUGMENTATION:
-    ENABLED: True
-    ROTATION_RANGE: 90.0  # 角度范围 +/- 90度
+  AUGMENTATION: #这个部分全部都是旋转增强（训练！！！！！）
+    ENABLED: True #是否开启旋转增强
+    ROTATION_RANGE: 30.0  # 增强的角度范围 +/- 90度
   
-  # 根节点屏蔽 (双重保险,屏蔽263维特征向量的前4维)
-  ROOT_MASKING_DIM4: True
+  # 根节点屏蔽 (双重保险,屏蔽263维特征向量的前4维)，这个的意思仅仅是屏蔽前四维（MCM-LDM是屏蔽前三维），用MCM-LDM的就得把这个改成False，解决报错
+  ROOT_MASKING_DIM4: True  # 这个参数训练推理都是他 # --【 False 】-
   
-  # Content Dropout (逼迫模型看轨迹)
+  # Content Dropout (逼迫模型看轨迹)，注意也是训练过程
   USE_CONTENT_DROPOUT: True
-  CONTENT_DROPOUT_PROB: 0.5
+  CONTENT_DROPOUT_PROB: 0.15  # 这里可以尝试课程学习，比如说（只是比如说）：step1：训练100个epoch（保持prob=1.0，旋转增强也不要），step2开prob=0.2（旋转增强30度）
 
   # ================= 推理引导 (默认值) =================
   # 这些可以在推理脚本中覆盖，但这里设个默认值
