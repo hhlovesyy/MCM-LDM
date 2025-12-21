@@ -1,26 +1,37 @@
 {
     "project_name": "Demo_Task_01",
     "environment": {
-        "obstacles": []
+        "obstacles": [
+            {
+                "id": "obs_0",
+                "type": "cylinder",
+                "center": [
+                    1.4,
+                    1.5
+                ],
+                "radius": 0.5,
+                "height": 2.0
+            }
+        ]
     },
     "trajectory": {
         "type": "bezier_control_points",
         "points": [
             [
-                -0.47,
-                0.17
+                -0.27,
+                0.5
             ],
             [
-                -1.53,
-                1.07
+                0.63,
+                1.97
             ],
             [
-                -1.47,
-                2.67
+                2.67,
+                0.73
             ],
             [
-                -3.0,
-                3.77
+                1.27,
+                -0.73
             ]
         ],
         "preview_valid": true

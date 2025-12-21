@@ -74,6 +74,43 @@ class SimpleClassifier(nn.Module):
     def forward(self, x):
         return self.net(x)
     
+def plot_gradient_history(history, save_path="debug_grad_analysis.png", max_norm=5.0):
+    """
+    绘制梯度变化曲线
+    history: dict, 包含 'traj', 'obs', 'final', 'timesteps' 四个 list
+    """
+    plt.figure(figsize=(12, 6))
+    
+    steps = np.arange(len(history['timesteps']))
+    # 为了直观，X轴显示 diffusion timestep (从1000到0)
+    timesteps = history['timesteps']
+    
+    # 1. 绘制各分量
+    plt.plot(steps, history['traj'], label='Trajectory Attraction', color='blue', alpha=0.6)
+    plt.plot(steps, history['obs'], label='Obstacle Repulsion', color='red', alpha=0.6)
+    
+    # 2. 绘制最终合成并裁剪后的梯度
+    plt.plot(steps, history['final'], label='Final Grad (Clipped)', color='black', linewidth=2, linestyle='--')
+    
+    # 3. 绘制裁剪阈值线
+    plt.axhline(y=max_norm, color='gray', linestyle=':', label=f'Clip Threshold ({max_norm})')
+    
+    # 设置 X 轴标签 (每隔10步显示一次t)
+    # 既然 step 是顺序的，我们可以只标注几个关键点
+    tick_indices = np.linspace(0, len(steps)-1, 10, dtype=int)
+    plt.xticks(tick_indices, [str(timesteps[i]) for i in tick_indices])
+    plt.xlabel("Diffusion Timestep (t)")
+    
+    plt.ylabel("Gradient Norm")
+    plt.title("Guidance Gradient Dynamics over Time")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"[Debug] Gradient analysis saved to {save_path}")
+
 def calculate_trajectory_correct(data):
     """
     修正后的积分逻辑，完美对齐 HumanML3D 的 recover_from_ric。
@@ -422,10 +459,10 @@ class MLD(BaseModel):
             nn.Linear(1024, 512) # 输出 512 维，与原始 style_emb 维度相同
         )
 
-    def compute_obstacle_guidance(self, latents, t, obstacle_info, encoder_hidden_states, lengths):
+    def compute_obstacle_guidance(self, latents, t, obstacles, encoder_hidden_states, lengths):
         """
-        计算避障的斥力梯度
-        obstacle_info: {'center': [x, z], 'radius': r}
+        SDF 避障引导
+        obstacles: list of dict (从 json 解析来的障碍物列表)
         """
         with torch.enable_grad():
             latents = latents.detach().requires_grad_(True)
@@ -442,10 +479,16 @@ class MLD(BaseModel):
             beta_prod_t = 1 - alpha_prod_t
             pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
             
-            # 2. Decode & 反归一化 (必须在物理空间做避障！)
+            # 2. Decode & 反归一化
             pred_z0_input = pred_z0.permute(1, 0, 2)
-            fake_lengths = [lengths[0]] * latents.shape[0]
-            pred_motion_norm = self.vae.decode(pred_z0_input, fake_lengths)
+            # 这里可以用一个假的 lengths，或者取 max length，只要保证解码长度对就行
+            # 假设 obstacles 不随时间变化，我们用全长
+            fake_lengths = [latents.shape[2]] * latents.shape[0] # latent seq len? 
+            # 注意: VAE decode 出来的长度通常与输入 latent 长度相关，但也可能被 lengths 截断
+            # 这里为了安全，建议用 self.generate_custom_trajectory 里的长度逻辑
+            # 简单起见，我们假设 VAE 输出长度就是我们想要的轨迹长度
+            
+            pred_motion_norm = self.vae.decode(pred_z0_input, lengths) # 使用传入的 lengths
             
             # 反归一化
             if self.mean.device != latents.device:
@@ -453,43 +496,61 @@ class MLD(BaseModel):
                 self.std = self.std.to(latents.device)
             pred_motion = pred_motion_norm * self.std + self.mean
             
-            # 3. 积分得到轨迹 (XZ平面)
+            # 3. 积分得到物理轨迹 (使用修正后的逻辑)
             pred_rot_vel = pred_motion[..., 0]
             pred_vel_x = pred_motion[..., 1]
             pred_vel_z = pred_motion[..., 2]
             
             pred_rot = torch.cumsum(pred_rot_vel, dim=1)
-            global_vel_x = pred_vel_x * torch.cos(pred_rot) - pred_vel_z * torch.sin(pred_rot)
-            global_vel_z = pred_vel_x * torch.sin(pred_rot) + pred_vel_z * torch.cos(pred_rot)
+            c = torch.cos(pred_rot)
+            s = torch.sin(pred_rot)
+            global_vel_x = pred_vel_x * c - pred_vel_z * s
+            global_vel_z = pred_vel_x * s + pred_vel_z * c
             
             pred_pos_x = torch.cumsum(global_vel_x, dim=1)
             pred_pos_z = torch.cumsum(global_vel_z, dim=1)
             
-            # 归零起点 (消除初始偏差)
+            # 归零起点 (很重要，只关心相对形状避障)
             pred_pos_x = pred_pos_x - pred_pos_x[:, 0:1]
             pred_pos_z = pred_pos_z - pred_pos_z[:, 0:1]
             
-            # 4. 计算避障 Loss (Repulsive Loss)
-            obs_center = torch.tensor(obstacle_info['center'], device=latents.device)
-            obs_radius = obstacle_info['radius']
-            safety_margin = 0.4  # 安全余量 0.4米
-            effective_radius = obs_radius + safety_margin
+            # 组合成 [B, L, 2] 的点集
+            current_points = torch.stack([pred_pos_x, pred_pos_z], dim=-1)
             
-            # 计算每一帧到圆心的距离
-            # pred_pos_x: [B, L]
-            dist_to_obs = torch.sqrt((pred_pos_x - obs_center[0])**2 + (pred_pos_z - obs_center[1])**2)
+            # 4. 计算 SDF Loss
+            total_obstacle_loss = torch.tensor(0.0, device=latents.device)
             
-            # 核心 Loss: 只惩罚进入半径的点
-            # ReLU: 小于0变0，大于0保留
-            # 我们希望 dist > radius -> radius - dist < 0 -> loss = 0
-            # 我们希望 dist < radius -> radius - dist > 0 -> loss > 0
-            # collision_loss = torch.nn.functional.relu(obs_radius - dist_to_obs).mean()
-            penalty = torch.nn.functional.relu(effective_radius - dist_to_obs)
-            collision_loss = (penalty ** 2).sum()
+            # 定义安全边距 (Margin): 我们希望人离障碍物至少有 0.3 米的距离
+            safety_margin = 0.3
             
+            for obs in obstacles:
+                center = torch.tensor(obs['center'], device=latents.device)
+                
+                if obs['type'] == 'cylinder':
+                    radius = obs['radius']
+                    # 计算 SDF
+                    sdf = diff_sdf_circle(current_points, center, radius)
+                    
+                elif obs['type'] == 'box':
+                    # box 需要 size [width, depth]
+                    # json 里的 extent 可能是 [w, d]
+                    size = torch.tensor(obs.get('extent', [1.0, 1.0]), device=latents.device)
+                    sdf = diff_sdf_box(current_points, center, size)
+                else:
+                    continue
+                
+                # 核心避障公式: Loss = ReLU(Margin - SDF)
+                # 如果 SDF > Margin (很远)，Loss = 0
+                # 如果 SDF < Margin (太近或撞上了)，Loss > 0
+                # 撞得越深，Loss 越大
+                penetration = torch.nn.functional.relu(safety_margin - sdf)
+                
+                # 平方惩罚，让梯度更平滑且对深层碰撞反应剧烈
+                total_obstacle_loss += (penetration ** 2).sum()
+
             # 5. 求导
-            if collision_loss > 1e-6:
-                grad = torch.autograd.grad(collision_loss, latents)[0]
+            if total_obstacle_loss > 1e-6:
+                grad = torch.autograd.grad(total_obstacle_loss, latents)[0]
             else:
                 grad = torch.zeros_like(latents)
                 
@@ -1198,7 +1259,7 @@ class MLD(BaseModel):
             multi_cond_emb = [motion_emb_content, motion_emb_cfg, uncond_trans]
 
 
-            z = self._diffusion_reverse(multi_cond_emb, lengths, scale, target_global_pos)
+            z = self._diffusion_reverse(multi_cond_emb, lengths, scale, target_global_pos, scene_data)
 
         elif self.stage in ['vae']:
             motions = batch['motion']
@@ -1352,10 +1413,22 @@ class MLD(BaseModel):
             return self.forward_wo_sceneLoss(batch, scene_data)
         
 
-    def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None, target_global_pos=None):
+    def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None, target_global_pos=None, scene_data=None):
         # 1. 自动判断 CFG 模式
         total_bsz = encoder_hidden_states[0].shape[0]  # 3
         base_bsz = len(lengths)  # 1
+        # 准备障碍物数据
+        obstacles = []
+        if scene_data is not None:
+            obstacles = scene_data['environment']['obstacles']
+        
+        # 【新增】梯度记录器
+        grad_history = {
+            'traj': [],
+            'obs': [],
+            'final': [],
+            'timesteps': []
+        }
         
         # 计算倍率: 
         # 2 -> 标准 CFG [Uncond, Cond]
@@ -1414,14 +1487,15 @@ class MLD(BaseModel):
             start_t = self.cfg.TRAJECTORY.GUIDANCE.GUIDANCE_START # 比如1000
             end_t = self.cfg.TRAJECTORY.GUIDANCE.GUIDACE_END
             interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
+            way_guidance_scale = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_GUIDE_STRENGTH
+            obstacle_guidance_scale = self.cfg.TRAJECTORY.GUIDANCE.OBSTACLE_GUIDE_STRENGTH
             if end_t < t < start_t: 
                 for k in range(num_opt_steps):
-                    total_grad = torch.zeros_like(latents).to(latents.device)
+                    grad_traj = torch.zeros_like(latents).to(latents.device)
+                    grad_obs = torch.zeros_like(latents).to(latents.device)
                     if use_guidance and self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_MODE:
-                        way_guidance_scale = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_GUIDE_STRENGTH
-                        
                         # 计算梯度
-                        grad = self.compute_spatial_guidance(
+                        grad_traj = self.compute_spatial_guidance(
                             latents, 
                             t.unsqueeze(0).repeat(base_bsz), # expand t
                             target_global_pos, 
@@ -1429,21 +1503,42 @@ class MLD(BaseModel):
                             lengths,
                             interval=interval
                         )
+                    if use_guidance and self.cfg.TRAJECTORY.GUIDANCE.OBSTACLE_MODE:
+                        grad_obs = self.compute_obstacle_guidance(
+                            latents, 
+                            t.unsqueeze(0).repeat(base_bsz), 
+                            obstacles, 
+                            [h[base_bsz:] for h in encoder_hidden_states],
+                            lengths,
+                        )
 
-                        grad = grad * way_guidance_scale
+                    # 计算加权后的模长 (用于记录)
+                    norm_traj = (grad_traj * way_guidance_scale).norm().item()
+                    norm_obs = (grad_obs * obstacle_guidance_scale).norm().item()
+                    grad = grad_traj * way_guidance_scale + grad_obs * obstacle_guidance_scale
 
-                        # 2. 梯度裁剪 (保持你现在的逻辑，非常稳)
-                        grad_norm = grad.norm()
-                        max_grad_norm = 5.0 # 或者根据 t 动态调整
-                        if grad_norm > max_grad_norm:
-                            scale_factor = max_grad_norm / (grad_norm + 1e-8)
-                            grad = grad * scale_factor
-                        
-                        # 3. 更新 Latents
-                        # 这里的 step_size 可以小一点，因为我们跑很多次
-                        step_size = 1.0 
-                        latents = latents - step_size * grad
-                        latents = latents.detach().requires_grad_(True) # 记得 detach 并重新开启梯度追踪
+                    # 2. 梯度裁剪 (保持你现在的逻辑，非常稳)
+                    grad_norm = grad.norm()
+                    max_grad_norm = 5.0 # 或者根据 t 动态调整
+                    if grad_norm > max_grad_norm:
+                        scale_factor = max_grad_norm / (grad_norm + 1e-8)
+                        grad = grad * scale_factor
+                    norm_final = grad.norm().item()
+                    
+                    # 3. 更新 Latents
+                    # 这里的 step_size 可以小一点，因为我们跑很多次
+                    step_size = 1.0 
+                    latents = latents - step_size * grad
+                    latents = latents.detach().requires_grad_(True) # 记得 detach 并重新开启梯度追踪
+
+                    # 【新增】只记录 Inner Loop 的最后一次迭代，或者记录每一次？
+                    # 建议：为了曲线清晰，只记录 k == 0 (第一次) 或者 k == num_opt_steps-1 (最后一次)
+                    # 这里我们记录最后一次，代表这一步最终施加的力
+                    if k == num_opt_steps - 1:
+                        grad_history['traj'].append(norm_traj)
+                        grad_history['obs'].append(norm_obs)
+                        grad_history['final'].append(norm_final)
+                        grad_history['timesteps'].append(t.item())
 
                         # print(f"Step {t.item()} Inner {k}: Loss:", grad.norm())
             # 2. 扩展 Latents 以匹配 Condition 的倍率 (2倍或3倍), latents是[1,7,256]
