@@ -255,6 +255,8 @@ def main():
     with open(json_path, 'r', encoding='utf-8') as f:
         scene_data = json.load(f)
 
+    
+
     scale = cfg.DEMO.scale
     target_scene_label = "BaoFengYu" #  应该是用不上了，但为了保留字段
     scene_prompt = cfg.TEST.MULTI_MODAL_TEXT_PROMPT

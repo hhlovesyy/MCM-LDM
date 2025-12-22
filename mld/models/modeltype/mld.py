@@ -113,7 +113,7 @@ def plot_gradient_history(history, save_path="debug_grad_analysis.png", max_norm
 
 def calculate_trajectory_correct(data):
     """
-    修正后的积分逻辑，完美对齐 HumanML3D 的 recover_from_ric。
+    修正后的积分逻辑
     data: [Batch, Seq, 4] (RotVel, VelX, VelZ, Height)
     """
     # 1. 提取特征
@@ -121,44 +121,40 @@ def calculate_trajectory_correct(data):
     local_vel_x = data[..., 1]
     local_vel_z = data[..., 2]
     
-    # 2. 积分得到累积角度 (Feature Space)
-    # 模仿 HumanML3D 的错位逻辑：第 t 帧的速度是用 t-1 帧的角度旋转的
-    # 所以角度累加要比速度慢一拍，或者速度序列要做 shift
-    # 这里我们采用与 GT 脚本完全一致的逻辑：
+    # 2. 积分角度
+    # r_rot_ang[i] 代表第 i 帧相对于第 0 帧的旋转角
     r_rot_ang = torch.zeros_like(rot_vel)
     r_rot_ang[..., 1:] = rot_vel[..., :-1]
     r_rot_ang = torch.cumsum(r_rot_ang, dim=-1)
     
-    # 【核心修正 1】: 真实的物理角度是特征角度的 2 倍！
-    # 因为 Quaternion q = [cos(a), 0, sin(a), 0] 代表旋转 2a
-    real_angle = r_rot_ang * 2.0
-    
-    # 3. 计算旋转后的世界速度
-    # HumanML3D 使用 qinv 进行旋转，对应的是反向旋转
-    # 对于 (0, 1, 0) 轴，正角度通常是逆时针(向左)。
-    # qinv 意味着我们要用负角度公式，或者交换 sin/cos 的符号
+    real_angle = r_rot_ang * 2.0 # Quaternion mapping
     
     c = torch.cos(real_angle)
     s = torch.sin(real_angle)
     
-    # 再次模仿 GT 的错位：第 0 帧位置不变，第 1 帧位置由 data[0] 决定
+    # 3. 准备世界坐标速度
+    # 依然保持 shift，因为特征是对上一帧的 delta
     vel_x_shifted = torch.zeros_like(local_vel_x)
     vel_z_shifted = torch.zeros_like(local_vel_z)
     vel_x_shifted[..., 1:] = local_vel_x[..., :-1]
     vel_z_shifted[..., 1:] = local_vel_z[..., :-1]
     
-    # 【核心修正 2】: 适配 qinv 的旋转方向 (GT向左弯，对应 -X)
-    # 公式推导：
-    # X_global = x_local * cos - z_local * sin
-    # Z_global = x_local * sin + z_local * cos
+    # 旋转投影
+    # HumanML3D/T2M GPT 使用的是 (vel_x * c - vel_z * s, vel_x * s + vel_z * c)
+    # 对应逆时针旋转
     global_vel_x = vel_x_shifted * c - vel_z_shifted * s
     global_vel_z = vel_x_shifted * s + vel_z_shifted * c
     
-    # 4. 积分得到位置
+    # 4. 积分位置
     pred_pos = torch.zeros_like(data[..., :3])
     pred_pos[..., 0] = torch.cumsum(global_vel_x, dim=-1)
     pred_pos[..., 2] = torch.cumsum(global_vel_z, dim=-1)
-    pred_pos[..., 1] = data[..., 3] # 高度
+    
+    # 【强制对齐】：确保第 0 帧一定是 (0,0,0)，消除任何累积误差的初始偏移
+    # 这样 guidance 计算 diff 时，起点永远是对齐的
+    pred_pos = pred_pos - pred_pos[:, 0:1, :]
+    
+    pred_pos[..., 1] = data[..., 3] # 高度直接赋值
     
     return pred_pos
 
@@ -1116,8 +1112,21 @@ class MLD(BaseModel):
             dist_profile = self.traj_processor.calculate_cumulative_distance(content_npy) # (39,)
             
             # B. 生成避障路径 (A*)
-            waypoints = scene_data['trajectory']['points']
-            obstacles = scene_data['environment']['obstacles']
+            import copy
+            waypoints = copy.deepcopy(scene_data['trajectory']['points'])
+            obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
+            
+            startPosX, startPosY = waypoints[0][0], waypoints[0][1]
+            for p in waypoints:
+                p[0] -= startPosX
+                p[1] -= startPosY
+            for obs in obstacles:
+                if 'center' in obs:
+                    obs['center'][0] -= startPosX
+                    obs['center'][1] -= startPosY
+                elif 'pos' in obs: # 防御性编程，有的格式可能是 pos
+                    obs['pos'][0] -= startPosX
+                    obs['pos'][1] -= startPosY
             dense_curve = self.traj_processor.generate_collision_free_path(waypoints, obstacles) #shape:(200, 2)
             
             # C. 重采样 (对齐 Content 长度)
@@ -1270,6 +1279,18 @@ class MLD(BaseModel):
             # feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
 
         joints = self.feats2joints(feats_rst.detach().cpu())
+
+        if startPosX != 0 or startPosY != 0:
+            # 只平移根节点和所有子节点的位置
+            # 0 是 x 轴, 2 是 z 轴 (根据你的 trajectory 生成逻辑)
+            joints[..., 0] += startPosX
+            joints[..., 2] += startPosY
+        
+        # 同时，如果 target_global_pos 需要用于可视化 debug，也加回去
+        if target_global_pos is not None:
+             target_global_pos[..., 0] += startPosX
+             target_global_pos[..., 2] += startPosY
+        # =======================================================
 
         # ================= [新增] 埋点可视化逻辑 =================
         # 只画 Batch 中的第 0 个样本
