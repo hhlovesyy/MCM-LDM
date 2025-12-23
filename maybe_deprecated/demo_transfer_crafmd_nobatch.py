@@ -1,0 +1,214 @@
+import logging
+import os
+import time
+from builtins import ValueError
+from multiprocessing.sharedctypes import Value
+from pathlib import Path
+import datetime
+import pickle
+import numpy as np
+import torch
+import torch.backends.cudnn as cudnn
+from torch.utils.data import ConcatDataset, DataLoader
+# from torchsummary import summary
+from tqdm import tqdm
+
+from mld.config import parse_args
+# from mld.datasets.get_dataset import get_datasets
+from mld.data.get_data import get_datasets
+from mld.data.sampling import subsample, upsample
+from mld.models.get_model import get_model
+from mld.utils.logger import create_logger
+
+from visual import visual_pos  
+
+SCENE_LIST = sorted([
+    "BaoFengYu",        # 暴风雨
+    "Bar",              # 酒吧
+    "BoLiFangJian",     # 玻璃房间
+    "CroudedPlace",     # 拥挤
+    "Dark",             # 黑暗
+    "DiAiTianhuaban",   # 低矮天花板
+    "DiAiTongDao",      # 低矮通道
+    "Dumuqiao",         # 独木桥
+    "IcyRoad",          # 冰面
+    "LeanLeft",         # 左倾
+    "ShuiKengDiMian",   # 水坑
+    "T_Stage",          # T台
+    "WalkInSnowOrSand", # 雪地/沙地
+    "WetFloor"          # 湿地
+])
+
+SCENE_DESCRIPTIONS = {
+    # 1. 独木桥 (Dumuqiao)
+    "Dumuqiao": "Walking on a narrow bridge.",
+    # 2. 低矮通道 (DiAiTongDao)
+    "DiAiTongDao": "Crouching while walking.",
+    # 3. 水坑地面 (ShuiKengDiMian)
+    "ShuiKengDiMian": "Walking on muddy ground.",
+    # 4. 玻璃房间 (BoLiFangJian)
+    "BoLiFangJian": "Walking in a glass room.",
+    # 5. T台走秀 (T_Stage)
+    "T_Stage":"Fashion model walking.",
+    # 6. 拥挤场合 (CroudedPlace)
+    "CroudedPlace": "Walking through a crowd.",
+    # 7. 低矮天花板 (DiAiTianhuaban)
+    "DiAiTianhuaban": "Walking under a low ceiling.",
+    # 8. 酒吧/醉酒 (Bar)
+    "Bar": "Drunk walking.",
+    # 9. 雪地/沙地 (WalkInSnowOrSand)
+    "WalkInSnowOrSand": "Walking in deep snow.",
+    # 10. 摸黑 (Dark)
+    "Dark": "Walking in the dark.",
+    # 11. 左倾 (LeanLeft)
+    "LeanLeft": "Leaning left.",
+    # 12. 潮湿地面 (WetFloor)
+    "WetFloor": "Slippery floor.",
+    # 13. 暴风雨 (BaoFengYu)
+    "BaoFengYu": "Walking in strong wind.",
+    # 14. 冰面 (IcyRoad)
+    "IcyRoad": "Walking on ice."
+}
+
+
+def main():
+    """
+    get input text
+    ToDo skip if user input text in command
+    current tasks:
+         1 text 2 mtion
+         2 motion transfer
+         3 random sampling
+         4 reconstruction
+
+    ToDo 
+    1 use one funtion for all expoert
+    2 fitting smpl and export fbx in this file
+    3 
+
+    """
+    # parse options
+    cfg = parse_args(phase="demo")
+    cfg.FOLDER = cfg.TEST.FOLDER
+    cfg.Name = "demo--" + cfg.NAME
+    logger = create_logger(cfg, phase="demo")
+
+    style_path = cfg.DEMO.style_motion_dir
+    content_path = cfg.DEMO.content_motion_dir
+
+
+
+
+
+    eval_name = "content"
+    eval_id = 0
+
+    logger.info("cfg.DEMO.SAVE_PATH_FOR_EVAL: {}".format(cfg.DEMO.SAVE_PATH_FOR_EVAL))
+    # 如果有提供保存的路径，使用保存的路径，并创建文件夹，给出logger的信息
+    if cfg.DEMO.SAVE_PATH_FOR_EVAL is not None:
+         save_path = cfg.DEMO.SAVE_PATH_FOR_EVAL
+    else:
+        # chekpoints_str = cfg.TEST.CHECKPOINTS.split("/")[-1].split(".")[0].split("=")[1]
+        save_path = Path(os.path.join(cfg.FOLDER, str(cfg.model.model_type), str(cfg.NAME)))
+        save_path.mkdir(parents=True, exist_ok=True)
+        save_path = os.path.join(save_path, eval_name+'-'+str(eval_id)+'_expname_'+str(cfg.NAME)+"_scale_"+str(cfg.DEMO.scale).replace('.','-') + '.pkl')
+    # 打印一下save_path，确认没有问题，用logger.info
+    logger.info(f"save_path: {save_path}")
+
+    # cuda options
+    if cfg.ACCELERATOR == "gpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+            str(x) for x in cfg.DEVICE)
+        device = torch.device("cuda:0")
+    # load dataset to extract nfeats dim of model
+    dataset = get_datasets(cfg, logger=logger, phase="test")[0]
+    # create mld model
+    model = get_model(cfg, dataset)
+    # loading checkpoints
+    logger.info("Loading checkpoints from {}".format(cfg.TEST.CHECKPOINTS))
+    state_dict = torch.load(cfg.TEST.CHECKPOINTS,
+                            map_location="cpu")["state_dict"]
+    model.load_state_dict(state_dict, strict=False)
+    logger.info("model {} loaded".format(cfg.model.model_type))
+    model.sample_mean = cfg.TEST.MEAN
+    model.fact = cfg.TEST.FACT
+    model.to(device)
+    model.eval()
+
+    import random
+
+
+    # MOTION = cfg.DEMO.MOTION
+    scale = cfg.DEMO.scale
+
+    sum1 = 0
+
+    save_all = {}
+    save_all["joints"]=[]
+    save_all["id"]=[]
+    save_all["label_content"]=[]
+    save_all["label_style"]=[]
+    save_all["label_scene"] = [] # <--- 【新增】用于存储 GT 场景标签
+    save_all["scene_id"] = []    # <--- 【新增】用于存储 GT 场景的数字 ID
+
+    for content in os.listdir(content_path):
+
+
+
+        content_file_name = content.split('.')[0]
+        content_file_path = os.path.join(content_path, content)
+        content_motion = np.load(content_file_path)
+        content_motion = np.array([content_motion])
+        # content_motion = np.expand_dims(content_motion,0)
+        content_motion = torch.tensor(content_motion).to(device)
+
+        length = content_motion.shape[1]
+        lengths = [int(length)]
+
+
+        for style in os.listdir(style_path):
+            print('sum={}, total 1600'.format(sum1))
+            sum1 = sum1 + 1
+
+
+            style_file_name = style.split('.')[0]
+            style_file_path = os.path.join(style_path, style)
+            style_motion = np.load(style_file_path)
+            style_motion = np.array([style_motion])
+            style_motion = torch.tensor(style_motion).to(device)
+
+            random_scene_name = random.choice(SCENE_LIST)
+            scene_text = SCENE_DESCRIPTIONS[random_scene_name]
+            scene_id = SCENE_LIST.index(random_scene_name) # 获取场景对应的数字ID
+
+            with torch.no_grad():
+                rep_lst = []    
+                rep_ref_lst = []
+                texts_lst = []
+
+                # prepare batch data
+                batch = {"length": lengths, "style_motion": style_motion, "tag_scale": scale, "content_motion": content_motion,
+                        "scene_text": [scene_text], # 每次都随机挑一个
+                        # "scene_text": [""],
+                        "has_image": torch.tensor([False], device=device),
+                        "scene_image": torch.zeros(1, 3, 224, 224, device=device)}
+                joints = model(batch)
+                # npypath = str(output_dir /
+                #             f"{content_file_name}_{style_file_name}_{str(lengths[0])}_scale_{str(scale).replace('.','-')}.npy")
+                # np.save(npypath, joints[0].detach().cpu().numpy())
+                idid = "content"+content_file_name+"_"+"style"+style_file_name+"_scale_"+str(scale).replace('.','-')
+                save_all["joints"].append(joints[0].detach().cpu().numpy())
+                save_all["id"].append(idid)
+                save_all["label_content"].append(content_file_name.split("-")[-1])
+                save_all["label_style"].append(style_file_name.split("-")[-1])
+                save_all["label_scene"].append(random_scene_name) # <--- 【新增】
+                save_all["scene_id"].append(scene_id)             # <--- 【新增】
+
+
+    
+    # a = [1, 2, 3]
+    with open(save_path, 'wb') as f:
+	    pickle.dump(save_all, f)
+            
+if __name__ == "__main__":
+    main()

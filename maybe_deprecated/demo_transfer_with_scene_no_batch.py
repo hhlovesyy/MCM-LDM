@@ -19,11 +19,9 @@ from mld.data.get_data import get_datasets
 from mld.data.sampling import subsample, upsample
 from mld.models.get_model import get_model
 from mld.utils.logger import create_logger
-import itertools # 用来做组合
 
 from visual import visual_pos 
 import json
-from torch.nn.utils.rnn import pad_sequence # 引入这个神器
 
 
 SCENE_DESCRIPTIONS = {
@@ -199,7 +197,6 @@ def main():
 
     """
     # parse options
-    start_time = time.perf_counter()
     cfg = parse_args(phase="demo")
     cfg.FOLDER = cfg.TEST.FOLDER
     cfg.Name = "demo--" + cfg.NAME
@@ -223,8 +220,7 @@ def main():
     style_path = cfg.DEMO.style_motion_dir
     content_path = cfg.DEMO.content_motion_dir
 
-    render_video = cfg.DEMO.render_video
-    print("render video ? ", render_video)
+
     # 
     cfg.DEMO.TIME = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
     output_dir = Path(
@@ -304,151 +300,57 @@ def main():
             text_file.write("\nscene cfg: {}".format(cfg.TEST.CFG_SCENE))
             print(f"File saved to: {output_dir / 'inference_text_prompt.txt'}") # "w" 模式的含义是 "write"，覆盖写入，没有的话会创建
         
-    # -------------------------------------------------------
-    # 1. 预加载所有数据 (Load All into RAM)
-    # -------------------------------------------------------
-    print("🚀 Pre-loading all Contents and Styles...")
-
-    # A. 加载所有 Content
-    all_contents = [] 
-    content_files = [f for f in os.listdir(content_path) if f.endswith('.npy')]
-    for f in content_files:
-        path = os.path.join(content_path, f)
-        data = np.load(path)
-        if len(data.shape) == 3: data = data[0] # (L, D)
-        all_contents.append({
-            "name": f.split('.')[0],
-            "motion": torch.tensor(data).float(),
-            "length": data.shape[0]
-        })
-
-    # B. 加载所有 Style
-    all_styles = []
-    style_files = [f for f in os.listdir(style_path) if f.endswith('.npy')]
-    for f in style_files:
-        path = os.path.join(style_path, f)
-        data = np.load(path)
-        if len(data.shape) == 3: data = data[0] # (L, D)
-        all_styles.append({
-            "name": f.split('.')[0],
-            "motion": torch.tensor(data).float(),
-            "length": data.shape[0]
-        })
-
-    print(f"✅ Loaded {len(all_contents)} Contents and {len(all_styles)} Styles.")
-
-    # -------------------------------------------------------
-    # 2. 生成任务列表 (Cartesian Product)
-    # -------------------------------------------------------
-    # 这就是你要的：直接算出所有组合 (Content X Style)
-    # 结果类似: [(c1, s1), (c1, s2), ... (c2, s1), ...]
-    all_tasks = list(itertools.product(all_contents, all_styles))
-    total_tasks = len(all_tasks)
-    
-    print(f"🔥 Total Combinations (Tasks): {total_tasks}")
-    
-    # -------------------------------------------------------
-    # 3. Batch 推理 (Flattened Batching)
-    # -------------------------------------------------------
-    BATCH_SIZE = 64 # 只要显存够，越大越快
-    print(f"🚀 Inference Batch Size: {BATCH_SIZE}")
-
-    # 这里的 tqdm 进度条显示的就是总进度的百分比了，非常直观
-    for i in tqdm(range(0, total_tasks, BATCH_SIZE), desc="Running Batches"):
+    for content in os.listdir(content_path):
+        if not content.endswith('.npy'):
+            continue
+        # prepare conent motion
+        content_file_name = content.split('.')[0]
+        content_file_path = os.path.join(content_path, content)
+        content_motion = np.load(content_file_path)
+        content_motion = np.array([content_motion])
+        content_motion = torch.tensor(content_motion).to(device)
         
-        # A. 获取当前 Batch 的任务对
-        current_batch_tasks = all_tasks[i : i + BATCH_SIZE]
-        current_bs = len(current_batch_tasks)
+        # length is same as content motion
+        length = content_motion.shape[1]
+        lengths = [int(length)]
 
-        # B. 整理数据 List
-        batch_c_motions = []
-        batch_c_lengths = []
-        batch_s_motions = []
-        batch_s_lengths = []
-        batch_names = [] # 用来记这组数据叫什么，方便保存
 
-        for (c_item, s_item) in current_batch_tasks:
-            batch_c_motions.append(c_item["motion"])
-            batch_c_lengths.append(c_item["length"])
-            
-            batch_s_motions.append(s_item["motion"])
-            batch_s_lengths.append(s_item["length"])
-            
-            # 记录保存文件名: ContentName_StyleName
-            batch_names.append(f"{c_item['name']}_{s_item['name']}")
+        for style in os.listdir(style_path):
+            if not style.endswith('.npy'):
+                continue
+            # prepare style motion
+            style_file_name = style.split('.')[0]
+            style_file_path = os.path.join(style_path, style)
+            style_motion = np.load(style_file_path)
+            style_motion = np.array([style_motion])
+            style_motion = torch.tensor(style_motion).to(device)
 
-        # C. 双重 Padding (核心！)
-        # Content 和 Style 都可能长短不一，必须都 Pad
-        # batch_first=True -> [Batch, MaxLen, Dim]
-        c_motion_padded = pad_sequence(batch_c_motions, batch_first=True, padding_value=0.0).to(device) # torch.Size([8, 199, 263])
-        s_motion_padded = pad_sequence(batch_s_motions, batch_first=True, padding_value=0.0).to(device) # torch.Size([8, 199, 263])
-        
-        # D. 构造其他条件 (Repeat) 
-        scene_image_batch = scene_image.repeat(current_bs, 1, 1, 1) # torch.Size([8, 3, 224, 224])
-        scene_text_batch = [scene_prompt] * current_bs
-        scene_id_batch = scene_ids_tensor.repeat(current_bs)
+            # start
+            with torch.no_grad():
 
-        # E. 组装 Batch Dict
-        batch = {
-            "length": batch_c_lengths,       # Content 真实长度 List
-            "content_motion": c_motion_padded, # Pad 过的 Content
-            
-            "style_length": batch_s_lengths,   # Style 真实长度 List (给 forward 里的 mask 用)
-            "style_motion": s_motion_padded,   # Pad 过的 Style
-            
-            "tag_scale": scale,
-            "scene_text": scene_text_batch,
-            "scene_image": scene_image_batch,
-            "scene_id": scene_id_batch,
-            "has_image": has_image
-        }
+                # prepare batch data
+                batch = {"length": lengths, "style_motion": style_motion,  # torch.Size([1, 199, 263])
+                        "tag_scale": scale, "content_motion": content_motion,
+                        "scene_text": [scene_prompt] * len(lengths),
+                        "scene_image": scene_image, # torch.Size([1, 3, 224, 224])
+                        "scene_id": scene_ids_tensor,
+                        "has_image": has_image} # torch.Size([1])
+                # joints,latents = model(batch)
+                joints = model(batch, scene_data)
+                npypath = str(output_dir /
+                            f"{content_file_name}_{style_file_name}.npy")
+                mp4path = npypath.replace('.npy', '.mp4')
+                # with open(npypath.replace(".npy", ".txt"), "w") as text_file:
+                #     text_file.write('content {}'.format(content_file_name))
+                #     text_file.write('#')
+                #     text_file.write('style {}'.format(style_file_name))
+                motion = joints[0].detach().cpu().numpy()
+                np.save(npypath, motion)
 
-        # F. 推理
-        with torch.no_grad():
-            # joints 返回的是一个列表 (remove_padding 后的结果列表) 
-            # 或者是 Tensor，具体看你 forward 最后的 remove_padding 实现
-            joints = model(batch, scene_data)
-
-        # G. 保存结果
-        # 如果 remove_padding 返回的是 Tensor [B, L, J, 3]，我们需要根据 lengths 切分
-        # 如果返回的是 List[Tensor]，直接遍历即可
-        
-        if isinstance(joints, torch.Tensor):
-            joints = joints.detach().cpu().numpy()
-            
-        for idx, save_name in enumerate(batch_names):
-            # 获取单个结果
-            motion_res = joints[idx]
-            
-            # 如果是 Tensor 且没被 remove_padding 处理成 List，可能需要手动切片
-            # 假设你的 forward 已经处理好了，或者在这里处理：
-            if isinstance(motion_res, np.ndarray) and len(motion_res.shape) == 3: # [Frame, J, 3]
-                 # 截取真实长度 (以防 model 返回的是 pad 过的结果)
-                 real_len = batch_c_lengths[idx]
-                 motion_res = motion_res[:real_len]
-            elif isinstance(motion_res, torch.Tensor):
-                 real_len = batch_c_lengths[idx]
-                 motion_res = motion_res[:real_len].detach().cpu().numpy()
-
-            # 保存 NPY
-            npypath = str(output_dir / f"{save_name}.npy")
-            np.save(npypath, motion_res)
-            
-            # # 保存 Scene JSON
-            # scene_info_path = npypath.replace('.npy', '_scene.json')
-            # with open(scene_info_path, 'w') as f_json:
-            #     json.dump(scene_data, f_json)
-            mp4path = npypath.replace('.npy', '.mp4')
-            if render_video:
+                # visualization
                 visual_pos(npypath, mp4path)
 
-    print("✅ All Done!")
-    # 记录结束时间
-    end_time = time.perf_counter()
-
-    # 计算差值
-    elapsed_time = end_time - start_time
-    print(f"🚀 任务执行耗时: {elapsed_time:.4f} 秒")
+                logger.info(f"Motions are generated here:\n{npypath}")
 
 
 

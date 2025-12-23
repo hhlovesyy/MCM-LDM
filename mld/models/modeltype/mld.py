@@ -1106,6 +1106,7 @@ class MLD(BaseModel):
         
         if scene_data is not None and self.cfg.TRAJECTORY.ENABLED:
             raw_content = batch['content_motion'].clone()  # 使用未归一化的数据
+            bs = raw_content.shape[0]
             # A. 计算 Content 距离 Profile
             # raw_content[0] 取 Batch 中第一个样本作为参考
             content_npy = raw_content[0].detach().cpu().numpy()
@@ -1113,6 +1114,7 @@ class MLD(BaseModel):
             
             # B. 生成避障路径 (A*)
             import copy
+            from torch.nn.utils.rnn import pad_sequence
             waypoints = copy.deepcopy(scene_data['trajectory']['points'])
             obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
             
@@ -1129,38 +1131,38 @@ class MLD(BaseModel):
                     obs['pos'][1] -= startPosY
             dense_curve = self.traj_processor.generate_collision_free_path(waypoints, obstacles) #shape:(200, 2)
             
-            # C. 重采样 (对齐 Content 长度)
-            # dist_profile[1:] 对应每一帧结束时的距离
-            target_dists = dist_profile[1:] 
-            # 确保长度对齐
-            target_dists = target_dists[:lengths[0]]
+            # 2. 【核心修改】逐样本计算轨迹 (Loop over Batch)
+            list_target_pos = []
+            list_trans_cond = []
             
-            resampled_pts, _ = self.traj_processor.resample_by_arc_length(dense_curve, target_dists)
+            for i in range(bs):
+                # 获取当前样本的真实长度
+                curr_len = lengths[i]
+                # 取出有效数据
+                curr_content = raw_content[i, :curr_len].detach().cpu().numpy()
+                
+                # 计算该样本的距离分布
+                dist_profile = self.traj_processor.calculate_cumulative_distance(curr_content)
+                target_dists = dist_profile[1:][:curr_len] # 对齐长度
+                
+                # 重采样
+                resampled_pts, _ = self.traj_processor.resample_by_arc_length(dense_curve, target_dists)
+                
+                # 计算物理特征
+                trans_cond_phys, _ = self.traj_processor.compute_trajectory_features(resampled_pts)
+                
+                # 构造 Target Pos
+                safe_len = min(len(resampled_pts), curr_len)
+                traj_3d = np.zeros((curr_len, 3))
+                traj_3d[:safe_len, 0] = resampled_pts[:safe_len, 0]
+                traj_3d[:safe_len, 2] = resampled_pts[:safe_len, 1]
+                
+                list_target_pos.append(torch.from_numpy(traj_3d).float().to(self.device))
+                list_trans_cond.append(torch.from_numpy(trans_cond_phys[:safe_len]).float().to(self.device))
             
-            # D. 计算 4维特征 (RotVel, VelX, VelZ, Height)
-            trans_cond_phys, _ = self.traj_processor.compute_trajectory_features(resampled_pts)
-            
-            # E. 构造 Target Global Pos (用于 Guidance)
-            # 补上 Y 轴 (从 Content 或默认值)
-            # resampled_pts is [L, 2] (x, z)
-            # target_global_pos needs [B, L, 3]
-            frames = len(resampled_pts)
-            bs = content_motion.shape[0]
-            
-            # 构造 [L, 3]
-            traj_3d = np.zeros((frames, 3))
-            traj_3d[:, 0] = resampled_pts[:, 0]
-            traj_3d[:, 2] = resampled_pts[:, 1]
-            traj_3d[:, 1] = 0.0 # 或者 raw_content[0, :frames, 3].cpu().numpy() (高度)
-            
-            # 转 Tensor 并广播到 Batch
-            target_global_pos = torch.from_numpy(traj_3d).float().to(self.device)
-            target_global_pos = target_global_pos.unsqueeze(0).repeat(bs, 1, 1) # torch.Size([1, 38, 3])
-            
-            # F. 构造 Trans Cond (用于 Denoiser) 并归一化
-            # trans_cond_phys is [L, 4]
-            trans_tensor = torch.from_numpy(trans_cond_phys).float().to(self.device)
-            trans_tensor = trans_tensor.unsqueeze(0).repeat(bs, 1, 1)
+            # 3. 将列表 Pad 成 Batch Tensor (自动补0对齐最大长度)
+            target_global_pos = pad_sequence(list_target_pos, batch_first=True, padding_value=0.0)
+            trans_tensor = pad_sequence(list_trans_cond, batch_first=True, padding_value=0.0)
             
             # 归一化 (使用 Dataset 的 mean/std)
             # mean/std 是 [1, 263] -> 取前4维
@@ -1193,7 +1195,11 @@ class MLD(BaseModel):
             motion_emb_content = uncond_tokens
 
             # style motion
-            lengths11 = [motion.shape[1]]* motion.shape[0]
+            # lengths11 = [motion.shape[1]]* motion.shape[0]
+            if "style_length" in batch:
+                lengths11 = batch["style_length"]
+            else:
+                lengths11 = [motion.shape[1]] * motion.shape[0]
 
 # for motion input (bs,60,22,3)->(bs,22,3,60)
             # motion_seq = feats_ref*std + mean
@@ -1294,7 +1300,7 @@ class MLD(BaseModel):
 
         # ================= [新增] 埋点可视化逻辑 =================
         # 只画 Batch 中的第 0 个样本
-        if True: # 可以改成 if self.cfg.TEST.DEBUG_PLOT:
+        if False: # 可以改成 if self.cfg.TEST.DEBUG_PLOT:
             try:
                 # 1. 提取生成的根节点轨迹
                 # 假设 joints 维度是 [Batch, 22, 3, Length] torch.Size([1, 38, 22, 3])

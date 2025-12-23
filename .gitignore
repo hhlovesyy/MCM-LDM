@@ -61,3 +61,4 @@ evaluation*.txt
 /common
 /human_body_prior
 /tests
+/logs

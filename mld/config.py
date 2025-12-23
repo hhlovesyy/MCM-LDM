@@ -74,6 +74,9 @@ def parse_args(phase="train"):
         group.add_argument("--render",
                            action="store_true",
                            help="Render visulizaed figures")
+        group.add_argument("--render_video",
+                           action="store_true",
+                           help="render mp4 Video")
         group.add_argument("--render_mode", type=str, help="video or sequence")
         group.add_argument(
             "--frame_rate",
@@ -259,6 +262,7 @@ def parse_args(phase="train"):
             print(f"Overriding evaluation output path with: {params.output_path}")
         else:
             cfg.DEMO.SAVE_PATH_FOR_EVAL = None
+        cfg.DEMO.render_video = params.render_video
 
     if phase == "render":
         if params.npy:

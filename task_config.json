@@ -4,47 +4,22 @@
         "size": 20.0
     },
     "environment": {
-        "obstacles": [
-            {
-                "id": "obs_0",
-                "type": "cylinder",
-                "center": [
-                    -0.6,
-                    2.03
-                ],
-                "radius": 0.3,
-                "height": 2.0
-            },
-            {
-                "id": "obs_1",
-                "type": "cylinder",
-                "center": [
-                    -0.23,
-                    3.73
-                ],
-                "radius": 0.3,
-                "height": 2.0
-            }
-        ]
+        "obstacles": []
     },
     "trajectory": {
         "type": "bezier_control_points",
         "points": [
             [
                 -0.8,
-                1.0
+                0.03
             ],
             [
-                -0.77,
-                3.03
+                -0.87,
+                2.97
             ],
             [
-                0.97,
-                3.93
-            ],
-            [
-                2.6,
-                4.23
+                2.2,
+                3.27
             ]
         ]
     }
