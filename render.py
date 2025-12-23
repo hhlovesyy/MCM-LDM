@@ -65,6 +65,7 @@ def load_and_draw_scene(pkl_path, trajectory):
 
             r = obs['radius']
             h = obs['height']
+            h = 0.3
             
             # 【修正1】坐标映射
             # 数据 (x, z) -> Blender地面 (x, y)
