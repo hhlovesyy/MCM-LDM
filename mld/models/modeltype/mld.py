@@ -54,7 +54,7 @@ from mld.models.modeltype.trajectory_utils import *
 
 from .base import BaseModel
 
-DEFAULT_SCALAR_VAL = 1.5 
+DEFAULT_SCALAR_VAL = 2.0 
 
 class SimpleClassifier(nn.Module):
     def __init__(self, input_dim=512, num_classes=14):
@@ -787,18 +787,38 @@ class MLD(BaseModel):
             target_traj_centered = target_global_pos - target_global_pos[:, 0:1, :]
             
             # 生成索引: [0, 20, 40, ..., last_frame]
-            seq_len = calculate_pos.shape[1]
+            # ================= [新增/检查 Mask 逻辑] =================
+            # 我们只计算 valid 长度内的 loss
+            # 创建一个 [B, L] 的 mask
+            seq_len = calculate_pos.shape[1] # 199，batch里最长的动作的长度
+            bs = calculate_pos.shape[0] 
+            
+            # 生成 Mask: True 代表有效帧，False 代表 Padding
+            # range_tensor: [0, 1, 2, ..., L-1]
+            range_tensor = torch.arange(seq_len, device=latents.device).unsqueeze(0) # [1, L]
+            # lengths_tensor: [B, 1]
+            lengths_tensor = torch.tensor(lengths, device=latents.device).unsqueeze(1)
+            mask = range_tensor < lengths_tensor # [B, L]
+            mask = mask.unsqueeze(-1) # [B, L, 1] 广播到坐标维度
             key_indices = torch.arange(0, seq_len, interval, device=latents.device)
             
-            # 确保最后一帧也被包含进去（终点很重要）
-            if key_indices[-1] != seq_len - 1:
-                key_indices = torch.cat([key_indices, torch.tensor([seq_len-1], device=latents.device)])
+            # 1. 提取关键帧 (Key Indices)
+            pred_sampled = pred_traj_centered[:, key_indices, :]
+            target_sampled = target_traj_centered[:, key_indices, :]
+            mask_sampled = mask[:, key_indices, :] # [B, K, 1]
             
-            # 只取关键点计算 MSE
-            loss = F.mse_loss(
-                pred_traj_centered[:, key_indices, :], 
-                target_traj_centered[:, key_indices, :]
-            )
+            # 2. 手动计算 MSE
+            # 只有 mask 为 1 的地方有值，其他地方 diff 为 0
+            diff = (pred_sampled - target_sampled) * mask_sampled 
+            
+            # 平方误差总和
+            sum_squared_error = (diff ** 2).sum()
+            
+            # 有效像素总和 (防止除以0，加个极小值)
+            valid_element_count = mask_sampled.sum() * 3 + 1e-8 # *3 是因为坐标有 (x,y,z) 3个维度
+            
+            # 计算真正的平均 Loss
+            loss = sum_squared_error / valid_element_count
             
             # 4. 求导
             grad = torch.autograd.grad(loss, latents)[0]
@@ -1107,10 +1127,6 @@ class MLD(BaseModel):
         if scene_data is not None and self.cfg.TRAJECTORY.ENABLED:
             raw_content = batch['content_motion'].clone()  # 使用未归一化的数据
             bs = raw_content.shape[0]
-            # A. 计算 Content 距离 Profile
-            # raw_content[0] 取 Batch 中第一个样本作为参考
-            content_npy = raw_content[0].detach().cpu().numpy()
-            dist_profile = self.traj_processor.calculate_cumulative_distance(content_npy) # (39,)
             
             # B. 生成避障路径 (A*)
             import copy
@@ -1129,64 +1145,24 @@ class MLD(BaseModel):
                 elif 'pos' in obs: # 防御性编程，有的格式可能是 pos
                     obs['pos'][0] -= startPosX
                     obs['pos'][1] -= startPosY
-            dense_curve = self.traj_processor.generate_collision_free_path(waypoints, obstacles) #shape:(200, 2)
-            
-            # ================== 🔥 核心修改：增加空数据检查 🔥 ==================
-            # import copy
-            # from torch.nn.utils.rnn import pad_sequence
-            
-            # # 1. 安全获取数据
-            # traj_data = scene_data.get('trajectory', {})
-            # # 使用 .get() 并提供默认值，防止 KeyError
-            # points = copy.deepcopy(traj_data.get('points', []))
-            # traj_type = traj_data.get('type', 'bezier_control_points')
-            
-            # # 🚨 关键检查：如果点太少，直接跳过轨迹逻辑
-            # if len(points) < 2:
-            #     print(f"⚠️ WARN: Trajectory has insufficient points ({len(points)}). Skipping Guidance.")
-            #     # 这里我们做一个 fallback：让模型自由发挥，或者回退到无轨迹模式
-            #     # 将 dense_curve 设为 None，后面做判断
-            #     dense_curve = None
-            # else:
-            #     # 2. 坐标归零 (正常逻辑)
-            #     startPosX, startPosY = points[0][0], points[0][1]
-            #     for p in points:
-            #         p[0] -= startPosX
-            #         p[1] -= startPosY
-                    
-            #     obstacles = copy.deepcopy(scene_data.get('environment', {}).get('obstacles', []))
-            #     for obs in obstacles:
-            #         if 'center' in obs:
-            #             obs['center'][0] -= startPosX
-            #             obs['center'][1] -= startPosY
-            #         elif 'pos' in obs:
-            #             obs['pos'][0] -= startPosX
-            #             obs['pos'][1] -= startPosY
-
-            #     # 3. 分支逻辑
-            #     if traj_type == 'freehand_curve' or traj_type == 'freehand_path':
-            #         print(f"DEBUG: Processing Freehand Path ({len(points)} pts)")
-            #         dense_curve = self.traj_processor.process_freehand_path(points)
-            #     else:
-            #         print("DEBUG: Processing A* Control Points")
-            #         dense_curve = self.traj_processor.generate_collision_free_path(points, obstacles)
+            dense_curve = self.traj_processor.generate_collision_free_path(waypoints, obstacles) #shape:(200, 2)，每一帧应该走到的位置（关键路径点，做了B样条平滑）
             
             # 2. 【核心修改】逐样本计算轨迹 (Loop over Batch)
             list_target_pos = []
             list_trans_cond = []
             
-            for i in range(bs):
+            for i in range(bs): # 以2个content 4个style为例
                 # 获取当前样本的真实长度
-                curr_len = lengths[i]
+                curr_len = lengths[i]  # 是第i个任务的content的动作长度：199
                 # 取出有效数据
-                curr_content = raw_content[i, :curr_len].detach().cpu().numpy()
+                curr_content = raw_content[i, :curr_len].detach().cpu().numpy() # shape:(199, 263)
                 
                 # 计算该样本的距离分布
-                dist_profile = self.traj_processor.calculate_cumulative_distance(curr_content)
-                target_dists = dist_profile[1:][:curr_len] # 对齐长度
+                dist_profile = self.traj_processor.calculate_cumulative_distance(curr_content)  #shape:(200,)
+                target_dists = dist_profile[1:][:curr_len] # 对齐长度 shape:(199,) target_dists = dist_profile[1 : 1 + curr_len]这么写可能更好，每一帧应该累加走的距离，第一帧就有值
                 
                 # 重采样
-                resampled_pts, _ = self.traj_processor.resample_by_arc_length(dense_curve, target_dists)
+                resampled_pts, _ = self.traj_processor.resample_by_arc_length(dense_curve, target_dists) # shape:(199, 2)
                 
                 # 计算物理特征
                 trans_cond_phys, _ = self.traj_processor.compute_trajectory_features(resampled_pts)
@@ -1200,9 +1176,32 @@ class MLD(BaseModel):
                 list_target_pos.append(torch.from_numpy(traj_3d).float().to(self.device))
                 list_trans_cond.append(torch.from_numpy(trans_cond_phys[:safe_len]).float().to(self.device))
             
-            # 3. 将列表 Pad 成 Batch Tensor (自动补0对齐最大长度)
-            target_global_pos = pad_sequence(list_target_pos, batch_first=True, padding_value=0.0)
-            trans_tensor = pad_sequence(list_trans_cond, batch_first=True, padding_value=0.0)
+            # ================= [修复 Padding 逻辑] =================
+            # 1. 获取当前 Batch 的最大长度
+            # 注意：raw_content 可能是 batch 里最长的，也可能因为切片变短了，以 list 里最长的为准
+            max_len = max([t.shape[0] for t in list_target_pos]) # 199
+            
+            # 2. 对 Target Global Pos 做 "Edge Padding" (补最后一帧)
+            padded_target_pos_list = []
+            for t in list_target_pos:
+                curr_len = t.shape[0]
+                diff = max_len - curr_len
+                if diff > 0:
+                    # 取最后一帧 [1, 3]
+                    last_frame = t[-1:] 
+                    # 复制 diff 次
+                    padding = last_frame.repeat(diff, 1)
+                    # 拼接到后面 -> 效果：走完了就停在原地
+                    t_padded = torch.cat([t, padding], dim=0)
+                else:
+                    t_padded = t
+                padded_target_pos_list.append(t_padded)
+            
+            target_global_pos = torch.stack(padded_target_pos_list) # torch.Size([8, 199, 3])
+            
+            # 3. 对 Trans Cond 做 "Zero Padding" (补 0)
+            # 物理特征(速度、旋转角速度)补 0 是对的，代表"停止运动"
+            trans_tensor = pad_sequence(list_trans_cond, batch_first=True, padding_value=0.0) # torch.Size([8, 199, 4])
             
             # 归一化 (使用 Dataset 的 mean/std)
             # mean/std 是 [1, 263] -> 取前4维

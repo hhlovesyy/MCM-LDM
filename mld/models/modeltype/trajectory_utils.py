@@ -38,20 +38,20 @@ class TrajectoryProcessor:
         return smooth_path
 
     def resample_by_arc_length(self, dense_curve, target_distances):
-        # ... (保持不变) ...
-        # 计算曲线的累积弧长
-        diffs = np.linalg.norm(dense_curve[1:] - dense_curve[:-1], axis=1)
-        curve_cum_dist = np.concatenate(([0], np.cumsum(diffs)))
-        total_curve_len = curve_cum_dist[-1]
+        # dense_curve指的是每帧按照指引轨迹应该走到的点的位置，第0帧的结果接近0，但不是0（因为做了B样条平滑），NOTE:会是问题的来源么？
+        # 计算曲线的累积弧长，dense_curve是指引的路径的 每一帧应该距离起点累加走的距离
+        diffs = np.linalg.norm(dense_curve[1:] - dense_curve[:-1], axis=1)  # 每一帧指引的轨迹要走的距离  # shape:(199,)
+        curve_cum_dist = np.concatenate(([0], np.cumsum(diffs))) # shape:(200,) 累积距离，前面补了一个0，按照指引点来算的
+        total_curve_len = curve_cum_dist[-1] # 一共走了多远
         
         resampled_points = []
         valid_mask = []
         
-        for dist in target_distances:
+        for dist in target_distances: # 每一帧应该距离起点累加走的距离（对应content的运动），第一帧就有值
             if dist > total_curve_len:
                 resampled_points.append(dense_curve[-1])
                 valid_mask.append(False)
-            else:
+            else: # 累加的总距离还没有超过给定提示的曲线的总长度（dist来源于content）
                 rx = np.interp(dist, curve_cum_dist, dense_curve[:, 0])
                 rz = np.interp(dist, curve_cum_dist, dense_curve[:, 1])
                 resampled_points.append([rx, rz])
@@ -59,7 +59,7 @@ class TrajectoryProcessor:
                 
         return np.array(resampled_points), np.array(valid_mask)
 
-    def compute_trajectory_features(self, points):
+    def compute_trajectory_features(self, points): # points是重采样的所有点，每一帧的，其中第一帧不是0，points的维度是(199，2)
         # ... (保持不变) ...
         frames = len(points)
         feats = np.zeros((frames, 4))

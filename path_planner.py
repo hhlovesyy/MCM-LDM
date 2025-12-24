@@ -121,27 +121,27 @@ class PathPlanner:
 
     def generate_path(self, waypoints, obstacles):
         """生成最终平滑路径"""
-        self.set_obstacles(obstacles)
+        self.set_obstacles(obstacles) # 设置哪些格子被障碍物堵上了
         full_grid_path = []
         
         for i in range(len(waypoints) - 1):
             p_start = waypoints[i]
             p_end = waypoints[i+1]
-            segment = self._astar(p_start, p_end)
+            segment = self._astar(p_start, p_end) # A*寻路走哪些grid
             if i > 0: segment = segment[1:] 
-            full_grid_path.extend(segment)
+            full_grid_path.extend(segment) # append
             
         if len(full_grid_path) < 2:
             return np.array(waypoints)
 
-        raw_path = np.array([self._to_world(p[0], p[1]) for p in full_grid_path])
+        raw_path = np.array([self._to_world(p[0], p[1]) for p in full_grid_path])  # 世界空间的A*寻路的所有格子 shape:(103, 2)
         
-        # B-Spline 平滑
+        # B-Spline 平滑 ： TODO: B样条平滑可能避障效果不够好，可能会有边界情况
         if len(raw_path) > 3:
             try:
                 tck, u = splprep(raw_path.T, u=None, s=0.5, k=3) 
                 u_new = np.linspace(u.min(), u.max(), 200) 
-                smooth_path = np.array(splev(u_new, tck)).T
+                smooth_path = np.array(splev(u_new, tck)).T  # shape:(200, 2)
                 return smooth_path
             except Exception as e:
                 print(f"Spline Error: {e}")
