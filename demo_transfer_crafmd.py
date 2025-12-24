@@ -183,7 +183,7 @@ def main():
         }
 
         with torch.no_grad():
-            joints = model(batch, scene_data) # 修复后的 forward 返回 [B, L, J, 3] 或 [B, J, 3, L]
+            joints, _ = model(batch, scene_data) # 修复后的 forward 返回 [B, L, J, 3] 或 [B, J, 3, L]
 
         if isinstance(joints, torch.Tensor):
             joints = joints.detach().cpu().numpy()

@@ -206,7 +206,7 @@ def main():
 
         # 推理
         with torch.no_grad():
-            joints = model(batch, scene_data)
+            joints,_ = model(batch, scene_data)
 
         # 处理结果
         if isinstance(joints, torch.Tensor):

@@ -101,6 +101,8 @@ FPS=20                  # for video
 EXACT_FRAME=0.5         # for frame
 RES="high"
 GT="False"
+USE_HINT="False"
+SCENE_NAME="default"
 
 # --- 2. 解析参数 (Parse Arguments) ---
 while [[ $# -gt 0 ]]; do
@@ -137,6 +139,14 @@ while [[ $# -gt 0 ]]; do
       GT="True"
       shift # boolean flag, no value needed usually, but logic depends on python arg parser
       ;;
+    --scene_name)
+      SCENE_NAME="$2"
+      shift 2
+      ;;
+    --use_guide_hint)
+      USE_HINT="True"
+      shift # boolean flag, no value needed usually, but logic depends on python arg parser
+      ;;
     *)
       echo "Unknown argument: $1"
       shift
@@ -150,7 +160,7 @@ if [ -z "$INPUT_NPY_FOLDER" ]; then
     exit 1
 fi
 if [ ! -d "$INPUT_NPY_FOLDER" ]; then
-    echo -e "${RED}错误: 输入文件夹不存在: $INPUT_NPY_FOLDER${NC}"
+    echo -e "${RED}错误: 输入文件夹不存在 bash: $INPUT_NPY_FOLDER${NC}"
     exit 1
 fi
 
@@ -177,10 +187,14 @@ if [ $? -ne 0 ]; then echo -e "${RED}Failed at Step 2${NC}"; exit 1; fi
 echo -e "\n${YELLOW}[3/3] Blender Rendering...${NC}"
 
 # 构造 Blender 参数字符串
-BLENDER_ARGS="--dir=$OUTPUT_PKL_FOLDER --mode=$RENDER_MODE --res=$RES"
+BLENDER_ARGS="--dir=$OUTPUT_PKL_FOLDER --mode=$RENDER_MODE --res=$RES --scene_name=$SCENE_NAME"
 
 if [ "$GT" == "True" ]; then
     BLENDER_ARGS="$BLENDER_ARGS --gt=True"
+fi
+
+if [ "$USE_HINT" == "True" ]; then
+    BLENDER_ARGS="$BLENDER_ARGS --use_guide_hint=True"
 fi
 
 if [ "$RENDER_MODE" == "sequence" ]; then

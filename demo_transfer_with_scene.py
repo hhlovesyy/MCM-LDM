@@ -407,7 +407,7 @@ def main():
         with torch.no_grad():
             # joints 返回的是一个列表 (remove_padding 后的结果列表) 
             # 或者是 Tensor，具体看你 forward 最后的 remove_padding 实现
-            joints = model(batch, scene_data)
+            joints, global_pos = model(batch, scene_data) # global_pos: torch.Size([8, 199, 3])
 
         # G. 保存结果
         # 如果 remove_padding 返回的是 Tensor [B, L, J, 3]，我们需要根据 lengths 切分
@@ -419,6 +419,7 @@ def main():
         for idx, save_name in enumerate(batch_names):
             # 获取单个结果
             motion_res = joints[idx]
+            hint_trajectory = global_pos[idx] # torch.Size([199, 3])
             
             # 如果是 Tensor 且没被 remove_padding 处理成 List，可能需要手动切片
             # 假设你的 forward 已经处理好了，或者在这里处理：
@@ -426,9 +427,11 @@ def main():
                  # 截取真实长度 (以防 model 返回的是 pad 过的结果)
                  real_len = batch_c_lengths[idx]
                  motion_res = motion_res[:real_len]
+                 hint_trajectory = hint_trajectory[:real_len]
             elif isinstance(motion_res, torch.Tensor):
                  real_len = batch_c_lengths[idx]
                  motion_res = motion_res[:real_len].detach().cpu().numpy()
+                 hint_trajectory = hint_trajectory[:real_len].detach().cpu().numpy() # shape:(199, 3)
 
             # 保存 NPY
             npypath = str(output_dir / f"{save_name}.npy")
@@ -441,6 +444,8 @@ def main():
             mp4path = npypath.replace('.npy', '.mp4')
             if render_video:
                 visual_pos(npypath, mp4path)
+            traj_npypath = str(output_dir / f"{save_name}_givenTraj.npy")
+            np.save(traj_npypath, hint_trajectory)
 
     print("✅ All Done!")
     # 记录结束时间

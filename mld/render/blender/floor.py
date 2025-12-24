@@ -61,3 +61,24 @@ def show_trajectory(coords):
         bsdf.inputs['Base Color'].default_value = rgb_color
 
     bpy.ops.object.mode_set(mode='OBJECT')
+
+def show_hint(coords):
+    for i, coord in enumerate(coords):
+        import matplotlib
+        cmap = matplotlib.cm.get_cmap('Wistia')
+        begin = 0.45
+        end = 1.0
+        frac = i / len(coords)
+        rgb_color = cmap(begin + (end - begin) * frac)
+
+        x, y, z = coord
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.04, location=(x, y, z))
+        obj = bpy.context.active_object
+
+        mat = bpy.data.materials.new(name="SphereMaterial")
+        obj.data.materials.append(mat)
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes["Principled BSDF"]
+        bsdf.inputs['Base Color'].default_value = rgb_color
+
+    bpy.ops.object.mode_set(mode='OBJECT')

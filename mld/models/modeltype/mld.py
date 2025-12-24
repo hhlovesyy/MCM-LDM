@@ -54,7 +54,7 @@ from mld.models.modeltype.trajectory_utils import *
 
 from .base import BaseModel
 
-DEFAULT_SCALAR_VAL = 3.0 
+DEFAULT_SCALAR_VAL = 1.5 
 
 class SimpleClassifier(nn.Module):
     def __init__(self, input_dim=512, num_classes=14):
@@ -1131,6 +1131,46 @@ class MLD(BaseModel):
                     obs['pos'][1] -= startPosY
             dense_curve = self.traj_processor.generate_collision_free_path(waypoints, obstacles) #shape:(200, 2)
             
+            # ================== 🔥 核心修改：增加空数据检查 🔥 ==================
+            # import copy
+            # from torch.nn.utils.rnn import pad_sequence
+            
+            # # 1. 安全获取数据
+            # traj_data = scene_data.get('trajectory', {})
+            # # 使用 .get() 并提供默认值，防止 KeyError
+            # points = copy.deepcopy(traj_data.get('points', []))
+            # traj_type = traj_data.get('type', 'bezier_control_points')
+            
+            # # 🚨 关键检查：如果点太少，直接跳过轨迹逻辑
+            # if len(points) < 2:
+            #     print(f"⚠️ WARN: Trajectory has insufficient points ({len(points)}). Skipping Guidance.")
+            #     # 这里我们做一个 fallback：让模型自由发挥，或者回退到无轨迹模式
+            #     # 将 dense_curve 设为 None，后面做判断
+            #     dense_curve = None
+            # else:
+            #     # 2. 坐标归零 (正常逻辑)
+            #     startPosX, startPosY = points[0][0], points[0][1]
+            #     for p in points:
+            #         p[0] -= startPosX
+            #         p[1] -= startPosY
+                    
+            #     obstacles = copy.deepcopy(scene_data.get('environment', {}).get('obstacles', []))
+            #     for obs in obstacles:
+            #         if 'center' in obs:
+            #             obs['center'][0] -= startPosX
+            #             obs['center'][1] -= startPosY
+            #         elif 'pos' in obs:
+            #             obs['pos'][0] -= startPosX
+            #             obs['pos'][1] -= startPosY
+
+            #     # 3. 分支逻辑
+            #     if traj_type == 'freehand_curve' or traj_type == 'freehand_path':
+            #         print(f"DEBUG: Processing Freehand Path ({len(points)} pts)")
+            #         dense_curve = self.traj_processor.process_freehand_path(points)
+            #     else:
+            #         print("DEBUG: Processing A* Control Points")
+            #         dense_curve = self.traj_processor.generate_collision_free_path(points, obstacles)
+            
             # 2. 【核心修改】逐样本计算轨迹 (Loop over Batch)
             list_target_pos = []
             list_trans_cond = []
@@ -1300,50 +1340,110 @@ class MLD(BaseModel):
 
         # ================= [新增] 埋点可视化逻辑 =================
         # 只画 Batch 中的第 0 个样本
-        if False: # 可以改成 if self.cfg.TEST.DEBUG_PLOT:
-            try:
-                # 1. 提取生成的根节点轨迹
-                # 假设 joints 维度是 [Batch, 22, 3, Length] torch.Size([1, 38, 22, 3])
-                # Root joint 通常是 index 0
-                if joints.shape[1] == 22 or joints.shape[1] == 21: # [B, J, 3, L]
-                    pred_root_traj = joints[0, 0, :, :].permute(1, 0) # [3, L] -> [L, 3]
-                else:
-                    # 如果维度不一样，打印出来看看
-                    print(f"Joints shape check: {joints.shape}")
-                    # 尝试自适应: 假设第0维是Batch，包含3的那一维是坐标
-                    pred_root_traj = joints[0, ..., 0, :].squeeze() # [38, 3] 世界空间的
+        # if True: # 可以改成 if self.cfg.TEST.DEBUG_PLOT:
+        #     try:
+        #         # 1. 提取生成的根节点轨迹
+        #         # 假设 joints 维度是 [Batch, 22, 3, Length] torch.Size([1, 38, 22, 3])
+        #         # Root joint 通常是 index 0
+        #         if joints.shape[1] == 22 or joints.shape[1] == 21: # [B, J, 3, L]
+        #             pred_root_traj = joints[0, 0, :, :].permute(1, 0) # [3, L] -> [L, 3]
+        #         else:
+        #             # 如果维度不一样，打印出来看看
+        #             print(f"Joints shape check: {joints.shape}")
+        #             # 尝试自适应: 假设第0维是Batch，包含3的那一维是坐标
+        #             pred_root_traj = joints[0, ..., 0, :].squeeze() # [38, 3] 世界空间的
 
-                pred_root_traj_np = pred_root_traj.detach().cpu().numpy()
+        #         pred_root_traj_np = pred_root_traj.detach().cpu().numpy()
                 
-                # 2. 提取目标轨迹
-                # 之前生成的 target_global_pos 是 [Batch, Length, 3]
-                target_traj_np = None
-                if 'target_global_pos' in locals() and target_global_pos is not None:
-                    target_traj_np = target_global_pos[0].detach().cpu().numpy()
+        #         # 2. 提取目标轨迹
+        #         # 之前生成的 target_global_pos 是 [Batch, Length, 3]
+        #         target_traj_np = None
+        #         if 'target_global_pos' in locals() and target_global_pos is not None:
+        #             target_traj_np = target_global_pos[0].detach().cpu().numpy()
                 
-                # 3. 这里的长度可能不一致 (VAE 下采样 vs 原始长度)
-                # 简单的截断或补齐，为了画图对齐
-                min_len = min(len(pred_root_traj_np), len(target_traj_np)) if target_traj_np is not None else len(pred_root_traj_np)
+        #         # 3. 这里的长度可能不一致 (VAE 下采样 vs 原始长度)
+        #         # 简单的截断或补齐，为了画图对齐
+        #         min_len = min(len(pred_root_traj_np), len(target_traj_np)) if target_traj_np is not None else len(pred_root_traj_np)
                 
-                # 4. 调用画图
-                # name 是当前时间戳
-                name = int(time.time())
-                debug_plot_trajectory(
-                    target_traj_np[:min_len] if target_traj_np is not None else None, 
-                    pred_root_traj_np[:min_len],
-                    # self.target_pos,
-                    scene_data = scene_data,
-                    # save_path=f"vis_debug/traj_step_n.png"
-                    # 每个样本给个不同的文件名
-                    save_path=f"vis_debug/traj_debug_{name}.png",
-                    interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
-                )
+        #         # 4. 调用画图
+        #         # name 是当前时间戳
+        #         name = int(time.time())
+        #         debug_plot_trajectory(
+        #             target_traj_np[:min_len] if target_traj_np is not None else None, 
+        #             pred_root_traj_np[:min_len],
+        #             # self.target_pos,
+        #             scene_data = scene_data,
+        #             # save_path=f"vis_debug/traj_step_n.png"
+        #             # 每个样本给个不同的文件名
+        #             save_path=f"vis_debug/traj_debug_{name}.png",
+        #             interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
+        #         )
+        #     except Exception as e:
+        #         print(f"[Warning] Failed to plot trajectory: {e}")
+        # ================= [修改] 埋点可视化逻辑 (支持 Batch 渲染) =================
+        # 建议开启开关: if self.cfg.TEST.DEBUG_PLOT:
+        if True: 
+            try:
+                # 0. 准备工作
+                batch_size = joints.shape[0]
+                timestamp = int(time.time())
+                
+                # 确保输出目录存在
+                os.makedirs("vis_debug", exist_ok=True)
+
+                # 遍历 Batch 中的每一个样本
+                for i in range(batch_size):
+                    # 1. 提取生成的根节点轨迹
+                    # joints 通常是 [Batch, Joints, 3, Length] -> [B, 22, 3, L]
+                    if joints.shape[1] == 22 or joints.shape[1] == 21: 
+                        # 取第 i 个样本，第 0 个关节(Root)，所有维度
+                        pred_root_traj = joints[i, 0, :, :].permute(1, 0) # [3, L] -> [L, 3]
+                    else:
+                        # 备用情况: 假设维度是 [B, L, J, 3] 或者其他变体
+                        # 这里的逻辑根据之前的 else 修改，确保取到第 i 个
+                        # print(f"Joints shape check: {joints.shape}")
+                        pred_root_traj = joints[i, ..., 0, :].squeeze() 
+
+                    pred_root_traj_np = pred_root_traj.detach().cpu().numpy()
+                    
+                    # 2. 提取目标轨迹 (如果存在)
+                    target_traj_np = None
+                    if 'target_global_pos' in locals() and target_global_pos is not None:
+                        # target_global_pos 是 [Batch, Length, 3]
+                        target_traj_np = target_global_pos[i].detach().cpu().numpy()
+                    
+                    # 3. 对齐长度 (取两者较小值，防止画图越界)
+                    min_len = len(pred_root_traj_np)
+                    if target_traj_np is not None:
+                        min_len = min(len(pred_root_traj_np), len(target_traj_np))
+                    
+                    # 4. 调用画图
+                    # 文件名格式: traj_debug_{时间戳}_sample_{序号}.png
+                    save_path = f"vis_debug/traj_debug_{timestamp}_sample_{i}.png"
+                    
+                    debug_plot_trajectory(
+                        target_traj_np[:min_len] if target_traj_np is not None else None, 
+                        pred_root_traj_np[:min_len],
+                        # 假设 scene_data 对整个 Batch 是通用的，直接传入
+                        # 如果 scene_data 也是 batch list，则需要改成 scene_data[i]
+                        scene_data = scene_data,
+                        save_path = save_path,
+                        interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
+                    )
+                
+                # 打印一次提示即可
+                print(f"[Debug] Batch Visualization saved {batch_size} images to vis_debug/")
+                    
             except Exception as e:
                 print(f"[Warning] Failed to plot trajectory: {e}")
+                # 打印详细报错方便调试
+                import traceback
+                traceback.print_exc()
+        # =======================================================
         # =======================================================
 
 
-        return remove_padding(joints, lengths)
+        return remove_padding(joints, lengths), target_global_pos
     
     def forward_step1_warmup_withOurSceneDataset(self, batch):
         print("forward_step1_warmup_withOurSceneDataset")

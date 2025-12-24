@@ -133,31 +133,45 @@ def parse_args():
     parser.add_argument("--fps", type=int, default=20, help="the frame rate of the rendered video")
     parser.add_argument("--num", type=int, default=8, help="the number of frames rendered in 'sequence' mode")
     parser.add_argument("--exact_frame", type=float, default=0.5, help="the frame id selected under 'frame' mode ([0, 1])")
+    parser.add_argument("--scene_name", type=str, default="default")
+    parser.add_argument("--use_guide_hint", type=str, default=False, help="render user-define trajectory hint")
     cfg = parser.parse_args()
     return cfg
 
 def clean_scene():
     """
-    【修复版】只删除场景中的物体，保留材质数据，防止 ReferenceError。
+    【修复版】不依赖 select_set 的安全清理函数。
+    直接操作数据块，不会因为物体未链接到场景而报错。
     """
     # 1. 确保在 Object 模式
     if bpy.context.object and bpy.context.object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
 
-    # 2. 取消所有选择
-    bpy.ops.object.select_all(action='DESELECT')
+    # 2. 遍历所有物体，直接删除数据
+    # 使用 list(...) 是因为我们在遍历过程中会删除元素，必须操作副本
+    for obj in list(bpy.data.objects):
+        # 保留摄像机和灯光
+        if obj.type in ['CAMERA', 'LIGHT']:
+            continue
+        
+        # 【关键修改】直接移除物体，不需要 select_set
+        # do_unlink=True 会确保它从所有场景中解绑
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception as e:
+            print(f"Warning: Failed to remove {obj.name}: {e}")
 
-    # 3. 选择除了摄像机和灯光以外的所有物体
-    # (保留摄像机和灯光是为了保持光照一致，不需要每次重建)
-    for obj in bpy.data.objects:
-        if obj.type not in ['CAMERA', 'LIGHT']:
-            obj.select_set(True)
-
-    # 4. 删除选中的物体
-    bpy.ops.object.delete()
+    # 3. (可选) 清理残留的网格和曲线数据，防止内存泄漏
+    # 删除没有用户 (users=0) 的 Mesh 数据
+    for mesh in list(bpy.data.meshes):
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
     
-    # 【重点】绝对不要在这里调用 orphans_purge() !!!
-    # 它会把你的材质删掉，导致下一次循环找不到材质报错。
+    # 删除没有用户的 Curve 数据
+    for curve in list(bpy.data.curves):
+        if curve.users == 0:
+            bpy.data.curves.remove(curve)
+
 
 def render_cli() -> None:
     cfg = parse_args()
@@ -185,6 +199,7 @@ def render_cli() -> None:
                 # if trajectory == None:
                 #     trajectory = pkl['ground_trajectory']
                 trajectory = pkl['ground_trajectory']
+                hint = pkl['hint']
                 # trajectory = None
 
         except FileNotFoundError:
@@ -206,7 +221,9 @@ def render_cli() -> None:
             gt=cfg.gt,
             accelerator=cfg.accelerator,
             device=cfg.device,
-            fps=cfg.fps)
+            fps=cfg.fps,
+            hint=hint,
+            cfg=cfg)
 
 
 if __name__ == "__main__":

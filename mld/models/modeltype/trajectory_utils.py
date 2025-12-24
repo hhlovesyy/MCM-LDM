@@ -91,6 +91,38 @@ class TrajectoryProcessor:
         # 长度 = Frames + 1
         cum_dist = np.concatenate(([0], np.cumsum(step_sizes))) # shape:(162,)
         return cum_dist
+    
+    def process_freehand_path(self, raw_points):
+        """
+        处理手绘路径：
+        简单地将稀疏或不均匀的手绘点，插值成密集的点序列，模拟 dense_curve
+        """
+        path = np.array(raw_points)
+        
+        # 如果点太少，没法处理，直接返回
+        if len(path) < 2:
+            return path
+            
+        # 1. 计算手绘路径的总长度
+        # 这一步是为了生成足够密度的点，保证后续重采样顺利
+        diffs = np.linalg.norm(path[1:] - path[:-1], axis=1)
+        total_len = np.sum(diffs)
+        
+        # 2. 生成密集点 (假设每 0.1米 一个点)
+        num_points = int(total_len / 0.1) + 10  # 多给一点余量
+        num_points = max(num_points, 100)       # 至少100个点
+        
+        # 3. 线性插值生成 dense_curve
+        # (这里用简单的线性插值足够了，因为手绘本身就是密集的)
+        # 如果想要更平滑，可以用 B-Spline，但这里先跑通为主
+        t_old = np.linspace(0, 1, len(path))
+        t_new = np.linspace(0, 1, num_points)
+        
+        x_new = np.interp(t_new, t_old, path[:, 0])
+        z_new = np.interp(t_new, t_old, path[:, 1])
+        
+        dense_curve = np.stack([x_new, z_new], axis=1)
+        return dense_curve
 
 # ==========================================
 # 3. 验证与可视化

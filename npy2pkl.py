@@ -49,12 +49,16 @@ def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result
     [Final Version] 将 (T, J, 3) 的 .npy 关节数据转换为 .pkl，
     并自动清洗掉坐标异常的帧，只保留最长的连续有效片段。
     """
+    npy_trajectory_file_path = npy_file_path.replace('.npy', '_givenTraj.npy')
     try:
         joints_data = np.load(npy_file_path)
+        npy_trajectory_data = np.load(npy_trajectory_file_path) 
         
         if joints_data.ndim != 3 or joints_data.shape[2] != 3:
             print(f"\n警告: 文件 {os.path.basename(npy_file_path)} 格式不正确 (应为 T,J,3)，已跳过。")
             return False
+        if npy_trajectory_data.ndim != 2 or npy_trajectory_data.shape[1] != 3:
+            print(f"\n警告: 文件 {os.path.basename(npy_trajectory_file_path)} 格式不正确 (应为 T,3)，已跳过。")
 
         # 1. 【核心】基于根关节的位置，识别所有“好帧”
         root_positions = joints_data[:, 0, :] # [T, 3]
@@ -73,6 +77,7 @@ def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result
                   f"正在提取最长有效片段 (帧 {start} 到 {end})。")
             
             joints_data = joints_data[start:end]
+            npy_trajectory_data = npy_trajectory_data[start:end]
 
         # 3. 后续所有逻辑，都使用清洗后的 `joints_data`
         length = joints_data.shape[0]
@@ -87,14 +92,19 @@ def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result
         ground_trajectory = np.zeros_like(root_trajectory_3d)
         ground_trajectory[:, 0] = root_trajectory_3d[:, 0] # X
         ground_trajectory[:, 2] = root_trajectory_3d[:, 2] # Z
-        
+
+        given_hint = np.zeros_like(npy_trajectory_data)
+        given_hint[:, 0] = npy_trajectory_data[:, 0]
+        given_hint[:, 2] = npy_trajectory_data[:, 2]
+        assert ((given_hint.ndim == ground_trajectory.ndim) and (given_hint.shape[0] == ground_trajectory.shape[0])), "提示轨迹与模型生成轨迹的维度对不上，请检查脚本或者数据流！"
+
         pkl_data = {
             'joints': joints_data,
             'text': title,
             'length': length,
             'root_trajectory_3d': root_trajectory_3d,
             'ground_trajectory': ground_trajectory,
-            'hint': None
+            'hint': given_hint
         }
 
         with open(pkl_output_path, 'wb') as f:
@@ -119,7 +129,7 @@ def process_folder(input_folder, output_folder, title="SceneMoDiff result"):
         os.makedirs(output_folder)
 
     # 找到所有 .npy 文件
-    npy_files = [f for f in os.listdir(input_folder) if f.endswith('.npy')]
+    npy_files = [f for f in os.listdir(input_folder) if (f.endswith('.npy') and not f.endswith('givenTraj.npy'))]
     
     if not npy_files:
         print(f"警告: 在输入文件夹 {input_folder} 中没有找到任何 .npy 文件。")
