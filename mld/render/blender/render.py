@@ -420,9 +420,10 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
 
     # scene_name = "DiAiTianhuaban"
     if hint is not None:
+        print("hint is not None!")
         hint = hint[..., [2, 0, 1]]
-    decorator = SceneDecorator(scene_cfg = cfg)
-    decorator.enhance_scene(hint, data)
+        decorator = SceneDecorator(scene_cfg = cfg)
+        decorator.enhance_scene(hint, data)
 
     # Number of frames possible to render
     nframes = len(data)
