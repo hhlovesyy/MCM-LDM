@@ -12,15 +12,471 @@ from .tools import delete_objs
 from mld.render.video import Video
 import numpy as np
 import bmesh
+import math
+
+# --- 抽象基类: 策略模式+注册表 ---
+class BaseSceneStrategy:
+    def __init__(self, context):
+        self.ctx = context  # 持有 SceneDecorator 实例，以便调用它的 create_xxx 方法及材质
+
+    def execute(self, trajectory_points, body_data):
+        """每个策略必须实现的方法"""
+        # 默认行为：如果开了开关，就画指引线
+        if self.ctx.use_guide_hint:
+            self.ctx.create_guidance_ribbon(trajectory_points)
+
+# --- 具体策略：独木桥 ---
+class BalanceStrategy(BaseSceneStrategy):
+    def execute(self, trajectory_points, body_data):
+        print("🏗️ Executing Balance Strategy...")
+        # 1. 生成独木桥
+        self.ctx.create_balance_beam(trajectory_points, width=0.4, thickness=0.08)
+        
+        # 2. 地面下沉 (获取名为 SmallPlane 或 BigPlane 的地面)
+        floor_obj = bpy.data.objects.get("SmallPlane") or bpy.data.objects.get("BigPlane") or bpy.data.objects.get("floor")
+        
+        if floor_obj:
+            floor_obj.location.z = -3.0 # 下沉
+            floor_obj.scale = (50, 50, 1)
+            # 换个深渊材质
+            mat_floor = self.ctx.get_material("AbyssFloor", (0.02, 0.02, 0.05), alpha=1.0)
+            if floor_obj.data.materials: floor_obj.data.materials[0] = mat_floor
+            else: floor_obj.data.materials.append(mat_floor)
+
+
+# --- 具体策略：低矮天花板 ---
+class CeilingStrategy(BaseSceneStrategy):
+    def execute(self, trajectory_points, body_data):
+        print("🏗️ Executing Ceiling Strategy...")
+        # 1. 生成天花板
+        self.ctx.create_low_ceiling(body_data, padding=0.2)
+        
+        # 2. 画指引线 (调用基类逻辑或自己画)
+        super().execute(trajectory_points, body_data)
+        
+        # 3. 地面光泽感
+        floor_obj = bpy.data.objects.get("SmallPlane") or bpy.data.objects.get("BigPlane")
+        if floor_obj:
+            mat_floor = self.ctx.get_material("GlossyFloor", (0.3, 0.3, 0.3), alpha=1.0)
+            # 增加反光
+            if mat_floor.node_tree.nodes.get('Principled BSDF'):
+                mat_floor.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value = 0.2
+            if floor_obj.data.materials: floor_obj.data.materials[0] = mat_floor
+            else: floor_obj.data.materials.append(mat_floor)
+    
+
+class StormStrategy(BaseSceneStrategy):
+    def execute(self, trajectory_points, body_data):
+        print("⛈️ Executing Storm Strategy (Back to Basics)...")
+
+        # ================= [1. 环境与光影] =================
+        bpy.context.scene.render.film_transparent = False
+        
+        # 清理
+        for obj in bpy.data.objects:
+            if obj.type == 'LIGHT' or "Sun" in obj.name:
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+        # HDRI 压暗
+        self.ctx.setup_ibl("/root/autodl-tmp/MyRepository/MCM-LDM/assets/overcast_soil_puresky_4k.exr", strength=0.3, rotation=0)
+
+        # 强背光 (保留，为了照亮雪花)
+        bpy.ops.object.light_add(type='SPOT', location=(0, -5, 8))
+        key_light = bpy.context.object
+        key_light.data.energy = 3000
+        key_light.data.color = (0.7, 0.8, 1.0)
+        key_light.rotation_euler = (0.8, 0, 0)
+
+        # ================= [2. 地面] =================
+        if "floor" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["floor"])
+        if "SmallPlane" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["SmallPlane"])
+        if "BigPlane" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["BigPlane"])
+        
+        bpy.ops.mesh.primitive_plane_add(size=60, location=(0, 0, 0))
+        ground = bpy.context.object
+        ground.name = "SnowGround"
+        
+        mat_snow = self.ctx.get_material("RoughSnow", (0.8, 0.85, 0.9), alpha=1.0)
+        if mat_snow.node_tree.nodes.get('Principled BSDF'):
+            mat_snow.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value = 1.0
+        ground.data.materials.append(mat_snow)
+
+        # ================= [3. 枯树 (拼接法 - 拒绝光杆)] =================
+        import random
+        # 定义造树函数：用圆锥体(Cone)拼，上面细下面粗，就像树
+        def spawn_tree(x, y):
+            # 主干
+            bpy.ops.mesh.primitive_cone_add(radius1=0.2, radius2=0.08, depth=5.0, location=(x, y, 2.5))
+            trunk = bpy.context.object
+            trunk.rotation_euler = (random.uniform(-0.1, 0.1), random.uniform(-0.1, 0.1), 0)
+            mat_wood = self.ctx.get_material("DarkWood", (0.05, 0.04, 0.03))
+            trunk.data.materials.append(mat_wood)
+            
+            # 分叉1
+            bpy.ops.mesh.primitive_cone_add(radius1=0.08, radius2=0.02, depth=2.0, location=(x, y, 3.5))
+            branch1 = bpy.context.object
+            branch1.rotation_euler = (0.6, 0, random.uniform(0, 6))
+            branch1.data.materials.append(mat_wood)
+            
+            # 分叉2
+            bpy.ops.mesh.primitive_cone_add(radius1=0.06, radius2=0.01, depth=1.5, location=(x, y, 4.0))
+            branch2 = bpy.context.object
+            branch2.rotation_euler = (-0.7, 0.3, random.uniform(0, 6))
+            branch2.data.materials.append(mat_wood)
+
+        # 在轨迹周围种树
+        center_idx = len(trajectory_points) // 2
+        # 选3个点种树
+        refs = [trajectory_points[0], trajectory_points[center_idx], trajectory_points[-1]]
+        for pt in refs:
+            offset_x = random.choice([-3.0, 3.0])
+            # 随机偏移一点，防止太整齐
+            spawn_tree(pt[0] + offset_x + random.uniform(-0.5, 0.5), pt[1])
+
+        # ================= [4. 暴风雪 (严格复刻你的成功代码)] =================
+        # 1. 创建平面发射器 (Z=10)
+        bpy.ops.mesh.primitive_plane_add(size=40, location=(0, 0, 9)) # 稍微大一点，低一点
+        emitter = bpy.context.object
+        emitter.name = "SnowEmitter"
+        
+        # 【核心修正】确保物体本身是可见的，只是渲染时隐藏实例器
+        emitter.hide_render = False 
+        
+        # 2. 粒子系统
+        pset = emitter.modifiers.new(name="SnowParticles", type='PARTICLE_SYSTEM').particle_system
+        settings = pset.settings
+        
+        settings.count = 80000  # 你的代码是 10000，我稍微加点
+        settings.frame_start = -100 # 你的代码逻辑
+        settings.frame_end = 200 
+        settings.lifetime = 200
+        
+        settings.physics_type = 'NEWTON'
+        settings.mass = 0.05
+        settings.brownian_factor = 1.0 # 稍微乱一点
+        settings.drag_factor = 0.1
+        
+        # 3. 渲染设置
+        # 必须设为 False (Blender逻辑：不渲染发射器平面，只渲染粒子)
+        emitter.show_instancer_for_render = False
+        emitter.show_instancer_for_viewport = False
+        
+        # 4. 雪花实体
+        bpy.ops.mesh.primitive_ico_sphere_add(radius=0.025, subdivisions=1) 
+        snowflake = bpy.context.object
+
+        # 3. 【关键】开启平滑着色，消除棱角感
+        bpy.ops.object.shade_smooth()
+        snowflake.name = "SnowFlakePrototype"
+        snowflake.hide_render = True 
+        snowflake.hide_viewport = True
+        snowflake.location.z = -100
+        
+        # 材质：稍微亮一点，确保看见
+        mat_snow = self.ctx.get_material("BrightSnow", (1.0, 1.0, 1.0), alpha=1.0, emission=3.0)
+        snowflake.data.materials.append(mat_snow)
+        
+        settings.render_type = 'OBJECT'
+        settings.instance_object = snowflake
+        settings.particle_size = 0.7 # 你的代码是 0.6
+        settings.size_random = 0.8 
+        
+        # 5. 风场 (保留你的逻辑)
+        bpy.ops.object.effector_add(type='WIND', location=(-10, 0, 5), rotation=(0, 1.2, 0))
+        wind = bpy.context.object
+        wind.field.strength = 20.0 
+        wind.field.noise = 5.0
+
+        # ================= [5. 雾气 (淡淡的)] =================
+        world = bpy.context.scene.world
+        if world.node_tree:
+            nodes = world.node_tree.nodes
+            links = world.node_tree.links
+            output = nodes.get('World Output')
+            if output and not output.inputs['Volume'].is_linked:
+                volume = nodes.new(type='ShaderNodeVolumeScatter')
+                volume.inputs['Density'].default_value = 0.02
+                volume.inputs['Color'].default_value = (0.9, 0.9, 0.95, 1)
+                links.new(volume.outputs['Volume'], output.inputs['Volume'])
+
+        # 6. 指引线
+        super().execute(trajectory_points, body_data)
+        
+        # ================= [强制刷新] =================
+        bpy.context.view_layer.update()
+        scene = bpy.context.scene
+        # 往前推几帧，激活粒子
+        current = scene.frame_current
+        for f in range(current-2, current+1):
+            scene.frame_set(f)
+            bpy.context.view_layer.update()
+
+import math
+
+class DarkStrategy(BaseSceneStrategy):
+    def execute(self, trajectory_points, body_data):
+        print("🌑 Executing Dark Strategy (Solid Volume Box)...")
+
+        # ================= [1. 强制渲染参数 (专为光束优化)] =================
+        scn = bpy.context.scene
+        scn.render.film_transparent = False
+        
+        # 恢复曝光
+        if hasattr(scn.view_settings, "exposure"):
+            scn.view_settings.exposure = 0.0 
+            
+        # 【关键】体积光采样精度必须高，不然光束是断的
+        # 覆盖掉 setup_renderer 里的优化设置
+        scn.cycles.volume_step_rate = 0.5 # 越小越精细，0.5 保证光柱细腻
+        scn.cycles.volume_bounces = 1     # 至少反弹1次，让雾气有点自我照亮
+        
+        # 清理
+        for obj in bpy.data.objects:
+            if obj.type == 'LIGHT' or "Sun" in obj.name:
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+        # ================= [2. 环境 (纯黑)] =================
+        world = bpy.context.scene.world
+        if world.node_tree:
+            nodes = world.node_tree.nodes
+            links = world.node_tree.links
+            nodes.clear()
+            output = nodes.new(type='ShaderNodeOutputWorld')
+            bg = nodes.new(type='ShaderNodeBackground')
+            bg.inputs['Color'].default_value = (0, 0, 0, 1)
+            bg.inputs['Strength'].default_value = 0.0 # 彻底关掉环境光
+            links.new(bg.outputs['Background'], output.inputs['Surface'])
+            # 注意：这里不再连接 World Volume，我们改用实体盒子
+
+        # ================= [3. 实体雾气盒子 (必现光束)] =================
+        # 创建一个巨大的盒子罩住场景
+        bpy.ops.mesh.primitive_cube_add(size=50, location=(0, 0, 10))
+        fog_box = bpy.context.object
+        fog_box.name = "FogVolumeBox"
+        fog_box.display_type = 'WIRE' # 视口只看线框，不挡视线
+        
+        # 创建体积材质
+        mat_fog = bpy.data.materials.new(name="VolumetricFog")
+        mat_fog.use_nodes = True
+        nodes = mat_fog.node_tree.nodes
+        links = mat_fog.node_tree.links
+        nodes.clear()
+        
+        output = nodes.new(type='ShaderNodeOutputMaterial')
+        volume = nodes.new(type='ShaderNodeVolumeScatter')
+        
+        # 【参数微调】
+        # 密度：0.05 (太浓会黑，太淡没光束，0.05是黄金值)
+        volume.inputs['Density'].default_value = 0.05 
+        # 各向异性：0.7 (既有聚光感，侧面又能看见) -> 之前0.9太高了
+        volume.inputs['Anisotropy'].default_value = 0.7
+        # 颜色：纯白或微蓝
+        volume.inputs['Color'].default_value = (0.05, 0.05, 0.06, 1) 
+        
+        # 连接到 Volume 插槽 (Surface 插槽留空=透明)
+        links.new(volume.outputs['Volume'], output.inputs['Volume'])
+        fog_box.data.materials.append(mat_fog)
+
+        # ================= [4. 地面 (黑镜)] =================
+        if "floor" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["floor"])
+        if "SmallPlane" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["SmallPlane"])
+        if "BigPlane" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["BigPlane"])
+        
+        bpy.ops.mesh.primitive_plane_add(size=200, location=(0, 0, -0.01))
+        ground = bpy.context.object
+        ground.name = "DarkFloor"
+        
+        mat_floor = self.ctx.get_material("DarkMirror", (0.0, 0.0, 0.0), alpha=1.0)
+        if mat_floor.node_tree.nodes.get('Principled BSDF'):
+            bsdf = mat_floor.node_tree.nodes['Principled BSDF']
+            bsdf.inputs['Base Color'].default_value = (0.0, 0.0, 0.0, 1)
+            bsdf.inputs['Roughness'].default_value = 0.05 # 稍微有一点点磨砂，拉长倒影
+            bsdf.inputs['Specular'].default_value = 0.5
+        ground.data.materials.append(mat_floor)
+
+        # ================= [4. 灯光 (论文可视化专用 - 清晰暗夜版)] =================
+        
+        # --- Light 1: 轮廓背光 (Atmosphere) ---
+        # 放在左后方，用来把人和背景分离开
+        bpy.ops.object.light_add(type='SPOT', location=(-7, 7, 6)) 
+        rim_light = bpy.context.object
+        rim_light.name = "RimLight"
+        
+        # 蓝色强光
+        rim_light.data.energy = 80000 
+        rim_light.data.color = (0.1, 0.3, 1.0) # 纯蓝
+        rim_light.data.spot_size = 0.6
+        rim_light.data.spot_blend = 0.2
+        # 瞄准中心
+        rim_light.rotation_euler = (math.radians(50), 0, math.radians(-45)) 
+
+        # --- Light 2: 侧前补光 (Visibility - 关键！) ---
+        # 放在右前方，照亮动作细节
+        bpy.ops.object.light_add(type='AREA', location=(6, -4, 4))
+        fill_light = bpy.context.object
+        fill_light.name = "MoonFill"
+        
+        # 【关键设置】
+        # 1. 颜色：淡蓝灰色 (模拟月光)，不要用暖色，否则像白天
+        fill_light.data.color = (0.7, 0.8, 0.9) 
+        
+        # 2. 强度：适中 (2000-3000)。
+        # 既能看清黄色小人的四肢，又不会把地面照得惨白
+        fill_light.data.energy = 2500 
+        
+        # 3. 形状：大面积柔光，让阴影不那么黑
+        fill_light.data.shape = 'RECTANGLE'
+        fill_light.data.size = 8.0
+        
+        # 瞄准人物侧面
+        fill_light.rotation_euler = (math.radians(60), 0, math.radians(50))
+
+        # --- Light 3: 顶部微光 (Top Separator) ---
+        # 防止头顶和肩膀死黑
+        bpy.ops.object.light_add(type='POINT', location=(0, 0, 5))
+        top_light = bpy.context.object
+        top_light.data.energy = 500
+        top_light.data.color = (1.0, 1.0, 1.0)
+
+        # ================= [6. 指引线] =================
+        self.ctx.create_guidance_ribbon(trajectory_points)
+        ribbon = bpy.data.objects.get("GuidanceRibbon")
+        if ribbon and ribbon.data.materials:
+            mat = ribbon.data.materials[0]
+            if mat.node_tree.nodes.get('Principled BSDF'):
+                # 荧光绿
+                mat.node_tree.nodes['Principled BSDF'].inputs['Emission'].default_value = (0.0, 0.2, 1.0, 1)
+                mat.node_tree.nodes['Principled BSDF'].inputs['Emission Strength'].default_value = 15.0
+
+        # 强制刷新
+        bpy.context.view_layer.update()
+
+# class DarkStrategy(BaseSceneStrategy):
+#     def execute(self, trajectory_points, body_data):
+#         print("🌑 Executing Dark Strategy (The Void Version)...")
+
+#         # ================= [1. 制造绝对黑暗背景] =================
+#         scn = bpy.context.scene
+#         scn.render.film_transparent = False
+        
+#         # 曝光度调回正常，我们靠灯光强度来控制明暗
+#         if hasattr(scn.view_settings, "exposure"):
+#             scn.view_settings.exposure = 0.0 
+        
+#         # 清理
+#         for obj in bpy.data.objects:
+#             if obj.type == 'LIGHT' or "Sun" in obj.name:
+#                 bpy.data.objects.remove(obj, do_unlink=True)
+
+#         # World 设置：纯黑背景 + 稀薄暗雾
+#         world = bpy.context.scene.world
+#         if world.node_tree:
+#             nodes = world.node_tree.nodes
+#             links = world.node_tree.links
+#             nodes.clear()
+            
+#             output = nodes.new(type='ShaderNodeOutputWorld')
+#             bg = nodes.new(type='ShaderNodeBackground')
+            
+#             # 背景绝对纯黑
+#             bg.inputs['Color'].default_value = (0, 0, 0, 1)
+#             bg.inputs['Strength'].default_value = 0.0 
+#             links.new(bg.outputs['Background'], output.inputs['Surface'])
+
+#             # 体积雾 (关键修改：颜色变暗，密度降低)
+#             volume = nodes.new(type='ShaderNodeVolumeScatter')
+#             # 密度降低：防止画面发白
+#             volume.inputs['Density'].default_value = 0.02 
+#             # 颜色变暗：雾本身不应该太亮，要靠光打亮
+#             volume.inputs['Color'].default_value = (0.3, 0.3, 0.3, 1) 
+#             # 强各向异性：只在逆光方向显示光束
+#             volume.inputs['Anisotropy'].default_value = 0.9 
+#             links.new(volume.outputs['Volume'], output.inputs['Volume'])
+
+#         # ================= [2. 地面 (黑镜)] =================
+#         if "floor" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["floor"])
+#         if "SmallPlane" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["SmallPlane"])
+#         if "BigPlane" in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects["BigPlane"])
+        
+#         bpy.ops.mesh.primitive_plane_add(size=200, location=(0, 0, -0.01))
+#         ground = bpy.context.object
+#         ground.name = "DarkFloor"
+        
+#         mat_floor = self.ctx.get_material("DarkMirror", (0.0, 0.0, 0.0), alpha=1.0)
+#         if mat_floor.node_tree.nodes.get('Principled BSDF'):
+#             bsdf = mat_floor.node_tree.nodes['Principled BSDF']
+#             bsdf.inputs['Base Color'].default_value = (0.0, 0.0, 0.0, 1) # 纯黑
+#             bsdf.inputs['Roughness'].default_value = 0.2 # 完美镜面
+#             bsdf.inputs['Specular'].default_value = 1.0  # 高反射
+#         ground.data.materials.append(mat_floor)
+
+#         # ================= [3. 灯光 (极端对比度)] =================
+        
+#         # --- Light 1: 探照灯 (Rim Light) ---
+#         # 放在正后方高处 (Y+)
+#         bpy.ops.object.light_add(type='SPOT', location=(0, 12, 6)) 
+#         rim_light = bpy.context.object
+#         rim_light.name = "SearchLight"
+        
+#         # 参数调整：更聚光，更硬
+#         rim_light.data.energy = 5000000 # 500万瓦 (配合暗雾)
+#         rim_light.data.color = (0.6, 0.8, 1.0) # 冷白
+        
+#         # 【关键】光束极窄，像舞台追光灯
+#         rim_light.data.spot_size = 0.4 # 约20度角，非常窄
+#         rim_light.data.spot_blend = 0.0 # 边缘像刀切一样硬，强化光束感
+        
+#         # 瞄准原点
+#         rim_light.rotation_euler = (math.radians(115), 0, 0) 
+
+#         # --- Light 2: 补光 (几乎移除) ---
+#         # 之前是 3000，太亮了导致像正面光。
+#         # 现在降到 50，只为了让你勉强能看到一点点黄色的皮肤，而不是纯黑剪影
+#         bpy.ops.object.light_add(type='AREA', location=(5, -5, 2))
+#         fill_light = bpy.context.object
+#         fill_light.data.energy = 500 
+#         fill_light.data.color = (1.0, 0.5, 0.2) # 极弱的暖光
+#         fill_light.data.size = 10.0 # 大面积柔光
+#         fill_light.rotation_euler = (math.radians(60), 0, math.radians(45))
+
+#         # ================= [4. 指引线 (自发光)] =================
+#         self.ctx.create_guidance_ribbon(trajectory_points)
+#         ribbon = bpy.data.objects.get("GuidanceRibbon")
+#         if ribbon and ribbon.data.materials:
+#             mat = ribbon.data.materials[0]
+#             if mat.node_tree.nodes.get('Principled BSDF'):
+#                 # 绿色激光感
+#                 mat.node_tree.nodes['Principled BSDF'].inputs['Emission'].default_value = (0.0, 0.1, 1.0, 1)
+#                 mat.node_tree.nodes['Principled BSDF'].inputs['Emission Strength'].default_value = 20.0
+
+#         # 强制刷新
+#         bpy.context.view_layer.update()
 
 class SceneDecorator:
     def __init__(self, scene_cfg=None):
         self.scene_cfg = scene_cfg
         self.scene_name = self.scene_cfg.scene_name
-        self.use_guide_hint = (self.scene_cfg.use_guide_hint == 'True')
-        print("乖！让我看看！", self.use_guide_hint, type(self.use_guide_hint))
+        self.use_guide_hint = (str(self.scene_cfg.use_guide_hint) == 'True') # 防御性转换
         
         self.materials = {}
+
+        # ================= [注册表] =================
+        # 这里的 Key 对应你的 scene_name，Value 是上面的策略类
+        self.strategies = {
+            "Dumuqiao": BalanceStrategy,
+            "Balance": BalanceStrategy,
+            
+            "DiAiTianhuaban": CeilingStrategy,
+            "DiAiTongDao": CeilingStrategy,
+            "Crouch": CeilingStrategy,
+            
+            "BaoFengYu": StormStrategy, # [新场景]
+            "Snow": StormStrategy,
+            
+            "Dark": DarkStrategy,       # [新场景]
+            "Darkness": DarkStrategy
+        }
+        # ===========================================
 
     def get_material(self, name, color, alpha=1.0, emission=0.0):
         if name in self.materials:
@@ -109,75 +565,97 @@ class SceneDecorator:
         
         return mat
 
-    def create_balance_beam(self, points, width=0.4, thickness=0.05):
+    def create_balance_beam(self, points, width=0.4, thickness=0.05, extend_length=1.0):
         """
         生成 NUBRS 独木桥 + 支架
         """
         # --- A. 制作木板 (Extrude Profile along Curve) ---
+        # 路径 (Path)：就是你传入的 points（轨迹点）。这决定了独木桥的“走向”。代码里对应 curve_data 和 spline。
+        # 截面 (Profile)：就是代码里生成的 BeamProfileObj（那个扁平的矩形）。这决定了独木桥的“形状”和“粗细”。
+        # 生成 (Bevel Object)：代码 curve_data.bevel_object = profile_obj 告诉 Blender：“把这个矩形截面，沿着路径拉伸一遍”。
+        '''
+        Blender 的技巧点：
+            NURBS Spline：使用 NURBS 算法让折线点变成平滑的曲线，这样独木桥也是弯曲的。
+            Bevel Object：这是非破坏性建模，你不需要操作成千上万个顶点，只需要调整截面矩形的大小，整个桥的厚度就会变。
+        '''
         
-        # 1. 创建路径曲线 (Trajectory)
+        # --- A. 制作木板 ---
+        
+        # 1. 预处理点：计算延伸
+        # 转换为 numpy 方便计算
+        pts = np.array(points)
+        
+        # 计算起点的延伸点 (方向: P1 -> P0)
+        # 向量 P1_to_P0 = P0 - P1
+        start_vec = pts[0] - pts[1]
+        # 归一化 (变成长度为1的单位向量)
+        start_vec = start_vec / (np.linalg.norm(start_vec) + 1e-8)
+        # 新起点 = 旧起点 + 方向 * 长度
+        new_start = pts[0] + start_vec * extend_length
+        
+        # 计算终点的延伸点 (方向: P_last-1 -> P_last)
+        end_vec = pts[-1] - pts[-2]
+        end_vec = end_vec / (np.linalg.norm(end_vec) + 1e-8)
+        new_end = pts[-1] + end_vec * extend_length
+        
+        # 拼接新的点集：[新起点, 旧P0, ..., 旧Pn, 新终点]
+        # 注意：为了保持 NURBS 在连接处的平滑，最好保留原始端点作为控制点
+        extended_points = np.vstack(([new_start], pts, [new_end]))
+
+        # 2. 创建路径曲线
         curve_data = bpy.data.curves.new(name='BeamPath', type='CURVE')
         curve_data.dimensions = '3D'
         curve_data.resolution_u = 4
         spline = curve_data.splines.new('NURBS')
-        spline.points.add(len(points) - 1)
         
-        for i, coord in enumerate(points):
-            # 稍微降低一点高度，防止和脚底穿模 (假设脚底是0, 桥面设为 -0.02)
+        # 使用延伸后的点集
+        spline.points.add(len(extended_points) - 1)
+        
+        for i, coord in enumerate(extended_points):
+            # 稍微降低高度 -0.02
             spline.points[i].co = (coord[0], coord[1], -0.02, 1)
             
-        spline.use_endpoint_u = True
+        spline.use_endpoint_u = True # 让曲线强制经过首尾端点
         
-        # 2. 创建截面曲线 (Profile) - 一个扁平矩形
+        # 3. 创建截面 (Profile) - 保持不变
         profile_data = bpy.data.curves.new(name='BeamProfile', type='CURVE')
         profile_data.dimensions = '2D'
         profile_spline = profile_data.splines.new('POLY')
         profile_spline.points.add(3)
-        # 定义矩形形状 (相对于中心)
         w, h = width/2, thickness/2
         coords = [(-w, -h, 0), (-w, h, 0), (w, h, 0), (w, -h, 0)]
         for i, (x, y, z) in enumerate(coords):
             profile_spline.points[i].co = (x, y, z, 1)
-        profile_spline.use_cyclic_u = True # 闭合
-        
+        profile_spline.use_cyclic_u = True 
         profile_obj = bpy.data.objects.new("BeamProfileObj", profile_data)
-        # 不用链接到场景，只要存在于数据块中即可，或者链接后隐藏
         
-        # 3. 应用截面
+        # 4. 应用截面
         curve_data.bevel_mode = 'OBJECT'
         curve_data.bevel_object = profile_obj
-        curve_data.use_fill_caps = True # 封口
+        curve_data.use_fill_caps = True 
         
         beam_obj = bpy.data.objects.new("BalanceBeam", curve_data)
         bpy.context.collection.objects.link(beam_obj)
-        
-        # 材质
         beam_obj.data.materials.append(self.create_procedural_wood())
         
         # --- B. 制作支架 (Supports) ---
-        # 简单的做法：每隔一定距离，向下生成一个圆柱体直到深渊
-        
-        floor_depth = -3.0 # 地面下沉深度
-        step = max(1, len(points) // 8) # 生成约8个支架
-        
-        # 材质：生锈金属
+        floor_depth = -2.5
+        # 只需要在原始路段生成支架即可，延伸段悬空也没关系，或者全生成
+        # 这里我们用 extended_points 生成，间距稍微大点
+        step = max(1, len(extended_points) // 10) 
         mat_metal = self.get_material("RustyMetal", (0.2, 0.2, 0.2), alpha=1.0)
         
-        for i in range(0, len(points), step):
-            pt = points[i]
-            # 支架高度
-            height = abs(floor_depth) + pt[2] # 从桥面到地下
-            
+        for i in range(0, len(extended_points), step):
+            pt = extended_points[i]
+            height = abs(floor_depth) + pt[2] 
             bpy.ops.mesh.primitive_cylinder_add(
                 radius=0.05, 
                 depth=height, 
-                location=(pt[0], pt[1], floor_depth + height/2) # 中心点
+                location=(pt[0], pt[1], floor_depth + height/2)
             )
             pole = bpy.context.object
             pole.name = "SupportPole"
             pole.data.materials.append(mat_metal)
-            
-            # 设为父子关系方便管理
             pole.parent = beam_obj
             
         return beam_obj
@@ -280,52 +758,73 @@ class SceneDecorator:
         except Exception as e:
             print(f"Failed to load asset {path}: {e}")
 
+    def setup_ibl(self, hdri_path, strength=1.0, rotation=0.0):
+            """
+            设置基于图像的照明 (IBL) / Skybox
+            """
+            import os
+            if not os.path.exists(hdri_path):
+                print(f"⚠️ HDRI not found at: {hdri_path}, skipping IBL.")
+                return
+
+            world = bpy.context.scene.world
+            world.use_nodes = True
+            nodes = world.node_tree.nodes
+            links = world.node_tree.links
+            
+            # 1. 清理旧的环境节点
+            nodes.clear()
+            
+            # 2. 创建节点链
+            # Texture Environment (加载 HDRI)
+            tex_env = nodes.new(type='ShaderNodeTexEnvironment')
+            tex_env.image = bpy.data.images.load(hdri_path)
+            
+            # Mapping & Coordinates (用于旋转天空盒)
+            mapping = nodes.new(type='ShaderNodeMapping')
+            tex_coord = nodes.new(type='ShaderNodeTexCoord')
+            
+            # Background (控制强度)
+            bg = nodes.new(type='ShaderNodeBackground')
+            bg.inputs['Strength'].default_value = strength
+            
+            # Output
+            output = nodes.new(type='ShaderNodeOutputWorld')
+            
+            # 3. 连接
+            links.new(tex_coord.outputs['Generated'], mapping.inputs['Vector'])
+            links.new(mapping.outputs['Vector'], tex_env.inputs['Vector'])
+            links.new(tex_env.outputs['Color'], bg.inputs['Color'])
+            links.new(bg.outputs['Background'], output.inputs['Surface'])
+            
+            # 4. 设置旋转 (Z轴)
+            import math
+            mapping.inputs['Rotation'].default_value[2] = math.radians(rotation)
+            
+            print(f"🌍 IBL setup with {os.path.basename(hdri_path)}, Strength={strength}")
+
+    # 【核心修改】：enhance_scene 变得非常简洁
+    # -----------------------------------------------------------
     def enhance_scene(self, trajectory_points, body_data):
         """
-        主逻辑更新
+        主入口：根据场景名分发给对应的策略
         """
         print(f"🎨 Enhancing scene for: {self.scene_name}")
         
-        # 获取场景中的地面物体 (假设之前的代码生成了叫 "floor" 的物体)
-        floor_obj = bpy.data.objects.get("SmallPlane")
-        if not floor_obj:
-            floor_obj = bpy.data.objects.get("BigPlane")
+        # 1. 查找策略 (如果没有匹配，使用默认策略)
+        strategy_cls = self.strategies.get(self.scene_name, BaseSceneStrategy)
         
-        if self.scene_name == "Dumuqiao" or self.scene_name == "Balance":
-            print("Constructing Balance Beam...")
-            self.create_balance_beam(trajectory_points, width=0.4, thickness=0.08)
-            
-            # 【环境调整】让地面下沉，营造高空感
-            if floor_obj:
-                floor_obj.location.z = -3.0 # 下沉 3 米
-                floor_obj.scale = (50, 50, 1) # 扩大一点防止穿帮
-                
-                # 给地面换个暗色材质，像深渊
-                mat_floor = self.get_material("AbyssFloor", (0.05, 0.05, 0.1), alpha=1.0)
-                if floor_obj.data.materials:
-                    floor_obj.data.materials[0] = mat_floor
-                else:
-                    floor_obj.data.materials.append(mat_floor)
+        # 2. 实例化策略 (传入 self 作为 context)
+        strategy = strategy_cls(self)
+        
+        # 3. 执行
+        try:
+            strategy.execute(trajectory_points, body_data)
+        except Exception as e:
+            print(f"❌ Error executing scene strategy: {e}")
+            import traceback
+            traceback.print_exc()
 
-        elif self.scene_name in ["DiAiTianhuaban", "DiAiTongDao", "Crouch"]:
-            print("Constructing Low Ceiling...")
-            self.create_low_ceiling(body_data, padding=0.2)
-            if self.use_guide_hint:
-                self.create_guidance_ribbon(trajectory_points)
-            
-            # 保持地面不动，或者给地面加一点光泽
-            if floor_obj:
-                mat_floor = self.get_material("GlossyFloor", (0.3, 0.3, 0.3), alpha=1.0)
-                # 增加反光
-                if mat_floor.node_tree.nodes.get('Principled BSDF'):
-                     mat_floor.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value = 0.2
-                
-                if floor_obj.data.materials:
-                    floor_obj.data.materials[0] = mat_floor
-
-        else:
-            if self.use_guide_hint:
-                self.create_guidance_ribbon(trajectory_points)
 
     def create_guidance_ribbon(self, points):
         """
@@ -350,6 +849,65 @@ class SceneDecorator:
         mat = self.get_material("GuideMat", (1.0, 0.5, 0.0), alpha=0.2, emission=0.6)
         obj.data.materials.append(mat)
 
+    def create_fractal_tree(self, location=(0,0,0), scale=1.0):
+        """
+        【修复版】极简枯树生成器 (Mesh Extrude 方案)
+        不再使用递归，防止坐标爆炸。
+        """
+        import random
+        import math
+        
+        # 1. 创建一个圆柱体作为树干基底
+        bpy.ops.mesh.primitive_cylinder_add(
+            radius=0.15 * scale, 
+            depth=1.0, 
+            location=location
+        )
+        tree = bpy.context.object
+        tree.name = "DeadTree"
+        
+        # 2. 进入编辑模式，进行随机挤出 (Extrude)
+        bpy.ops.object.mode_set(mode='EDIT')
+        
+        # 往上挤出 4-5 段，每段随机扭曲
+        current_height = 0
+        for i in range(5):
+            # 挤出
+            bpy.ops.mesh.extrude_region_move(
+                TRANSFORM_OT_translate={"value": (
+                    (random.random()-0.5)*0.5, # X 偏移
+                    (random.random()-0.5)*0.5, # Y 偏移
+                    1.5 * scale                # Z 向上长
+                )}
+            )
+            # 缩放 (树梢变细)
+            bpy.ops.transform.resize(value=(0.8, 0.8, 0.8))
+            
+            # 随机做一个分叉 (简单的复制面并旋转)
+            if i == 2 or i == 3: # 在中间分叉
+                # 再次挤出 creating a branch
+                bpy.ops.mesh.extrude_region_move(
+                    TRANSFORM_OT_translate={"value": (
+                        (random.random()-0.5) * 2.0, 
+                        (random.random()-0.5) * 2.0, 
+                        1.0 * scale
+                    )}
+                )
+                # 此时选中的是分叉末端，我们需要选回主干稍微麻烦
+                # 为了简化，我们只做单根扭曲的枯木，氛围感到位即可
+                # 或者：只做主干扭曲，不做分叉，避免拓扑错误
+                
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+        # 3. 材质
+        mat_bark = self.get_material("DeadBark", (0.05, 0.02, 0.01), alpha=1.0)
+        # 稍微粗糙一点
+        if mat_bark.node_tree.nodes.get('Principled BSDF'):
+            mat_bark.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value = 0.9
+            
+        tree.data.materials.append(mat_bark)
+        
+        return tree
 
 def prune_begin_end(data, perc):
     to_remove = int(len(data) * perc)
@@ -400,7 +958,7 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
             return
     else:
         raise ValueError(f'Invalid mode: {mode}')
-
+    
     # Setup the scene (lights / render engine / resolution etc)
     setup_scene(res=res, denoising=denoising, oldrender=oldrender, accelerator=accelerator, device=device)
 
@@ -418,6 +976,36 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
     # Create a floor
     plot_floor(data.data, big_plane=False)
 
+     # === [关键修复：提升渲染质量] ===
+    scn = bpy.context.scene
+    
+    # 1. 必须开启 Cycles 渲染器 (体积光在 Eevee 下表现不同，论文图通常用 Cycles)
+    scn.render.engine = 'CYCLES'
+    
+    # 2. 启用 GPU (如果可用)
+    try:
+        prefs = bpy.context.preferences.addons['cycles'].preferences
+        prefs.compute_device_type = 'CUDA' # 或 'OPTIX'
+        prefs.get_devices()
+    except:
+        pass
+    scn.cycles.device = 'GPU'
+
+    # 3. 【核心】开启降噪 (Denoising)
+    # 这能把噪点抹平，是解决体积光噪点的神器
+    scn.cycles.use_denoising = True 
+    # 如果有 OptiX (N卡)，可以用 'OPTIX'，否则用 'OPENIMAGEDENOISE' (Intel，CPU跑但质量好)
+    scn.cycles.denoiser = 'OPENIMAGEDENOISE' 
+
+    # 4. 增加采样数 (Samples)
+    # 默认可能只有 32 或 64，体积光至少需要 128 或 256
+    scn.cycles.samples = 128 
+    
+    # 5. 调整体积光参数 (降低计算压力)
+    # 减少体积光的反弹次数，虽然真实感稍微降低，但噪点会少很多
+    scn.cycles.max_bounces = 4
+    scn.cycles.volume_bounces = 2 
+
     # scene_name = "DiAiTianhuaban"
     if hint is not None:
         print("hint is not None!")
@@ -433,7 +1021,7 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
         show_trajectory(data.trajectory)
 
     # initialize the camera
-    camera = Camera(first_root=data.get_root(0), mode=mode)
+    camera = Camera(first_root=data.get_root(0), mode=mode, scene_name=cfg.scene_name)
 
     frameidx = get_frameidx(mode=mode, nframes=nframes,
                             exact_frame=exact_frame,

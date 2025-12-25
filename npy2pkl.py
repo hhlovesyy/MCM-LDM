@@ -60,8 +60,10 @@ def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result
         if joints_data.ndim != 3 or joints_data.shape[2] != 3:
             print(f"\n警告: 文件 {os.path.basename(npy_file_path)} 格式不正确 (应为 T,J,3)，已跳过。")
             return False
-        if npy_trajectory_data == None or npy_trajectory_data.ndim != 2 or npy_trajectory_data.shape[1] != 3:
-            print(f"\n警告: 文件 {os.path.basename(npy_trajectory_file_path)} 格式不正确 (应为 T,3)，已跳过。")
+        if npy_trajectory_data is not None:
+            if npy_trajectory_data.ndim != 2 or npy_trajectory_data.shape[1] != 3:
+                print(f"\n警告: 文件 {os.path.basename(npy_trajectory_file_path)} 格式不正确 (应为 T,3)，将被视为无轨迹处理。")
+                npy_trajectory_data = None # 格式不对，直接当作没读取到
 
         # 1. 【核心】基于根关节的位置，识别所有“好帧”
         root_positions = joints_data[:, 0, :] # [T, 3]

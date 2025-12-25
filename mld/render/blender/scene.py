@@ -1,37 +1,102 @@
 import bpy
 
 
+# def setup_renderer(denoising=True, oldrender=True, accelerator="gpu", device=[0]):
+#     bpy.context.scene.render.engine = "CYCLES"
+#     bpy.data.scenes[0].render.engine = "CYCLES"
+#     if accelerator.lower() == "gpu":
+#         bpy.context.preferences.addons[
+#             "cycles"
+#         ].preferences.compute_device_type = "CUDA"
+#         bpy.context.scene.cycles.device = "GPU"
+#         i = 0
+#         bpy.context.preferences.addons["cycles"].preferences.get_devices()
+#         for d in bpy.context.preferences.addons["cycles"].preferences.devices:
+#             if i in device:  # gpu id
+#                 d["use"] = 1
+#                 print(d["name"], "".join(str(i) for i in device))
+#             else:
+#                 d["use"] = 0
+#             i += 1
+
+#     if denoising:
+#         bpy.context.scene.cycles.use_denoising = True
+
+#     bpy.context.scene.render.tile_x = 256
+#     bpy.context.scene.render.tile_y = 256
+#     bpy.context.scene.cycles.samples = 64
+
+#     if not oldrender:
+#         bpy.context.scene.view_settings.view_transform = "Standard"
+#         bpy.context.scene.render.film_transparent = True
+#         bpy.context.scene.display_settings.display_device = "sRGB"
+#         bpy.context.scene.view_settings.gamma = 1.2
+#         bpy.context.scene.view_settings.exposure = -0.75
+
 def setup_renderer(denoising=True, oldrender=True, accelerator="gpu", device=[0]):
-    bpy.context.scene.render.engine = "CYCLES"
-    bpy.data.scenes[0].render.engine = "CYCLES"
+    scn = bpy.context.scene
+    scn.render.engine = "CYCLES"
+    c = scn.cycles
+    
+    # 1. 【核心】强制使用 OptiX (3090/4090 提速关键)
     if accelerator.lower() == "gpu":
-        bpy.context.preferences.addons[
-            "cycles"
-        ].preferences.compute_device_type = "CUDA"
-        bpy.context.scene.cycles.device = "GPU"
-        i = 0
-        bpy.context.preferences.addons["cycles"].preferences.get_devices()
-        for d in bpy.context.preferences.addons["cycles"].preferences.devices:
-            if i in device:  # gpu id
-                d["use"] = 1
-                print(d["name"], "".join(str(i) for i in device))
+        cprefs = bpy.context.preferences.addons["cycles"].preferences
+        try:
+            # 3090 支持 OptiX，这比 CUDA 快很多
+            cprefs.compute_device_type = "OPTIX"
+            cprefs.get_devices()
+            print("🚀 Switched to OptiX backend.")
+        except:
+            print("⚠️ OptiX not available, falling back to CUDA.")
+            cprefs.compute_device_type = "CUDA"
+            cprefs.get_devices()
+
+        # 激活显卡
+        for i, dev in enumerate(cprefs.devices):
+            if i in device:
+                dev.use = True
+                print(f"✅ Active GPU: {dev.name}")
             else:
-                d["use"] = 0
-            i += 1
+                dev.use = False
+        
+        c.device = "GPU"
 
+    # 2. 【核心】降低体积光计算量 (性能杀手)
+    # 默认 Step Rate 是 1.0，太密了。改成 3.0 对暴风雪这种雾气几乎看不出区别，但速度快3倍。
+    c.volume_step_rate = 3.0  
+    # 限制体积光反弹，设为 0 (只照亮一次，不计算雾气内部反弹)
+    c.volume_bounces = 0      
+    
+    # 3. 限制其他光程
+    c.max_bounces = 6         # 总反弹降到 6
+    c.transparent_max_bounces = 16 # 透明材质(雪花)需要多一点
+    
+    # 4. 降噪
     if denoising:
-        bpy.context.scene.cycles.use_denoising = True
+        c.use_denoising = True
+        try:
+            # 3090 同样支持 OptiX 降噪，速度极快
+            c.denoiser = 'OPTIX' 
+        except:
+            c.denoiser = 'OPENIMAGEDENOISE'
 
-    bpy.context.scene.render.tile_x = 256
-    bpy.context.scene.render.tile_y = 256
-    bpy.context.scene.cycles.samples = 64
+    # 5. 分块大小 (Tile Size)
+    # 3090 显存大 (24G)，可以直接渲染大块。
+    # 设为 2048 可以减少 CPU-GPU 交互开销
+    scn.render.tile_x = 2048
+    scn.render.tile_y = 2048
+    
+    # 6. 采样数
+    # 有了降噪，128 足够了。如果还是慢，降到 64 (配合降噪也能看)
+    c.samples = 128 
 
+    # 色彩管理
     if not oldrender:
-        bpy.context.scene.view_settings.view_transform = "Standard"
-        bpy.context.scene.render.film_transparent = True
-        bpy.context.scene.display_settings.display_device = "sRGB"
-        bpy.context.scene.view_settings.gamma = 1.2
-        bpy.context.scene.view_settings.exposure = -0.75
+        scn.view_settings.view_transform = "Standard"
+        scn.render.film_transparent = True
+        scn.display_settings.display_device = "sRGB"
+        scn.view_settings.gamma = 1.2
+        scn.view_settings.exposure = -0.75
 
 
 # Setup scene
