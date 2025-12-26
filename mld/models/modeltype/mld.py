@@ -1124,16 +1124,49 @@ class MLD(BaseModel):
         target_global_pos = None # 用于 Guidance
         trans_cond_norm = None   # 用于 Denoiser Input
         
-        if scene_data is not None and self.cfg.TRAJECTORY.ENABLED:
-            raw_content = batch['content_motion'].clone()  # 使用未归一化的数据
-            bs = raw_content.shape[0]
+        # if scene_data is not None and self.cfg.TRAJECTORY.ENABLED:
+        #     raw_content = batch['content_motion'].clone()  # 使用未归一化的数据
+        #     bs = raw_content.shape[0]
+        #     # A. 计算 Content 距离 Profile
+        #     # raw_content[0] 取 Batch 中第一个样本作为参考
+        #     content_npy = raw_content[0].detach().cpu().numpy()
+        #     dist_profile = self.traj_processor.calculate_cumulative_distance(content_npy) # (39,)
             
-            # B. 生成避障路径 (A*)
+        #     # B. 生成避障路径 (A*)
+        #     import copy
+        #     from torch.nn.utils.rnn import pad_sequence
+        #     waypoints = copy.deepcopy(scene_data['trajectory']['points'])
+        #     obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
+            
+        #     startPosX, startPosY = waypoints[0][0], waypoints[0][1]
+        #     for p in waypoints:
+        #         p[0] -= startPosX
+        #         p[1] -= startPosY
+        #     for obs in obstacles:
+        #         if 'center' in obs:
+        #             obs['center'][0] -= startPosX
+        #             obs['center'][1] -= startPosY
+        #         elif 'pos' in obs: # 防御性编程，有的格式可能是 pos
+        #             obs['pos'][0] -= startPosX
+        #             obs['pos'][1] -= startPosY
+        #     dense_curve = self.traj_processor.generate_collision_free_path(waypoints, obstacles) #shape:(200, 2)
+        
+        if scene_data is not None and self.cfg.TRAJECTORY.ENABLED:
+            raw_content = batch['content_motion'].clone() 
+            bs = raw_content.shape[0]
+            content_npy = raw_content[0].detach().cpu().numpy()
+            dist_profile = self.traj_processor.calculate_cumulative_distance(content_npy)
+
+            # === 🔥 修改开始 🔥 ===
             import copy
             from torch.nn.utils.rnn import pad_sequence
-            waypoints = copy.deepcopy(scene_data['trajectory']['points'])
-            obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
             
+            # 1. 获取轨迹配置和障碍物
+            traj_config = copy.deepcopy(scene_data['trajectory'])
+            obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
+            # 2. 坐标归一化 (将起点的 (x,z) 归零)
+            # 无论 A* 还是手绘，都把第一个点作为 (0,0) 参考系
+            waypoints = traj_config['points'] # 这里不管是 A*的点 还是 手绘的点，都是 list
             startPosX, startPosY = waypoints[0][0], waypoints[0][1]
             for p in waypoints:
                 p[0] -= startPosX
@@ -1145,7 +1178,13 @@ class MLD(BaseModel):
                 elif 'pos' in obs: # 防御性编程，有的格式可能是 pos
                     obs['pos'][0] -= startPosX
                     obs['pos'][1] -= startPosY
-            dense_curve = self.traj_processor.generate_collision_free_path(waypoints, obstacles) #shape:(200, 2)，每一帧应该走到的位置（关键路径点，做了B样条平滑）
+            # 3. 生成稠密曲线 (Dense Curve)
+            # 原来的代码是: dense_curve = self.traj_processor.generate_collision_free_path(...)
+            # 现在改为:
+            dense_curve = self.traj_processor.get_path_from_config(traj_config, obstacles)
+            
+            # === 🔥 修改结束 (后续逻辑保持不变) 🔥 ===
+            
             
             # 2. 【核心修改】逐样本计算轨迹 (Loop over Batch)
             list_target_pos = []
