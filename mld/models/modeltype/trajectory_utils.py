@@ -123,6 +123,81 @@ class TrajectoryProcessor:
         
         dense_curve = np.stack([x_new, z_new], axis=1)
         return dense_curve
+    
+    # === 🔥 新增/修改的方法 🔥 ===
+    def get_path_from_config(self, traj_config, obstacles):
+        """
+        根据配置决定是跑 A* 还是直接用手绘轨迹
+        """
+        points = np.array(traj_config['points'])
+        traj_type = traj_config.get('type', 'bezier_control_points')
+
+        # 情况 A: 智能规划 (A*)
+        # 你的 JSON 里面 type 是 'bezier_control_points'
+        if traj_type == 'bezier_control_points':
+            # 调用原有的 A* 逻辑 (记得把原来的 generate_collision_free_path 改个名或者直接在这里调用)
+            return self._run_astar_planning(points, obstacles)
+
+        # 情况 B: 手绘轨迹 (Freehand)
+        # 你的 JSON 里面 type 是 'freehand_curve'
+        elif traj_type == 'freehand_curve':
+            # 直接对点进行平滑插值，不再进行避障规划
+            return self._smooth_freehand_path(points)
+        
+        else:
+            return points # Fallback
+
+    def _run_astar_planning(self, control_points, obstacles):
+        """原 generate_collision_free_path 的逻辑挪到这里"""
+        planner_obs = []
+        for obs in obstacles:
+            item = {'type': obs['type'], 'center': obs['center']}
+            if obs['type'] == 'cylinder':
+                item['radius'] = obs['radius']
+            elif obs['type'] == 'box':
+                if 'extent' in obs: item['extent'] = obs['extent']
+                elif 'size' in obs: item['extent'] = [obs['size'][0], obs['size'][2]]
+            planner_obs.append(item)
+            
+        return self.planner.generate_path(control_points, planner_obs)
+
+    def _smooth_freehand_path(self, raw_points, num_samples=200):
+        """
+        对手绘点进行 B-Spline 平滑，生成稠密曲线
+        """
+        if len(raw_points) < 2:
+            return raw_points
+        
+        # 如果点太少(比如直直画了一笔)，直接线性插值
+        if len(raw_points) <= 3:
+            # 简单生成直线上的稠密点
+            dists = np.linalg.norm(raw_points[1:] - raw_points[:-1], axis=1)
+            total = np.sum(dists)
+            # 简单的线性插值
+            t = np.linspace(0, 1, num_samples)
+            # ...这里简单处理，实际直接用 path_planner 里的 splprep 更好
+            # 为了省事，我们复用 PathPlanner 里的 spline 逻辑，因为原理一样
+            try:
+                # 借用 planner 里的 spline 工具，不需要 reinvent the wheel
+                from scipy.interpolate import splprep, splev
+                tck, u = splprep(raw_points.T, u=None, s=0.1, k=min(3, len(raw_points)-1)) 
+                u_new = np.linspace(u.min(), u.max(), num_samples)
+                smooth_path = np.array(splev(u_new, tck)).T
+                return smooth_path
+            except:
+                return raw_points
+
+        # 正常情况：使用 scipy 进行平滑
+        try:
+            from scipy.interpolate import splprep, splev
+            # s是平滑因子，越大手绘的抖动被抹平得越厉害
+            tck, u = splprep(raw_points.T, u=None, s=0.5, k=3) 
+            u_new = np.linspace(u.min(), u.max(), num_samples)
+            smooth_path = np.array(splev(u_new, tck)).T
+            return smooth_path
+        except Exception as e:
+            print(f"Smoothing failed: {e}, using raw points")
+            return raw_points
 
 # ==========================================
 # 3. 验证与可视化
