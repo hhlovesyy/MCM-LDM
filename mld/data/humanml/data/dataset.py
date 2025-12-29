@@ -1976,6 +1976,7 @@ class Text2MotionDatasetV2(data.Dataset):
 
     def __getitem__(self, item):
         idx = self.pointer + item
+        current_motion_name = self.name_list[idx] 
         data = self.data_dict[self.name_list[idx]]
         motion, m_length, text_list = data["motion"], data["length"], data[
             "text"]
@@ -2013,6 +2014,11 @@ class Text2MotionDatasetV2(data.Dataset):
             m_length = (m_length // self.unit_length - 1) * self.unit_length
         elif coin2 == "single":
             m_length = (m_length // self.unit_length) * self.unit_length
+
+        # --- 增加安全性检查：防止 m_length 变成 0 或负数 ---
+        if m_length <= 0: 
+            raise ValueError("Motion length is too short after crop, motion is: ", current_motion_name)
+        
         idx = random.randint(0, len(motion) - m_length)
         motion = motion[idx:idx + m_length]
         "Z Normalization"
@@ -2031,8 +2037,10 @@ class Text2MotionDatasetV2(data.Dataset):
         # print(tokens)
 
         # debug check nan
-        if np.any(np.isnan(motion)):
-            raise ValueError("nan in motion")
+        if np.any(np.isnan(motion)) or np.any(np.isinf(motion)):
+            print(f"[Warning] NaN/Inf found in motion: {current_motion_name}, skipping and retrying...")
+            # 随机换一个索引重试
+            return self.__getitem__(random.randint(0, len(self) - 1))
 
         return (
             word_embeddings,

@@ -25,29 +25,31 @@ def main():
     # resume
     if cfg.TRAIN.RESUME:
         resume = cfg.TRAIN.RESUME
-        backcfg = cfg.TRAIN.copy()
+        # backcfg = cfg.TRAIN.copy()
         if os.path.exists(resume):
-            file_list = sorted(os.listdir(resume), reverse=True)
-            for item in file_list:
-                if item.endswith(".yaml"):
-                    cfg = OmegaConf.load(os.path.join(resume, item))
-                    cfg.TRAIN = backcfg
-                    break
-            checkpoints = sorted(os.listdir(os.path.join(
-                resume, "checkpoints")),
-                                 key=lambda x: int(x[6:-5]),
-                                 reverse=True)
-            for checkpoint in checkpoints:
-                if "epoch=" in checkpoint:
-                    cfg.TRAIN.PRETRAINED = os.path.join(
-                        resume, "checkpoints", checkpoint)
-                    break
-            if os.path.exists(os.path.join(resume, "wandb")):
-                wandb_list = sorted(os.listdir(os.path.join(resume, "wandb")),
-                                    reverse=True)
-                for item in wandb_list:
-                    if "run-" in item:
-                        cfg.LOGGER.WANDB.RESUME_ID = item.split("-")[-1]
+        #     file_list = sorted(os.listdir(resume), reverse=True)
+        #     for item in file_list:
+        #         if item.endswith(".yaml"):
+        #             cfg = OmegaConf.load(os.path.join(resume, item))
+        #             cfg.TRAIN = backcfg
+        #             break
+        #     checkpoints = sorted(os.listdir(os.path.join(
+        #         resume, "checkpoints")),
+        #                          key=lambda x: int(x[6:-5]),
+        #                          reverse=True)
+        #     for checkpoint in checkpoints:
+        #         if "epoch=" in checkpoint:
+        #             cfg.TRAIN.PRETRAINED = os.path.join(
+        #                 resume, "checkpoints", checkpoint)
+        #             break
+        #     if os.path.exists(os.path.join(resume, "wandb")):
+        #         wandb_list = sorted(os.listdir(os.path.join(resume, "wandb")),
+        #                             reverse=True)
+        #         for item in wandb_list:
+        #             if "run-" in item:
+        #                 cfg.LOGGER.WANDB.RESUME_ID = item.split("-")[-1]
+            checkpoints = resume
+            cfg.TRAIN.PRETRAINED = checkpoints
 
         else:
             raise ValueError("Resume path is not right.")

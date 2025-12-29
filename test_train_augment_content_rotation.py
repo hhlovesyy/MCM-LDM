@@ -290,9 +290,10 @@ def recover_from_ric(data, joints_num):
 # Main
 # ==========================================
 if __name__ == "__main__": # motion_representation 改成了好几个step
-    RAW_DATA_PATH = "/root/autodl-tmp/MyRepository/MCM-LDM/demo/watch22results/walk_and_turn_process.npy"
+    RAW_DATA_PATH = "/root/autodl-tmp/HumanML3D/HumanML3D/pose_data/BMLmovi/Subject_1_F_MoSh/Subject_1_F_4_poses.npy"
     REFERENCE_FILE = "/root/autodl-tmp/HumanML3D/HumanML3D/joints/000021.npy"
     OUTPUT_DIR = "/root/autodl-tmp/MyRepository/MCM-LDM/demo/watch22results/xuanzhuanzengqiang"
+    b_testWrong = False # 归一化之后做旋转增强
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     if not os.path.exists(REFERENCE_FILE):
@@ -301,23 +302,28 @@ if __name__ == "__main__": # motion_representation 改成了好几个step
 
     # 1. Load & Viz Raw
     raw_data = np.load(RAW_DATA_PATH) # [N, 22, 3]
-    # render_video(raw_data, os.path.join(OUTPUT_DIR, "0_raw.mp4"), "0_Raw")
+    raw_data = raw_data[:, :22]
+    print("raw_data's shape: ", raw_data.shape)
+    render_video(raw_data, os.path.join(OUTPUT_DIR, "0_raw.mp4"), "0_Raw")
 
     # 2. Step 1 Uniform
     uniform_data = step1_uniform_skeleton(raw_data, REFERENCE_FILE)
-    # render_video(uniform_data, os.path.join(OUTPUT_DIR, "1_uniform.mp4"), "1_Uniform")
+    render_video(uniform_data, os.path.join(OUTPUT_DIR, "1_uniform.mp4"), "1_Uniform")
 
     # 3. Step 2 Canonical
     aligned_data = step2_canonicalize(uniform_data)
-    # render_video(aligned_data, os.path.join(OUTPUT_DIR, "2_aligned.mp4"), "2_Aligned")
+    render_video(aligned_data, os.path.join(OUTPUT_DIR, "2_aligned.mp4"), "2_Aligned")
 
     # 4. Step 3 Extract (Strict Notebook Logic)
     feature_vec = step3_extract_features(aligned_data) # 22，3-  》  263
     print(f"Features: {feature_vec.shape}") # Should be (N-1, 263)
 
-    # ... (Step 4 结束) ...
-    # feature_vec = step3_extract_features(aligned_data)
-    # print(f"Features: {feature_vec.shape}")
+    # 模拟一下归一化的错误操作
+    if b_testWrong:
+        epsilon = 1e-8
+        mean_npy = np.load("/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Mean.npy")
+        std_npy = np.load("/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d/Std.npy")
+        feature_vec = (feature_vec - mean_npy) / (std_npy + epsilon)
 
     # ==========================================
     # [NEW] Test Rotation Augmentation
@@ -325,26 +331,32 @@ if __name__ == "__main__": # motion_representation 改成了好几个step
     print("\n[Test] Applying Rotation Augmentation (+90 degrees)...")
     # 旋转 90 度：本来向北，现在应该向西 (或东，取决于坐标系)
     aug_feature_vec = augment_content_rotation_numpy(feature_vec, angle_degrees=90.0)
+    if b_testWrong:
+        aug_feature_vec = aug_feature_vec * std_npy + mean_npy
     
     # 还原增强后的动作
     aug_rec_data = recover_from_ric(aug_feature_vec, 22).numpy()
-    np.save("/root/autodl-tmp/MyRepository/MCM-LDM/demo/watch22results/xuanzhuanzengqiang/aug_90.npy", aug_rec_data)
+    # np.save("/root/autodl-tmp/MyRepository/MCM-LDM/demo/watch22results/xuanzhuanzengqiang/aug_90.npy", aug_rec_data)
     
     # 渲染增强后的动作
     # 预期效果：动作本身姿态不变(比如还是向前迈步)，但是整体轨迹发生了偏转
-    # render_video(aug_rec_data, os.path.join(OUTPUT_DIR, "4_augmented_90deg.mp4"), "4_Aug_90deg")
+    render_video(aug_rec_data, os.path.join(OUTPUT_DIR, "4_augmented_90deg.mp4"), "4_Aug_90deg")
     
     # 再测试一个 -45 度
     print("[Test] Applying Rotation Augmentation (-45 degrees)...")
     aug_feature_vec_2 = augment_content_rotation_numpy(feature_vec, angle_degrees=-45.0)
+    if b_testWrong:
+        aug_feature_vec_2 = aug_feature_vec_2 * std_npy + mean_npy
     aug_rec_data_2 = recover_from_ric(aug_feature_vec_2, 22).numpy()
-    np.save("/root/autodl-tmp/MyRepository/MCM-LDM/demo/watch22results/xuanzhuanzengqiang/aug_n45.npy", aug_rec_data_2)
-    # render_video(aug_rec_data_2, os.path.join(OUTPUT_DIR, "5_augmented_neg45deg.mp4"), "5_Aug_neg45deg")
+    # np.save("/root/autodl-tmp/MyRepository/MCM-LDM/demo/watch22results/xuanzhuanzengqiang/aug_n45.npy", aug_rec_data_2)
+    render_video(aug_rec_data_2, os.path.join(OUTPUT_DIR, "5_augmented_neg45deg.mp4"), "5_Aug_neg45deg")
     # ==========================================
 
     # 5. Reconstruct (Strict Notebook Logic)
     # 输入 feature_vec (N-1, 263)
     # 输出 rec_data (N-1, 22, 3) -> 注意：notebook的还原是不补第一帧的，它直接用累计值
+    if b_testWrong:
+        feature_vec = feature_vec * std_npy + mean_npy
     rec_data = recover_from_ric(feature_vec, 22).numpy()
     
     print(f"Rec Data: {rec_data.shape}")

@@ -1,4 +1,4 @@
-NAME: scenemoDiff_1210_Train_MLPAndLoss_LOSS0_2_100Epoch
+NAME: scenemoDiff_1226_Baseline_no_scene
 DEBUG: False
 ACCELERATOR: 'gpu'
 DEVICE: [0]
@@ -10,25 +10,27 @@ SCENE_MODIFF_ABLATION:
   DIFFUSION_PENALTY: 0.5  # 这个值先别炼丹了，估计没什么用，这个指的是有场景的样本会把 diffsion loss往下压一点点，让模型更关注场景
   UPDATE_BASELINE: True  # 保持这个就挺好，这个是论文里面写的那个涨点模块，没崩了就一直开着吧
 
-  JUST_FINETUNE_BASELINE: False # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
+  JUST_FINETUNE_BASELINE: True # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
 
 TRAIN:
   STAGE: diffusion
-  DATASETS: ['stylescenedataset']
+  # DATASETS: ['stylescenedataset']
+  DATASETS: ['humanml3d']
   # Number of dataloader workers
   NUM_WORKERS: 4
   # Size of batches
-  BATCH_SIZE: 32
+  BATCH_SIZE: 128
   # Total epochs for training
-  END_EPOCH: 100
+  END_EPOCH: 1200
 
-  RESUME: '' # Resume training from this path
+  RESUME: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1226_Baseline_no_scene/checkpoints/epoch=299.ckpt' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
-  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1220/checkpoints/epoch=799.ckpt'
+  PRETRAINED: ''
   # PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll/checkpoints/epoch=69.ckpt'
   OPTIM:
     TYPE: AdamW # Optimizer type
-    LR: 2e-5 # Learning rate
+    # LR: 2e-5 # Learning rate
+    LR: 5.0e-5
     # 【关键】为 Denoiser 设置一个很小的学习率，进行微调
     LR_DENOISER: 1.0e-5
     # 【关键】可以适当降低新模块的学习率，因为它们已经 warm-up 过了
@@ -54,7 +56,7 @@ EVAL:
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=149.ckpt'
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage_withNewLossFunc/checkpoints/epoch=49.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1226_Baseline_no_scene/checkpoints/epoch=374.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
@@ -159,16 +161,104 @@ TRAJECTORY:
   # ================= 推理引导 (默认值) =================
   # 这些可以在推理脚本中覆盖，但这里设个默认值
   GUIDANCE:
-    ENABLED: True
+    ENABLED: False
     STRENGTH: 2.0
     GUIDANCE_START : 1000  # 去噪开启引导的开始step和结束step
     GUIDACE_END: 0
 
     WAYPOINTS_MODE: True # 是否启用关键路点追踪功能
     WAYPOINTS_GUIDE_STRENGTH: 100.0
+    WAYPOINTS_INTERVAL: 10
 
     OBSTACLE_MODE: True  # 是否启用避障功能
     OBSTACLE_GUIDE_STRENGTH: 2.0
 
     STRICT_TRACK_MODE: False  # 是否要严格按照轨迹来走（效果比较差，不建议启用）
     STRICT_TRACK_STRENGTH: 2.0
+
+
+
+
+
+
+
+
+
+SCENEMODIFF_GLOBAL_CONFIG:
+  JUST_FINETUNE_BASELINE: False # 是否仅仅是继续Finetune MCM-LDM（注意，没有任何新东西，只是全量Finetune MCM-LDM的全部代码）
+  ROOT_MASKING_DIM4: True
+  STEP1_DROP_STYLE_PROB: 0.1  # 在解耦轨迹的第一阶段，style随机dropout的概率是多少
+
+SCENEMODIFF_DENOISER_GLOBAL_CONFIG:
+  INJECTION_MODE: 'concat'  # options: 'concat', 'adaln'
+  ENCODER_TYPE: 'seq'
+
+SCENEMODIFF_GLOBAL_CONFIG_TRAIN:
+  MULTI_MODAL_FUSION: 'text' # 训练的时候如何融合场景多模态？text：只有文本；image：只有图像； mixed：两者混合训练
+  USE_SCENE_CLS: True
+
+SCENEMODIFF_GLOBAL_CONFIG_INFERENCE:
+
+CURRICULUM:
+  ENABLED: True
+  DEFAULT_STAGE: "stage0_force_alignment"
+  STAGES:
+    # =======================================================
+    # Stage 0: 快速对齐 (50 Epochs)
+    # 就像教新兵转体，先别让他负重，先教会听口令转方向。
+    # =======================================================
+    - NAME: "stage0_force_alignment"
+      EPOCH_START: 0
+      EPOCH_END: 300
+      TRAJECTORY:
+        ROTATION_AUG: True
+        ROTATION_RANGE: 180.0
+        CONTENT_DROPOUT_PROB: 0.1
+        CONTENT_SPARSITY:
+          ENABLED: False # 不稀疏，全给
+          MODE: "first_frame" 
+          NUM_KEY_FRAMES: 5 
+      MASKING:
+        STRATEGY: "keep_style_only"  # 没有场景
+      LOSS:
+        LAMBDA_SCENE: 0.0
+
+    # =======================================================
+    # Stage 1: 撤掉辅助轮 (100 Epochs)
+    # 增加难度，每隔一段距离才给一个参考点，逼迫模型学会连线。
+    # =======================================================
+    - NAME: "stage1_keyframe_guidance"
+      EPOCH_START: 300
+      EPOCH_END: 600
+      TRAJECTORY:
+        ROTATION_AUG: True
+        ROTATION_RANGE: 180.0
+        CONTENT_DROPOUT_PROB: 0.25
+        CONTENT_SPARSITY:
+          ENABLED: False
+          MODE: "key_frames" # 开启关键帧模式
+          NUM_KEY_FRAMES: 5 # 每隔多少帧给一次content motion
+      MASKING:
+        STRATEGY: "keep_style_only"
+      LOSS:
+        LAMBDA_SCENE: 0.0
+
+    # =======================================================
+    # Stage 2: 实战模拟 (450 Epochs)
+    # 这是最漫长的长征。只有第一帧，模型必须学会完全依赖 Trajectory 
+    # 和自身的先验知识来生成动作。
+    # =======================================================
+    - NAME: "stage2_first_frame_only"
+      EPOCH_START: 600
+      EPOCH_END: 1000
+      TRAJECTORY:
+        ROTATION_AUG: True
+        ROTATION_RANGE: 180.0
+        CONTENT_DROPOUT_PROB: 0.5 # 加大 Dropout，模拟推理时的无条件生成
+        CONTENT_SPARSITY:
+          ENABLED: False
+          MODE: "first_frame" # 地狱难度：只有第一帧
+      MASKING:
+        STRATEGY: "keep_style_only"
+      LOSS:
+        LAMBDA_SCENE: 0.0

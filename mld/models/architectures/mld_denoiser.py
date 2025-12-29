@@ -228,7 +228,7 @@ class MldDenoiser(nn.Module):
                  text_encoded_dim: int = 256,
                  motion_encoded_dim: int = 512,
                  nclasses: int = 10,
-                 trajectory_config: dict = None,
+                 train_denoiser_config: dict = None,
                  **kwargs) -> None:
 
         super().__init__()
@@ -240,7 +240,7 @@ class MldDenoiser(nn.Module):
         self.abl_plus = False
         self.arch = arch
         self.motion_encoded_dim = motion_encoded_dim
-        self.trajectory_config = trajectory_config
+        self.train_denoiser_config = train_denoiser_config
 
 
 
@@ -270,7 +270,7 @@ class MldDenoiser(nn.Module):
                 self.latent_dim, position_embedding=position_embedding)
 
 
-        if self.trajectory_config.INJECTION_MODE == 'concat':  # 强力注入，我们修改升级后的版本
+        if self.train_denoiser_config.INJECTION_MODE == 'concat':  # 强力注入，我们修改升级后的版本
             self.blocks = nn.ModuleList([
                 DiTBlockNew( hidden_size=self.latent_dim, num_heads=num_heads, mlp_ratio=4.0) for _ in range(num_layers)
             ])
@@ -293,7 +293,7 @@ class MldDenoiser(nn.Module):
 
         self.linear = nn.Linear(7*256, 6*256)
 
-        if self.trajectory_config.ENCODER_TYPE == 'seq': # 新的版本，升级轨迹编码器
+        if self.train_denoiser_config.ENCODER_TYPE == 'seq': # 新的版本，升级轨迹编码器
             self.trans_Encoder = TrajectoryEncoderV2(input_dim=4, hidden_dim=256, num_layers=2)
             self.fusion_layer = nn.Linear(self.latent_dim + 256, self.latent_dim)
         else:
@@ -343,7 +343,7 @@ class MldDenoiser(nn.Module):
         style_emb_latent = time_emb + style_emb_latent
         style_emb_latent = style_emb_latent.squeeze(0) # torch.Size([32, 256])
 
-        if self.trajectory_config.INJECTION_MODE == "concat":
+        if self.train_denoiser_config.INJECTION_MODE == "concat":
 
             latent_len = sample.shape[0]  # 7
             # trajectory encoder
@@ -364,7 +364,7 @@ class MldDenoiser(nn.Module):
         
         # to dit blocks (N, T, D)
         xseq = xseq.permute(1,0,2) # torch.Size([32, 20, 256])
-        if self.trajectory_config.INJECTION_MODE == "concat":
+        if self.train_denoiser_config.INJECTION_MODE == "concat":
             for block in self.blocks:
                 xseq = block(xseq, style_emb_latent) # 回顾一下：xseq是content与z拼接后的：torch.Size([32, 13, 256])；style_emb_latent：torch.Size([32, 256])和trans_emb torch.Size([32, 256])是AdaLN的旁路输入
             sample = xseq[:,-sample.shape[0]:,:] # torch.Size([32, 7, 256])，只取后半部分，也就是z，即sample
