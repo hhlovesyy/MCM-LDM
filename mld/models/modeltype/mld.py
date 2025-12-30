@@ -717,61 +717,6 @@ class MLD(BaseModel):
                 grad = torch.zeros_like(latents)
                 
             return grad
-    
-    def compute_keypoint_guidance(self, latents, t, target_joint_idx, target_frame_idx, target_pos, encoder_hidden_states, lengths):
-        """
-        [新] 关键点引导函数
-        target_joint_idx: 整数, e.g., 11 (右手腕)
-        target_frame_idx: 整数, e.g., 99 (第100帧)
-        target_pos: [3] Tensor, e.g., [0.5, 1.2, 0.8]
-        """
-        # print("now in compute_keypoint")
-        with torch.enable_grad():
-            latents = latents.detach().requires_grad_(True)
-            
-            # 1. 预测噪声 & 反推 z0
-            noise_pred = self.denoiser(
-                sample=latents,
-                timestep=t,
-                encoder_hidden_states=encoder_hidden_states,
-                lengths=lengths,
-            )[0]
-            
-            alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
-            beta_prod_t = 1 - alpha_prod_t
-            pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
-            
-            pred_z0_input = pred_z0.permute(1, 0, 2)
-            
-            # 2. VAE Decode (得到归一化特征)
-            # 注意：这里的长度需要是完整的
-            full_lengths = [lengths[0]] * latents.shape[0] if lengths is not None else [pred_z0_input.shape[0]] * latents.shape[0]
-            pred_motion_norm = self.vae.decode(pred_z0_input, full_lengths)
-            
-            # 3. 反归一化 (得到物理特征)
-            pred_motion = pred_motion_norm * self.std.to(latents.device) + self.mean.to(latents.device)
-            
-            # 4. 【核心】正向运动学 (FK)
-            # recover_from_ric 输入 [B, L, 263]，输出 [B, L, 22, 3]
-            # 这是将 263 维特征还原成全局 XYZ 坐标的关键函数
-            # 你需要确保你的项目里有这个函数，或者类似功能的函数
-            # 我们之前在 debug 脚本里用过它！
-            all_joint_positions = recover_from_ric(pred_motion, 22) # 假设是 22 个关节
-
-            # 5. 提取目标关节在目标帧的位置
-            # [Batch, Frames, Joints, 3]
-            pred_joint_pos = all_joint_positions[:, target_frame_idx, target_joint_idx, :] # torch.Size([1, 3])
-            target_pos = target_pos.unsqueeze(0)
-            pred_joint_pos[:, 1] = 0
-            target_pos[:, 1] = 0
-            
-            # 6. 计算 Loss (简单的 MSE)
-            loss = F.mse_loss(pred_joint_pos, target_pos.to(latents.device)) # 
-            
-            # 7. 求导
-            grad = torch.autograd.grad(loss, latents)[0]
-            
-            return grad
 
     def estimate_speed_from_motion(self, motion_features):
         """
@@ -915,82 +860,81 @@ class MLD(BaseModel):
 
         return trans_cond_norm, target_global_pos
     
-    def compute_spatial_guidance(self, latents, t, target_global_pos, encoder_hidden_states, lengths, interval=20):
-        with torch.enable_grad():
-            latents = latents.detach().requires_grad_(True)
+    def _compute_waypoint_loss(self, latents, t, target_global_pos, encoder_hidden_states, lengths, interval=20):
             
-            # 1. 预测 & 反推 (保持不变)
-            noise_pred = self.denoiser(
-                sample=latents,
-                timestep=t,
-                encoder_hidden_states=encoder_hidden_states,
-                lengths=lengths,
-            )[0]
-            
-            alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
-            beta_prod_t = 1 - alpha_prod_t
-            pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
-            
-            # 2. Decode & 反归一化 (保持不变)
-            pred_z0_input = pred_z0.permute(1, 0, 2) 
-            fake_lengths = [target_global_pos.shape[1]] * latents.shape[0]
-            pred_motion_norm = self.vae.decode(pred_z0_input, fake_lengths)
-            
-            if self.mean.device != latents.device:
-                self.mean = self.mean.to(latents.device)
-                self.std = self.std.to(latents.device)
-            pred_motion = pred_motion_norm * self.std + self.mean
-            
-            # 3. 积分得到物理轨迹 (使用修正后的 calculate_trajectory_correct)
-            # calculate_pos: [Batch, Seq, 3]
-            calculate_pos = calculate_trajectory_correct(pred_motion)
-            
-            # ================== 【修改点 1: 坐标系对齐】 ==================
-            # 我们不关心绝对坐标，只关心相对形状。
-            # 让生成轨迹和目标轨迹的第0帧都归零。
-            # 这样消除了“起点不一致”带来的巨大 Loss。
-            pred_traj_centered = calculate_pos - calculate_pos[:, 0:1, :]
-            target_traj_centered = target_global_pos - target_global_pos[:, 0:1, :]
-            
-            # 生成索引: [0, 20, 40, ..., last_frame]
-            # ================= [新增/检查 Mask 逻辑] =================
-            # 我们只计算 valid 长度内的 loss
-            # 创建一个 [B, L] 的 mask
-            seq_len = calculate_pos.shape[1] # 199，batch里最长的动作的长度
-            bs = calculate_pos.shape[0] 
-            
-            # 生成 Mask: True 代表有效帧，False 代表 Padding
-            # range_tensor: [0, 1, 2, ..., L-1]
-            range_tensor = torch.arange(seq_len, device=latents.device).unsqueeze(0) # [1, L]
-            # lengths_tensor: [B, 1]
-            lengths_tensor = torch.tensor(lengths, device=latents.device).unsqueeze(1)
-            mask = range_tensor < lengths_tensor # [B, L]
-            mask = mask.unsqueeze(-1) # [B, L, 1] 广播到坐标维度
-            key_indices = torch.arange(0, seq_len, interval, device=latents.device)
-            
-            # 1. 提取关键帧 (Key Indices)
-            pred_sampled = pred_traj_centered[:, key_indices, :]
-            target_sampled = target_traj_centered[:, key_indices, :]
-            mask_sampled = mask[:, key_indices, :] # [B, K, 1]
-            
-            # 2. 手动计算 MSE
-            # 只有 mask 为 1 的地方有值，其他地方 diff 为 0
-            diff = (pred_sampled - target_sampled) * mask_sampled 
-            
-            # 平方误差总和
-            sum_squared_error = (diff ** 2).sum()
-            
-            # 有效像素总和 (防止除以0，加个极小值)
-            valid_element_count = mask_sampled.sum() * 3 + 1e-8 # *3 是因为坐标有 (x,y,z) 3个维度
-            
-            # 计算真正的平均 Loss
-            loss = sum_squared_error / valid_element_count
-            
-            # 4. 求导
-            grad = torch.autograd.grad(loss, latents)[0]
-            
-            return grad
+        # 1. 预测 & 反推 (保持不变)
+        noise_pred = self.denoiser(
+            sample=latents,
+            timestep=t,
+            encoder_hidden_states=encoder_hidden_states,
+            lengths=lengths,
+        )[0]
         
+        alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+        beta_prod_t = 1 - alpha_prod_t
+        pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+        
+        # 2. Decode & 反归一化 (保持不变)
+        pred_z0_input = pred_z0.permute(1, 0, 2) 
+        fake_lengths = [target_global_pos.shape[1]] * latents.shape[0]
+        pred_motion_norm = self.vae.decode(pred_z0_input, fake_lengths)
+        
+        if self.mean.device != latents.device:
+            self.mean = self.mean.to(latents.device)
+            self.std = self.std.to(latents.device)
+        pred_motion = pred_motion_norm * self.std + self.mean
+        
+        # 3. 积分得到物理轨迹 (使用修正后的 calculate_trajectory_correct)
+        # calculate_pos: [Batch, Seq, 3]
+        calculate_pos = calculate_trajectory_correct(pred_motion)
+        
+        # ================== 【修改点 1: 坐标系对齐】 ==================
+        # 我们不关心绝对坐标，只关心相对形状。
+        # 让生成轨迹和目标轨迹的第0帧都归零。
+        # 这样消除了“起点不一致”带来的巨大 Loss。
+        pred_traj_centered = calculate_pos - calculate_pos[:, 0:1, :]
+        target_traj_centered = target_global_pos - target_global_pos[:, 0:1, :]
+        
+        # 生成索引: [0, 20, 40, ..., last_frame]
+        # ================= [新增/检查 Mask 逻辑] =================
+        # 我们只计算 valid 长度内的 loss
+        # 创建一个 [B, L] 的 mask
+        seq_len = calculate_pos.shape[1] # 199，batch里最长的动作的长度
+        bs = calculate_pos.shape[0] 
+        
+        # 生成 Mask: True 代表有效帧，False 代表 Padding
+        # range_tensor: [0, 1, 2, ..., L-1]
+        range_tensor = torch.arange(seq_len, device=latents.device).unsqueeze(0) # [1, L]
+        # lengths_tensor: [B, 1]
+        lengths_tensor = torch.tensor(lengths, device=latents.device).unsqueeze(1)
+        mask = range_tensor < lengths_tensor # [B, L]
+        mask = mask.unsqueeze(-1) # [B, L, 1] 广播到坐标维度
+        key_indices = torch.arange(0, seq_len, interval, device=latents.device)
+        
+        # 1. 提取关键帧 (Key Indices)
+        pred_sampled = pred_traj_centered[:, key_indices, :]
+        target_sampled = target_traj_centered[:, key_indices, :]
+        mask_sampled = mask[:, key_indices, :] # [B, K, 1]
+        
+        # 2. 手动计算 MSE
+        # 只有 mask 为 1 的地方有值，其他地方 diff 为 0
+        diff = (pred_sampled - target_sampled) * mask_sampled 
+        
+        # 平方误差总和
+        sum_squared_error = (diff ** 2).sum()
+        
+        # 有效像素总和 (防止除以0，加个极小值)
+        valid_element_count = mask_sampled.sum() * 3 + 1e-8 # *3 是因为坐标有 (x,y,z) 3个维度
+        
+        # 计算真正的平均 Loss
+        loss = sum_squared_error / valid_element_count
+        
+        # # 4. 求导
+        # grad = torch.autograd.grad(loss, latents)[0]
+        
+        # return grad
+        return loss
+    
 
     # def configure_optimizers(self):
     #     # 从配置文件中读取两组学习率，并提供默认值以防万一
@@ -1117,418 +1061,208 @@ class MLD(BaseModel):
         z = z.unsqueeze(0)
         return z
     
-# test    
-    def forward_allModel3Branch(self, batch):
-        lengths = batch["length"]
-        
-        # 1. 准备基础数据
-        # Style
-        motion = batch["style_motion"].clone()
-        motion[...,:3] = 0 # torch.Size([1, 199, 263])
-        
-        # Content
-        content_motion = batch['content_motion'] # torch.Size([1, 38, 263])
-        # 保持归一化逻辑不变，因为测试的时候是直接加载的npy，没有数据集的归一化处理，所以在推理的forward里面需要手动进行一下归一化
-        content_motion = (content_motion - self.mean.to(content_motion.device)) / self.std.to(content_motion.device)
-        content_motion[...,:3] = 0
-        
-        # Trajectory
-        trans_motion = content_motion.clone() 
-        trans_cond = trans_motion[...,:3] # torch.Size([1, 38, 3])
-        
-        # 统一长度 (用于 VAE 编码)
-        lengths1 = [content_motion.shape[1]] * content_motion.shape[0]
-        
-        if self.cfg.TEST.COUNT_TIME:
-            self.starttime = time.time()
-            
-        if self.stage in ['diffusion', 'vae_diffusion']:
-            
-            # --- A. Content Encoding ---
-            with torch.no_grad():
-                z, dist_m = self.vae.encode(content_motion.float(), lengths1)
-            cond_emb = z # torch.Size([7, 1, 256])
+    def _prepare_trajectory_input(self, batch, scene_data):
+        """
+        处理轨迹输入：从 SceneData 生成稠密轨迹，或从 Batch 获取，并进行物理特征提取。
+        返回: 
+            trans_cond_input: [B, T, 4] (归一化后的物理特征，用于 Condition)
+            target_global_pos: [B, T, 3] (世界坐标 XYZ，用于 Guidance Loss)
+        """
+        device = batch['content_motion'].device
+        bs = batch['content_motion'].shape[0]
+        lengths = batch['length']
+        dims_to_mask = 4 if self.cfg.SCENEMODIFF_GLOBAL_CONFIG.ROOT_MASKING_DIM4 else 3
 
-            # --- B. Style Encoding (MotionCLIP) ---
-            lengths11 = [motion.shape[1]] * motion.shape[0]
-            motion_seq = motion.unsqueeze(-1).permute(0, 2, 3, 1)  # torch.Size([1, 263, 1, 199])
-            
-            motion_emb = self.motionclip.encoder({
-                'x': motion_seq.float(),
-                'y': torch.zeros(motion_seq.shape[0], dtype=int, device=motion_seq.device),
-                'mask': lengths_to_mask(lengths11, device=motion_seq.device)
-            })["mu"]  # torch.Size([1, 512])
-            motion_emb = motion_emb.unsqueeze(1) # [B, 1, 512]
-
-            # --- C. Scene Encoding (CLIP) ---
-            has_image = batch["has_image"]
-            use_image_for_inference = has_image.item()
-            
-            if not use_image_for_inference:
-                # Text Branch
-                print("Using text for CLIP Multi Modal...")
-                scene_texts = batch.get("scene_text", [""] * len(lengths))
-                with torch.no_grad():
-                    text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
-                    clip_feat = self.scene_text_encoder(**text_inputs).pooler_output 
-                scene_feat = self.scene_projector(clip_feat) 
-            else:
-                # Image Branch
-                print("Using image for CLIP Multi Modal...")
-                scene_images = batch.get("scene_image").to(motion_seq.device)
-                with torch.no_grad():
-                    vision_out = self.scene_vision_encoder(pixel_values=scene_images)
-                    image_feat_raw = vision_out.pooler_output 
-                scene_feat = self.scene_image_projector(image_feat_raw)
-            
-            # --- D. FiLM Modulation ---
-            scene_feat_norm = self.scene_norm(scene_feat) # 记得 Norm, scene_feat的维度是torch.Size([1, 512])
-            if self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "film":
-                film_params = self.film_mlp(scene_feat_norm)
-                gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
-                
-                gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1)
-                beta = beta_raw.unsqueeze(1)
-                
-                # 这里的 motion_emb 是原始的 Style
-                filmed_emb = gamma * motion_emb + beta
-            elif self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "mlp":
-                # MLP 融合
-                # 拼接 Style 和 Scene 特征
-                combined_feat = torch.cat([motion_emb.squeeze(1), scene_feat_norm], dim=-1)
-                filmed_emb = self.fusion_mlp(combined_feat)
-                filmed_emb = filmed_emb.unsqueeze(1) # 恢复维度 [B, 1, 512]
-
-            else:
-                raise NotImplementedError(
-                    f"Unknown fusion mode: {self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE}"
-                )
-            # 归一化 (给 Denoiser 用的)
-            style_raw_normed = self.style_norm(motion_emb) # 纯 Style
-            style_mix_normed = self.style_norm(filmed_emb) # Style + Scene
-
-            # ========================================================
-            # 【ICME 核心】 构造 3-Branch Batch for Dual Guidance
-            # ========================================================
-            # 顺序: [Uncond, Style_Only, Mix]
-            
-            # 1. Style Condition
-            uncond_style = torch.zeros_like(style_raw_normed)
-            # 拼接: [0, Style, Mix]
-            motion_emb_cfg = torch.cat([uncond_style, style_raw_normed, style_mix_normed], dim=0) # torch.Size([3, 1, 512])
-
-            # 2. Scene Condition (作为第4个输入 f_scene_indep)
-            # Branch 1 (Style Only) 不需要 Scene 显式输入，所以给 0 或者给 scene_feat 都可以
-            # 为了严谨: [0, 0, Scene]
-            scene_feat_expanded = scene_feat_norm.unsqueeze(1)
-            scene_zero = torch.zeros_like(scene_feat_expanded)
-            scene_emb_cfg = torch.cat([scene_zero, scene_zero, scene_feat_expanded], dim=0)  # torch.Size([3, 1, 512])
-
-            # 3. Content Condition
-            # 复制 3 份，因为 Content 始终保持不变
-            motion_emb_content = torch.cat([cond_emb, cond_emb, cond_emb], dim=1) # 注意 dim=1 因为 cond_emb 是 [Seq, Batch, Dim] torch.Size([7, 3, 256])
-
-            # 4. Trajectory Condition (策略选择)
-            trans_zero = torch.zeros_like(trans_cond)
-            
-            # 【策略 A】全部置零 (激进，完全由 Style/Scene 决定轨迹) -> 你现在的做法
-            # uncond_trans = torch.cat([trans_zero, trans_zero, trans_zero], dim=0) # torch.Size([3, 38, 3])
-            
-            # 【策略 B】Uncond=0, Style=Real, Mix=Real (推荐，如果动作不动的话用这个)
-            # 这样 Style 分支能保住走路的趋势
-            # uncond_trans = torch.cat([trans_zero, trans_cond, trans_cond], dim=0)
-
-            # 【策略C】 参考MCM-LDM的原来做法，直接强制有轨迹
-            uncond_trans = torch.cat([trans_cond, trans_cond, trans_cond], dim=0)
-
-            # 组装
-            motion_emb_content = motion_emb_content.permute(1, 0, 2) # torch.Size([3, 7, 256])
-            multi_cond_emb = [motion_emb_content, motion_emb_cfg, uncond_trans, scene_emb_cfg]
-
-            # ========================================================
-            # 设置 Scale
-            # ========================================================
-            # tag_scale 是外部传入的，通常是 float
-            
-            # 【调试建议】手动指定，方便观察
-            # 含义: (保留原始风格的力度, 注入场景变化的力度)
-            final_scale = (self.cfg.TEST.CFG_STYLE, self.cfg.TEST.CFG_SCENE) 
-
-            # 调用修改后的 _diffusion_reverse
-            z = self._diffusion_reverse(multi_cond_emb, lengths, final_scale) 
-
-        elif self.stage in ['vae']:
-            # VAE 测试逻辑不变
-            motions = batch['motion']
-            z, dist_m = self.vae.encode(motions, lengths)
-
-        with torch.no_grad():
-            feats_rst = self.vae.decode(z, lengths) 
-            
-        joints = self.feats2joints(feats_rst.detach().cpu())
-        return remove_padding(joints, lengths)
-    
-
-    def forward_wo_sceneLoss(self, batch, scene_data):
-        # print("Forward w/o scene classification loss...")
-        lengths = batch["length"]
-        # style
-        motion = batch["style_motion"].clone()
-        motion[...,:3] = 0
-
-
-        # content
-        content_motion = batch['content_motion']
-        content_motion = (content_motion - self.mean.to(content_motion.device))/self.std.to(content_motion.device)
-
-        if self.cfg.TRAJECTORY.ROOT_MASKING_DIM4:
-            content_motion[...,:4] = 0
-        else:
-            trans_motion = content_motion.clone()
-            content_motion[...,:3] = 0
-
-        target_global_pos = None # 用于 Guidance
-        trans_cond_norm = None   # 用于 Denoiser Input
-        
-        # if scene_data is not None and self.cfg.TRAJECTORY.ENABLED:
-        #     raw_content = batch['content_motion'].clone()  # 使用未归一化的数据
-        #     bs = raw_content.shape[0]
-        #     # A. 计算 Content 距离 Profile
-        #     # raw_content[0] 取 Batch 中第一个样本作为参考
-        #     content_npy = raw_content[0].detach().cpu().numpy()
-        #     dist_profile = self.traj_processor.calculate_cumulative_distance(content_npy) # (39,)
-            
-        #     # B. 生成避障路径 (A*)
-        #     import copy
-        #     from torch.nn.utils.rnn import pad_sequence
-        #     waypoints = copy.deepcopy(scene_data['trajectory']['points'])
-        #     obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
-            
-        #     startPosX, startPosY = waypoints[0][0], waypoints[0][1]
-        #     for p in waypoints:
-        #         p[0] -= startPosX
-        #         p[1] -= startPosY
-        #     for obs in obstacles:
-        #         if 'center' in obs:
-        #             obs['center'][0] -= startPosX
-        #             obs['center'][1] -= startPosY
-        #         elif 'pos' in obs: # 防御性编程，有的格式可能是 pos
-        #             obs['pos'][0] -= startPosX
-        #             obs['pos'][1] -= startPosY
-        #     dense_curve = self.traj_processor.generate_collision_free_path(waypoints, obstacles) #shape:(200, 2)
-        
-        if scene_data is not None and self.cfg.TRAJECTORY.ENABLED:
-            raw_content = batch['content_motion'].clone() 
-            bs = raw_content.shape[0]
-            content_npy = raw_content[0].detach().cpu().numpy()
-            dist_profile = self.traj_processor.calculate_cumulative_distance(content_npy)
-
-            # === 🔥 修改开始 🔥 ===
-            import copy
-            from torch.nn.utils.rnn import pad_sequence
-            
-            # 1. 获取轨迹配置和障碍物
-            traj_config = copy.deepcopy(scene_data['trajectory'])
-            obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
-            # 2. 坐标归一化 (将起点的 (x,z) 归零)
-            # 无论 A* 还是手绘，都把第一个点作为 (0,0) 参考系
-            waypoints = traj_config['points'] # 这里不管是 A*的点 还是 手绘的点，都是 list
-            startPosX, startPosY = waypoints[0][0], waypoints[0][1]
-            for p in waypoints:
-                p[0] -= startPosX
-                p[1] -= startPosY
-            for obs in obstacles:
-                if 'center' in obs:
-                    obs['center'][0] -= startPosX
-                    obs['center'][1] -= startPosY
-                elif 'pos' in obs: # 防御性编程，有的格式可能是 pos
-                    obs['pos'][0] -= startPosX
-                    obs['pos'][1] -= startPosY
-            # 3. 生成稠密曲线 (Dense Curve)
-            # 原来的代码是: dense_curve = self.traj_processor.generate_collision_free_path(...)
-            # 现在改为:
-            dense_curve = self.traj_processor.get_path_from_config(traj_config, obstacles)
-            
-            # === 🔥 修改结束 (后续逻辑保持不变) 🔥 ===
-            
-            
-            # 2. 【核心修改】逐样本计算轨迹 (Loop over Batch)
-            list_target_pos = []
-            list_trans_cond = []
-            
-            for i in range(bs): # 以2个content 4个style为例
-                # 获取当前样本的真实长度
-                curr_len = lengths[i]  # 是第i个任务的content的动作长度：199
-                # 取出有效数据
-                curr_content = raw_content[i, :curr_len].detach().cpu().numpy() # shape:(199, 263)
-                
-                # 计算该样本的距离分布
-                dist_profile = self.traj_processor.calculate_cumulative_distance(curr_content)  #shape:(200,)
-                target_dists = dist_profile[1:][:curr_len] # 对齐长度 shape:(199,) target_dists = dist_profile[1 : 1 + curr_len]这么写可能更好，每一帧应该累加走的距离，第一帧就有值
-                
-                # 重采样
-                resampled_pts, _ = self.traj_processor.resample_by_arc_length(dense_curve, target_dists) # shape:(199, 2)
-                
-                # 计算物理特征
-                trans_cond_phys, _ = self.traj_processor.compute_trajectory_features(resampled_pts)
-                
-                # 构造 Target Pos
-                safe_len = min(len(resampled_pts), curr_len)
-                traj_3d = np.zeros((curr_len, 3))
-                traj_3d[:safe_len, 0] = resampled_pts[:safe_len, 0]
-                traj_3d[:safe_len, 2] = resampled_pts[:safe_len, 1]
-                
-                list_target_pos.append(torch.from_numpy(traj_3d).float().to(self.device))
-                list_trans_cond.append(torch.from_numpy(trans_cond_phys[:safe_len]).float().to(self.device))
-            
-            # ================= [修复 Padding 逻辑] =================
-            # 1. 获取当前 Batch 的最大长度
-            # 注意：raw_content 可能是 batch 里最长的，也可能因为切片变短了，以 list 里最长的为准
-            max_len = max([t.shape[0] for t in list_target_pos]) # 199
-            
-            # 2. 对 Target Global Pos 做 "Edge Padding" (补最后一帧)
-            padded_target_pos_list = []
-            for t in list_target_pos:
-                curr_len = t.shape[0]
-                diff = max_len - curr_len
-                if diff > 0:
-                    # 取最后一帧 [1, 3]
-                    last_frame = t[-1:] 
-                    # 复制 diff 次
-                    padding = last_frame.repeat(diff, 1)
-                    # 拼接到后面 -> 效果：走完了就停在原地
-                    t_padded = torch.cat([t, padding], dim=0)
-                else:
-                    t_padded = t
-                padded_target_pos_list.append(t_padded)
-            
-            target_global_pos = torch.stack(padded_target_pos_list) # torch.Size([8, 199, 3])
-            
-            # 3. 对 Trans Cond 做 "Zero Padding" (补 0)
-            # 物理特征(速度、旋转角速度)补 0 是对的，代表"停止运动"
-            trans_tensor = pad_sequence(list_trans_cond, batch_first=True, padding_value=0.0) # torch.Size([8, 199, 4])
-            
-            # 归一化 (使用 Dataset 的 mean/std)
-            # mean/std 是 [1, 263] -> 取前4维
-            mean_cond = self.mean.to(self.device)[..., :4]
-            std_cond = self.std.to(self.device)[..., :4]
-            trans_cond_input = (trans_tensor - mean_cond) / std_cond # torch.Size([1, 38, 4])
-        else:
-            # 原有逻辑: 从 content clone 也就是所谓的 "trans_motion"
-            trans_motion = batch['content_motion'].clone()  # torch.Size([1, 38, 263])
+        # 1. 如果没有 Scene Data 或不启用轨迹，直接回退到 Content 自身的轨迹
+        if scene_data is None or not self.cfg.TRAJECTORY.ENABLED:
+            trans_motion = batch['content_motion'].clone() # torch.Size([6, 179, 263])
             if self.cfg.TRAJECTORY.ROOT_MASKING_DIM4:
                 trans_cond_input = trans_motion[..., :4]
             else:
-                trans_cond_input = trans_motion[..., :3]  # torch.Size([1, 38, 3])
-            target_global_pos = None # 没有目标，不做 Guidance
+                trans_cond_input = trans_motion[..., :3]
+            # 这种情况下没有 Target Guidance
+            return trans_cond_input, None
 
-        scale = batch["tag_scale"]
-        lengths1 = [content_motion.shape[1]]* content_motion.shape[0]
+        raw_content = batch['content_motion'].clone() 
+        bs = raw_content.shape[0]
+        content_npy = raw_content[0].detach().cpu().numpy()
+        dist_profile = self.traj_processor.calculate_cumulative_distance(content_npy)
+
+        import copy
+        from torch.nn.utils.rnn import pad_sequence
         
-        if self.cfg.TEST.COUNT_TIME:
-            self.starttime = time.time()
+        # 1. 获取轨迹配置和障碍物
+        traj_config = copy.deepcopy(scene_data['trajectory'])
+        obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
+        # 2. 坐标归一化 (将起点的 (x,z) 归零)
+        # 无论 A* 还是手绘，都把第一个点作为 (0,0) 参考系
+        waypoints = traj_config['points'] # 这里不管是 A*的点 还是 手绘的点，都是 list
+        startPosX, startPosY = waypoints[0][0], waypoints[0][1]
+        for p in waypoints:
+            p[0] -= startPosX
+            p[1] -= startPosY
+        for obs in obstacles:
+            if 'center' in obs:
+                obs['center'][0] -= startPosX
+                obs['center'][1] -= startPosY
+            elif 'pos' in obs: # 防御性编程，有的格式可能是 pos
+                obs['pos'][0] -= startPosX
+                obs['pos'][1] -= startPosY
+        # 3. 生成稠密曲线 (Dense Curve)
+        dense_curve = self.traj_processor.get_path_from_config(traj_config, obstacles)
+        
+        # 2. 逐样本计算轨迹 (Loop over Batch)
+        list_target_pos = []
+        list_trans_cond = []
+        
+        for i in range(bs): # 以2个content 4个style为例
+            # 获取当前样本的真实长度
+            curr_len = lengths[i]  # 是第i个任务的content的动作长度：199
+            # 取出有效数据
+            curr_content = raw_content[i, :curr_len].detach().cpu().numpy() # shape:(199, 263)
             
-        if self.stage in ['diffusion', 'vae_diffusion']:\
-            #add style text in test
+            # 计算该样本的距离分布
+            dist_profile = self.traj_processor.calculate_cumulative_distance(curr_content)  #shape:(200,)
+            target_dists = dist_profile[1:][:curr_len] # 对齐长度 shape:(199,) target_dists = dist_profile[1 : 1 + curr_len]这么写可能更好，每一帧应该累加走的距离，第一帧就有值
             
+            # 重采样
+            resampled_pts, _ = self.traj_processor.resample_by_arc_length(dense_curve, target_dists) # shape:(199, 2)
             
-            # content motion
-            with torch.no_grad():
-                z, dist_m = self.vae.encode(content_motion.float(), lengths1)
-            uncond_tokens = torch.cat([z, z], dim = 1).permute(1,0,2)
-            motion_emb_content = uncond_tokens
+            # 计算物理特征
+            trans_cond_phys, _ = self.traj_processor.compute_trajectory_features(resampled_pts)
+            trans_cond_phys = trans_cond_phys[..., :dims_to_mask]
 
-            # style motion
-            # lengths11 = [motion.shape[1]]* motion.shape[0]
-            if "style_length" in batch:
-                lengths11 = batch["style_length"]
+            # 构造 Target Pos
+            safe_len = min(len(resampled_pts), curr_len)
+            traj_3d = np.zeros((curr_len, 3))
+            traj_3d[:safe_len, 0] = resampled_pts[:safe_len, 0]
+            traj_3d[:safe_len, 2] = resampled_pts[:safe_len, 1]
+            
+            list_target_pos.append(torch.from_numpy(traj_3d).float().to(self.device))
+            list_trans_cond.append(torch.from_numpy(trans_cond_phys[:safe_len]).float().to(self.device))
+            
+        # ================= [修复 Padding 逻辑] =================
+        # 1. 获取当前 Batch 的最大长度
+        # 注意：raw_content 可能是 batch 里最长的，也可能因为切片变短了，以 list 里最长的为准
+        max_len = max([t.shape[0] for t in list_target_pos]) # 199
+        
+        # 2. 对 Target Global Pos 做 "Edge Padding" (补最后一帧)
+        padded_target_pos_list = []
+        for t in list_target_pos:
+            curr_len = t.shape[0]
+            diff = max_len - curr_len
+            if diff > 0:
+                # 取最后一帧 [1, 3]
+                last_frame = t[-1:] 
+                # 复制 diff 次
+                padding = last_frame.repeat(diff, 1)
+                # 拼接到后面 -> 效果：走完了就停在原地
+                t_padded = torch.cat([t, padding], dim=0)
             else:
-                lengths11 = [motion.shape[1]] * motion.shape[0]
+                t_padded = t
+            padded_target_pos_list.append(t_padded)
+        
+        target_global_pos = torch.stack(padded_target_pos_list) # torch.Size([8, 199, 3])
+        
+        # 3. 对 Trans Cond 做 "Zero Padding" (补 0)
+        # 物理特征(速度、旋转角速度)补 0 是对的，代表"停止运动"
+        trans_tensor = pad_sequence(list_trans_cond, batch_first=True, padding_value=0.0) # torch.Size([8, 199, 4])
+        mean_cond = self.mean.to(device)[..., :dims_to_mask]
+        std_cond = self.std.to(device)[..., :dims_to_mask]
+        trans_cond_input = (trans_tensor - mean_cond) / std_cond 
+        return trans_cond_input, target_global_pos  # trans_cond_input: torch.Size([6, 179, 4]), target_global_pos:torch.Size([6, 179, 3])
 
-# for motion input (bs,60,22,3)->(bs,22,3,60)
-            # motion_seq = feats_ref*std + mean
-            motion_seq = motion.unsqueeze(-1).permute(0,2,3,1)
-
-
-            motion_emb = self.motionclip.encoder({'x': motion_seq.float(),
-                            'y': torch.zeros(motion_seq.shape[0], dtype=int, device=motion_seq.device),
-                            'mask': lengths_to_mask(lengths11, device=motion_seq.device)})["mu"]
-            motion_emb = motion_emb.unsqueeze(1)
-
-            # # trajectory
-            # trans_cond = trans_motion[...,:3]
-            # trans_uncond = torch.zeros(trans_cond.shape).to(motion_seq.device)
-            # uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
-            # uncond_trans = torch.cat([trans_uncond, trans_uncond], dim=0)
-            # uncond_trans = torch.cat([trans_uncond, trans_cond], dim=0)
-            uncond_trans = torch.cat([trans_cond_input, trans_cond_input], dim=0) # [2*B, L, 4]
-
-            has_image = batch["has_image"] # tensor([True], device='cuda:0')
-            use_image_for_inference = has_image.item()
-            print("use_image_for_inference :", use_image_for_inference)
-            scene_feat = None
-            if not use_image_for_inference:
-                scene_texts = batch.get("scene_text", ["A person moving in a normal environment"] * len(lengths))
-                with torch.no_grad():
-                    text_inputs = self.scene_tokenizer(scene_texts, padding=True, truncation=True, return_tensors="pt").to(self.device)
-                    clip_feat = self.scene_text_encoder(**text_inputs).pooler_output # [B, 512]
-                scene_feat = self.scene_projector(clip_feat) # [Batch, 512]
-                # scene_feat_norm = self.scene_norm(scene_feat)
-            else:
-                scene_images = batch.get("scene_image").to(motion_seq.device) # torch.Size([1, 3, 224, 224])
-                with torch.no_grad():
-                    vision_out = self.scene_vision_encoder(pixel_values=scene_images)
-                    image_feat_raw = vision_out.pooler_output # [B, 768]
-                image_feat = self.scene_image_projector(image_feat_raw) # [B, 512]
-                scene_feat = image_feat
-                
-
-            # scene_feat_norm = self.scene_norm(scene_feat)
-            scene_scalar = batch.get("scene_scalar", DEFAULT_SCALAR_VAL) 
-            
-            # 如果传入的是 Tensor (单个数)，转为 float，防止乘法广播出问题
-            if isinstance(scene_scalar, torch.Tensor):
-                scene_scalar = scene_scalar.item()
-                
-            print(f"DEBUG: Using scene_scalar = {scene_scalar}") # 调试用，跑通后可注释
-            
-            film_params = self.film_mlp(scene_feat * scene_scalar)
-            gamma_raw, beta_raw = film_params.chunk(2, dim=-1)
-            gamma = (1.0 + torch.tanh(gamma_raw)).unsqueeze(1) # [B, 1, 512]
-            beta = beta_raw.unsqueeze(1)                       # [B, 1, 512]
-            # motion_emb = torch.zeros_like(motion_emb) # 先试试不要style
-            
-            filmed_emb = gamma * motion_emb + beta
-            adapted_style_normed = self.style_norm(filmed_emb)
-
-            # D. 构造 CFG 输入
-            # Uncond 分支：给全 0 (代表"无风格")
-            # Cond 分支：给 Adapted Style
-            uncond_style = torch.zeros_like(adapted_style_normed)
-            
-            # 拼接顺序：[Uncond, Cond], 这个是场景指导后的style
-            motion_emb_cfg = torch.cat([uncond_style, adapted_style_normed], dim=0)
- 
-
-            scene_feat_reshaped = scene_feat.unsqueeze(1)
-            uncond_scene = torch.zeros_like(scene_feat_reshaped)
-            scene_emb_cfg = torch.cat([uncond_scene, scene_feat_reshaped], dim=0)  # 其实目前的去噪网络用不到这一项，以防后面可能需要就放进来了
-
-            # three conditions
-            multi_cond_emb = [motion_emb_content, motion_emb_cfg, uncond_trans]
-
-
-            z = self._diffusion_reverse(multi_cond_emb, lengths, scale, target_global_pos, scene_data)
-
-        elif self.stage in ['vae']:
-            motions = batch['motion']
-            z, dist_m = self.vae.encode(motions, lengths)
-
+    def _encode_conditions(self, batch, trans_cond_input, lengths):
+        """
+        编码所有条件：Content(VAE), Style(MotionCLIP+Scene), Trajectory
+        返回: multi_cond_emb (列表)
+        """
+        bsz = batch['content_motion'].shape[0]
+        device = batch['content_motion'].device
+        content_motion = batch['content_motion'].clone()
+        content_motion = (content_motion - self.mean.to(device)) / self.std.to(device)
+        dims_to_mask = 4 if self.cfg.SCENEMODIFF_GLOBAL_CONFIG.ROOT_MASKING_DIM4 else 3
+        content_motion[..., :dims_to_mask] = 0.0
         with torch.no_grad():
-            feats_rst = self.vae.decode(z, lengths)
-            # feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
+            z, _ = self.vae.encode(content_motion.float(), lengths)
+            motion_emb_content = torch.cat([z, z], dim=1).permute(1, 0, 2) # torch.Size([12, 7, 256])
+        
+        style_motion = batch["style_motion"].clone()
+        # style_motion[..., :dims_to_mask] = 0.0 
+        # 本来的训练和推理都是只mask了前三维，这里也先这样吧：
+        style_motion[..., :3] = 0.0
+        if "style_length" in batch:
+            lengths11 = batch["style_length"] # [199, 199, 199, 199, 199, 199]
+        else:
+            lengths11 = [style_motion.shape[1]] * style_motion.shape[0]
+        motion_seq = style_motion.unsqueeze(-1).permute(0,2,3,1) # torch.Size([6, 263, 1, 199]),训练的代码debug之后的结果是# torch.Size([32, 263, 1, 40])，所以是能对上的
 
-        joints = self.feats2joints(feats_rst.detach().cpu())
+
+        motion_emb = self.motionclip.encoder({'x': motion_seq.float(),
+                        'y': torch.zeros(motion_seq.shape[0], dtype=int, device=motion_seq.device),
+                        'mask': lengths_to_mask(lengths11, device=motion_seq.device)})["mu"]  # torch.Size([6, 512])
+        motion_emb = motion_emb.unsqueeze(1) # torch.Size([6, 1, 512])
+
+        use_scene = self.cfg.SCENEMODIFF_GLOBAL_CONFIG_TRAIN.get('USE_SCENE_CLS', False)
+        # 这里加一个消融开关：如果在做消融实验，强制把 use_scene 置 False
+        if batch.get('ablation_no_scene', False):
+            use_scene = False
+            
+        if use_scene:
+            scene_feat = self._encode_scene_condition(batch) # 复用训练代码
+        else:
+            scene_feat = torch.zeros(bsz, 1, 512, device=device) # 必须给个 0 占位
+
+        # Fusion (FiLM / MLP)
+        motion_emb_cond = motion_emb # torch.Size([6, 1, 512])
+        # 伪造 mask (推理时全 False)
+        dummy_mask = torch.zeros(bsz, dtype=torch.bool, device=device)
+        
+        if self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "film":
+            adapted_style = self._apply_film_fusion(motion_emb_cond, scene_feat, dummy_mask)
+        else:
+            adapted_style = self._apply_mlp_fusion(motion_emb_cond, scene_feat)
+            
+        adapted_style = self.style_norm(adapted_style)
+
+        uncond_style = torch.zeros_like(adapted_style)
+        motion_emb_cfg = torch.cat([uncond_style, adapted_style], dim=0)
+        uncond_trans = torch.cat([trans_cond_input, trans_cond_input], dim=0)
+
+        return [motion_emb_content, motion_emb_cfg, uncond_trans]
+
+
+    def forward(self, batch, scene_data=None):
+        ''' 推理重构之后的新入口 '''
+        # 1.基础信息
+        lengths = batch["length"] # [161, 161, 179, 179, 38, 38]
+        scale = batch["tag_scale"] # 2.5
+        trans_cond_input, target_global_pos = self._prepare_trajectory_input(batch, scene_data)
+        multi_cond_emb = self._encode_conditions(batch, trans_cond_input, lengths)
+        
+        z = self._diffusion_reverse(
+            multi_cond_emb, 
+            lengths, 
+            scale, 
+            target_global_pos=target_global_pos, 
+            scene_data=scene_data
+        )
+
+        # 5. 解码
+        with torch.no_grad():
+            feats_rst = self.vae.decode(z, lengths) # torch.Size([6, 179, 263])
+        
+        joints = self.feats2joints(feats_rst.detach().cpu())  # torch.Size([6, 179, 22, 3])
+        import copy
+        from torch.nn.utils.rnn import pad_sequence
+        
+        # 1. 获取轨迹配置和障碍物
+        traj_config = copy.deepcopy(scene_data['trajectory'])
+        obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
+        # 2. 坐标归一化 (将起点的 (x,z) 归零)
+        # 无论 A* 还是手绘，都把第一个点作为 (0,0) 参考系
+        waypoints = traj_config['points'] # 这里不管是 A*的点 还是 手绘的点，都是 list
+        startPosX, startPosY = waypoints[0][0], waypoints[0][1]
 
         if startPosX != 0 or startPosY != 0:
             # 只平移根节点和所有子节点的位置
@@ -1540,53 +1274,8 @@ class MLD(BaseModel):
         if target_global_pos is not None:
              target_global_pos[..., 0] += startPosX
              target_global_pos[..., 2] += startPosY
-        # =======================================================
-
-        # ================= [新增] 埋点可视化逻辑 =================
-        # 只画 Batch 中的第 0 个样本
-        # if True: # 可以改成 if self.cfg.TEST.DEBUG_PLOT:
-        #     try:
-        #         # 1. 提取生成的根节点轨迹
-        #         # 假设 joints 维度是 [Batch, 22, 3, Length] torch.Size([1, 38, 22, 3])
-        #         # Root joint 通常是 index 0
-        #         if joints.shape[1] == 22 or joints.shape[1] == 21: # [B, J, 3, L]
-        #             pred_root_traj = joints[0, 0, :, :].permute(1, 0) # [3, L] -> [L, 3]
-        #         else:
-        #             # 如果维度不一样，打印出来看看
-        #             print(f"Joints shape check: {joints.shape}")
-        #             # 尝试自适应: 假设第0维是Batch，包含3的那一维是坐标
-        #             pred_root_traj = joints[0, ..., 0, :].squeeze() # [38, 3] 世界空间的
-
-        #         pred_root_traj_np = pred_root_traj.detach().cpu().numpy()
-                
-        #         # 2. 提取目标轨迹
-        #         # 之前生成的 target_global_pos 是 [Batch, Length, 3]
-        #         target_traj_np = None
-        #         if 'target_global_pos' in locals() and target_global_pos is not None:
-        #             target_traj_np = target_global_pos[0].detach().cpu().numpy()
-                
-        #         # 3. 这里的长度可能不一致 (VAE 下采样 vs 原始长度)
-        #         # 简单的截断或补齐，为了画图对齐
-        #         min_len = min(len(pred_root_traj_np), len(target_traj_np)) if target_traj_np is not None else len(pred_root_traj_np)
-                
-        #         # 4. 调用画图
-        #         # name 是当前时间戳
-        #         name = int(time.time())
-        #         debug_plot_trajectory(
-        #             target_traj_np[:min_len] if target_traj_np is not None else None, 
-        #             pred_root_traj_np[:min_len],
-        #             # self.target_pos,
-        #             scene_data = scene_data,
-        #             # save_path=f"vis_debug/traj_step_n.png"
-        #             # 每个样本给个不同的文件名
-        #             save_path=f"vis_debug/traj_debug_{name}.png",
-        #             interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
-        #         )
-        #     except Exception as e:
-        #         print(f"[Warning] Failed to plot trajectory: {e}")
-        # ================= [修改] 埋点可视化逻辑 (支持 Batch 渲染) =================
-        # 建议开启开关: if self.cfg.TEST.DEBUG_PLOT:
-        if True: 
+        
+        if True and False: 
             try:
                 # 0. 准备工作
                 batch_size = joints.shape[0]
@@ -1649,278 +1338,184 @@ class MLD(BaseModel):
 
         return remove_padding(joints, lengths), target_global_pos
     
-    def forward_step1_warmup_withOurSceneDataset(self, batch):
-        print("forward_step1_warmup_withOurSceneDataset")
-        lengths = batch["length"]
-        # style
-        motion = batch["style_motion"].clone()
-        motion[...,:4] = 0
-
-
-        # content
-        content_motion = batch['content_motion']
-        content_motion = (content_motion - self.mean.to(content_motion.device))/self.std.to(content_motion.device)
-
-        # trajectory
-        trans_motion = content_motion.clone()
-        # 
-        content_motion[...,:4] = 0
-
-
-        scale = batch["tag_scale"]
-        lengths1 = [content_motion.shape[1]]* content_motion.shape[0]
-        
-        if self.cfg.TEST.COUNT_TIME:
-            self.starttime = time.time()
-            
-        if self.stage in ['diffusion', 'vae_diffusion']:\
-            #add style text in test
-            
-            
-            # content motion
-            with torch.no_grad():
-                z, dist_m = self.vae.encode(content_motion.float(), lengths1)
-            uncond_tokens = torch.cat([z, z], dim = 1).permute(1,0,2)
-            motion_emb_content = uncond_tokens
-
-            # style motion
-            lengths11 = [motion.shape[1]]* motion.shape[0]
-
-# for motion input (bs,60,22,3)->(bs,22,3,60)
-            # motion_seq = feats_ref*std + mean
-            motion_seq = motion.unsqueeze(-1).permute(0,2,3,1)
-
-
-            motion_emb = self.motionclip.encoder({'x': motion_seq.float(),
-                            'y': torch.zeros(motion_seq.shape[0], dtype=int, device=motion_seq.device),
-                            'mask': lengths_to_mask(lengths11, device=motion_seq.device)})["mu"]
-            motion_emb = motion_emb.unsqueeze(1)
-
-            # cfree
-            uncond_motion_emb = torch.zeros(motion_emb.shape).to(motion_seq.device)
-            motion_emb = torch.cat([uncond_motion_emb, motion_emb], dim=0)
-
-            # gendurations = torch.ones((12, 1), dtype=int) * 100
-            # generation = self.motionclip.generate(motion_emb.permute(1,0,2), gendurations,
-            #                     is_amass=True,
-            #                     is_clip_features=True)
-            # fff = generation['output_xyz']
-            # fff = fff.permute(0,3,1,2)
-            # fff = fff.cpu().numpy()
-            # np.save("eee.npy",fff)
-
-            # trajectory
-            trans_cond = trans_motion[...,:4]
-            uncond_trans = torch.cat([trans_cond, trans_cond], dim = 0)
-
-            # three conditions
-            multi_cond_emb = [motion_emb_content, motion_emb, uncond_trans]
-
-
-            z = self._diffusion_reverse(multi_cond_emb, lengths, scale)
-
-        elif self.stage in ['vae']:
-            motions = batch['motion']
-            z, dist_m = self.vae.encode(motions, lengths)
-
-        with torch.no_grad():
-            feats_rst = self.vae.decode(z, lengths)
-            # feats_rst[...,:3] = trans_motion[...,:3] # if copy trajectory
-
-        joints = self.feats2joints(feats_rst.detach().cpu())
-
-        return remove_padding(joints, lengths)
-
-    # 学习CLIP和FiLM调控的forward函数
-    def forward(self, batch, scene_data=None):
-        if self.cfg.SCENE_MODIFF_ABLATION.JUST_FINETUNE_BASELINE == True:
-            return self.forward_step1_warmup_withOurSceneDataset(batch)
-        if self.cfg.SCENE_MODIFF_ABLATION.USE_SCENE_CLS == False and self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "film":
-            return self.forward_wo_sceneLoss(batch, scene_data)
-        elif self.cfg.SCENE_MODIFF_ABLATION.USE_SCENE_CLS == True and self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "film":
-            # return self.forward_allModel3Branch(batch)
-            return self.forward_wo_sceneLoss(batch, scene_data)
-        else:
-            return self.forward_wo_sceneLoss(batch, scene_data)
-        
-
-    def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None, target_global_pos=None, scene_data=None):
-        # 1. 自动判断 CFG 模式
-        total_bsz = encoder_hidden_states[0].shape[0]  # 3
-        base_bsz = len(lengths)  # 1
-        # 准备障碍物数据
-        obstacles = []
-        if scene_data is not None:
-            obstacles = scene_data['environment']['obstacles']
-        
-        # 【新增】梯度记录器
-        grad_history = {
-            'traj': [],
-            'obs': [],
-            'final': [],
-            'timesteps': []
-        }
-        
-        # 计算倍率: 
-        # 2 -> 标准 CFG [Uncond, Cond]
-        # 3 -> 双重引导 [Uncond, Style, Mix]
-        cfg_factor = total_bsz // base_bsz 
-        
-        # 初始化 Latents (只需要 Base Batch Size)
-        latents = torch.randn(
-            (base_bsz, self.latent_dim[0], self.latent_dim[-1]),
-            device=encoder_hidden_states[0].device,
-            dtype=torch.float,
-        )
-
-        # scale the initial noise
-        latents = latents * self.scheduler.init_noise_sigma
-        
-        # set timesteps
-        self.scheduler.set_timesteps(
-            self.cfg.model.scheduler.num_inference_timesteps)
-        timesteps = self.scheduler.timesteps.to(encoder_hidden_states[0].device)
-        
-        extra_step_kwargs = {}
-        if "eta" in set(inspect.signature(self.scheduler.step).parameters.keys()):
-            extra_step_kwargs["eta"] = self.cfg.model.scheduler.eta
-        
-        # 解析 Scale 参数
-        # 如果是 3 倍模式，且 scale 只是一个浮点数，我们默认两个系数都用这个数
-        # 如果 scale 是列表/元组 (e.g., [7.5, 7.5])，则分别赋值
+    def _parse_cfg_scales(self, scale, cfg_factor):
+        """解析 CFG Scale 参数"""
         scale_style = scale
         scale_scene = scale
-        if cfg_factor == 3 and isinstance(scale, (list, tuple)):
-            scale_style = scale[0]
-            scale_scene = scale[1]
-
-        use_guidance = self.cfg.TRAJECTORY.GUIDANCE.ENABLED
-        # Reverse Loop
-        for i, t in enumerate(timesteps):
-            # ================= [新增: 动态 K 值策略] =================
-            # 早期 (t > 500): 只优 1 次 (避免被噪声带偏)
-            # 晚期 (t <= 500): 优化 5 次 (强力贴合)
-            # 冲刺期 (t <= 100): 优化 10 次 (确保摸到球)
-            if t > 500:
-                num_opt_steps = 1
-            elif t > 100:
-                num_opt_steps = 5
+        
+        if isinstance(scale, (list, tuple)):
+            if len(scale) >= 2:
+                scale_style = scale[0]
+                scale_scene = scale[1]
             else:
-                num_opt_steps = 10
-
-            # -----------------------------------------------------------
-            # 【修改点 3】: Spatial Guidance 梯度回传
-            # -----------------------------------------------------------
-            # 只有当提供了 target 且 在某些步骤（比如前50%）才做，为了省时间
-            # 或者是全程做 (精度最高)
-            # 1. 【时间调度】: 刚开始(t>600)全是噪声，算出来的几何梯度是不可信的，别乱导！
-            # 只有当 t < 600 (动作轮廓大概出来后) 再开始引导
-            start_t = self.cfg.TRAJECTORY.GUIDANCE.GUIDANCE_START # 比如1000
-            end_t = self.cfg.TRAJECTORY.GUIDANCE.GUIDACE_END
-            interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
-            way_guidance_scale = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_GUIDE_STRENGTH
-            obstacle_guidance_scale = self.cfg.TRAJECTORY.GUIDANCE.OBSTACLE_GUIDE_STRENGTH
-            if end_t < t < start_t: 
-                for k in range(num_opt_steps):
-                    grad_traj = torch.zeros_like(latents).to(latents.device)
-                    grad_obs = torch.zeros_like(latents).to(latents.device)
-                    if use_guidance and self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_MODE:
-                        # 计算梯度
-                        grad_traj = self.compute_spatial_guidance(
-                            latents, 
-                            t.unsqueeze(0).repeat(base_bsz), # expand t
-                            target_global_pos, 
-                            [h[base_bsz:] for h in encoder_hidden_states],  # [uncond, cond] -> [cond]
-                            lengths,
-                            interval=interval
-                        )
-                    if use_guidance and self.cfg.TRAJECTORY.GUIDANCE.OBSTACLE_MODE:
-                        grad_obs = self.compute_obstacle_guidance(
-                            latents, 
-                            t.unsqueeze(0).repeat(base_bsz), 
-                            obstacles, 
-                            [h[base_bsz:] for h in encoder_hidden_states],
-                            lengths,
-                        )
-
-                    # 计算加权后的模长 (用于记录)
-                    norm_traj = (grad_traj * way_guidance_scale).norm().item()
-                    norm_obs = (grad_obs * obstacle_guidance_scale).norm().item()
-                    grad = grad_traj * way_guidance_scale + grad_obs * obstacle_guidance_scale
-
-                    # 2. 梯度裁剪 (保持你现在的逻辑，非常稳)
-                    grad_norm = grad.norm()
-                    max_grad_norm = 5.0 # 或者根据 t 动态调整
-                    if grad_norm > max_grad_norm:
-                        scale_factor = max_grad_norm / (grad_norm + 1e-8)
-                        grad = grad * scale_factor
-                    norm_final = grad.norm().item()
-                    
-                    # 3. 更新 Latents
-                    # 这里的 step_size 可以小一点，因为我们跑很多次
-                    step_size = 1.0 
-                    latents = latents - step_size * grad
-                    latents = latents.detach().requires_grad_(True) # 记得 detach 并重新开启梯度追踪
-
-                    # 【新增】只记录 Inner Loop 的最后一次迭代，或者记录每一次？
-                    # 建议：为了曲线清晰，只记录 k == 0 (第一次) 或者 k == num_opt_steps-1 (最后一次)
-                    # 这里我们记录最后一次，代表这一步最终施加的力
-                    if k == num_opt_steps - 1:
-                        grad_history['traj'].append(norm_traj)
-                        grad_history['obs'].append(norm_obs)
-                        grad_history['final'].append(norm_final)
-                        grad_history['timesteps'].append(t.item())
-
-                        # print(f"Step {t.item()} Inner {k}: Loss:", grad.norm())
-            # 2. 扩展 Latents 以匹配 Condition 的倍率 (2倍或3倍), latents是[1,7,256]
-                        
-            latent_model_input = torch.cat([latents] * cfg_factor, dim=0) # torch.Size([3, 7, 256])
-            
-            # 扩展 Lengths
-            lengths_reverse = lengths * cfg_factor  # [38, 38, 38]
-            
-            # 3. 预测噪声
-            noise_pred = self.denoiser(
-                sample=latent_model_input,
-                timestep=t,
-                encoder_hidden_states=encoder_hidden_states,
-                lengths=lengths_reverse,
-            )[0] # torch.Size([3, 7, 256])
-            
-            # 4. 执行 Guidance (核心修改部分)
-            if cfg_factor == 3:
-                # ============================================
-                # 【ICME 核心】双重引导 (Dual-Guidance)
-                # 分割顺序: [Uncond, Style_Only, Mix]
-                # ============================================
-                noise_uncond, noise_style, noise_mix = noise_pred.chunk(3, dim=0)
+                scale_style = scale[0]
+                scale_scene = scale[0]
                 
-                # 公式:
-                # 第一部分: 把动作拉向 Style (老人/举手)
-                # 第二部分: 把动作从 Style 拉向 Scene (弯腰/大风)
-                # 两个 Scale 互不干扰，可以同时很大！
-                noise_pred = noise_uncond + \
-                             scale_style * (noise_style - noise_uncond) + \
-                             scale_scene * (noise_mix - noise_style)
-                             
-            elif cfg_factor == 2:
-                # 标准 CFG
-                noise_uncond, noise_text = noise_pred.chunk(2, dim=0)
-                noise_pred = noise_uncond + scale * (noise_text - noise_uncond)
+        # 如果是 3 倍模式，且只给了一个 float，默认两者相等
+        # 这个逻辑在调用处已经隐含处理了
+        return scale_style, scale_scene
+
+    def _apply_spatial_guidance(self, latents, t, ctx):
+        """
+        计算并应用基于梯度的空间引导 (Waypoints & Obstacles)。
+        """
+        # 1. 全局开关检查
+        conf = self.cfg.TRAJECTORY.GUIDANCE
+        if not conf.ENABLED:
+            return latents
+
+        # 2. 时间窗口检查 (Guard Clause)
+        # 只有在特定的去噪阶段才进行引导
+        if not (conf.GUIDACE_END < t < conf.GUIDANCE_START):
+            return latents
+
+        # 3. 确定优化步数 (Dynamic K Strategy)
+        # 将硬编码的逻辑保留在这里，或者提取到配置中
+        if t > 500: num_opt_steps = 1
+        elif t > 100: num_opt_steps = 5
+        else: num_opt_steps = 10
+
+        # 4. 梯度下降循环
+        # 注意：这里我们是在冻结模型的情况下，通过梯度修改 latents
+        current_latents = latents.detach().requires_grad_(True)
+        
+        with torch.enable_grad():
+            for _ in range(num_opt_steps):
+                total_loss = 0.0
+                
+                # A. 路点引导 (Waypoints)
+                if conf.WAYPOINTS_MODE and ctx['target_pos'] is not None:
+                    # 这里的 compute_spatial_loss 是你原来的 compute_spatial_guidance 里的 loss 计算部分
+                    # 需要你把它拆出来，只返回 loss，不要在里面求导
+                    loss_traj = self._compute_waypoint_loss(
+                        current_latents, t.unsqueeze(0).repeat(ctx['bsz']), ctx['target_pos'], ctx['cond_embeddings'], ctx['lengths'],
+                        interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
+                    )
+                    total_loss += loss_traj * conf.WAYPOINTS_GUIDE_STRENGTH
+
+                # B. 避障引导 (Obstacles)
+                if conf.OBSTACLE_MODE and len(ctx['obstacles']) > 0:
+                    loss_obs = self._compute_obstacle_loss(
+                        current_latents, t, ctx['obstacles'], ctx['cond_embeddings'], ctx['lengths']
+                    )
+                    total_loss += loss_obs * conf.OBSTACLE_GUIDE_STRENGTH
+                
+                # 如果没有 Loss，直接退出
+                if isinstance(total_loss, float) and total_loss == 0.0:
+                    break
+
+                # C. 反向传播
+                grad = torch.autograd.grad(total_loss, current_latents)[0]
+
+                # D. 梯度裁剪 (Gradient Clipping)
+                grad_norm = grad.norm()
+                max_norm = 5.0 # 可以写进配置
+                if grad_norm > max_norm:
+                    grad = grad * (max_norm / (grad_norm + 1e-8))
+
+                # E. 更新 Latents
+                # alpha 缩放: 随着 t 变小(接近真实图像)，梯度的权重应该变小
+                # 或者直接用 step_size = 1.0
+                # scale_factor = (1 - self.scheduler.alphas_cumprod[t]) ** 0.5
+                step_size = 1.0 
+                current_latents = current_latents - step_size * grad
+                current_latents = current_latents.detach().requires_grad_(True)
+                
+        # 5. 返回更新后的 Latents (不再需要梯度)
+        return current_latents.detach()
+    
+    def _compute_cfg_noise(self, latents, t, encoder_hidden_states, lengths, cfg_factor, scale_style, scale_scene):
+        """
+        执行模型前向传播，并根据 cfg_factor (1, 2, 3) 计算最终噪声。
+        """
+        # 1. 扩展输入
+        # 如果 cfg_factor > 1，需要复制 latents
+        if cfg_factor > 1:
+            latent_input = torch.cat([latents] * cfg_factor, dim=0)
+            lengths_input = lengths * cfg_factor
+        else:
+            latent_input = latents
+            lengths_input = lengths
+
+        # 2. 模型前向 (Model Forward)
+        # 注意：Denoiser 不需要知道我们在做 CFG，它只管处理 Batch
+        noise_pred = self.denoiser(
+            sample=latent_input,
+            timestep=t,
+            encoder_hidden_states=encoder_hidden_states,
+            lengths=lengths_input,
+        )[0] # torch.Size([12, 7, 256])
+
+        # 3. 应用 CFG 公式
+        if cfg_factor == 1:
+            return noise_pred
             
-            # (如果是 1 倍则不处理，直接用 noise_pred)
+        elif cfg_factor == 2:
+            # 标准 CFG: [Uncond, Cond]
+            noise_uncond, noise_text = noise_pred.chunk(2, dim=0)
+            return noise_uncond + scale_style * (noise_text - noise_uncond)
+            
+        elif cfg_factor == 3:
+            # 双重引导 (ICME 核心): [Uncond, Style, Mix]
+            noise_uncond, noise_style, noise_mix = noise_pred.chunk(3, dim=0)
+            
+            # 组合逻辑：
+            # Base = Uncond
+            # + Style 方向 (从 Uncond 指向 Style)
+            # + Scene 方向 (从 Style 指向 Mix)
+            return noise_uncond + \
+                   scale_style * (noise_style - noise_uncond) + \
+                   scale_scene * (noise_mix - noise_style)
+        
+        else:
+            raise ValueError(f"Unsupported CFG factor: {cfg_factor}")
 
-            # 5. Step 更新
-            latents = self.scheduler.step(noise_pred, t, latents,
-                                              **extra_step_kwargs).prev_sample
+    def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None, target_global_pos=None, scene_data=None):
+        bsz = len(lengths)
+        device = encoder_hidden_states[0].device
+        # 确定 CFG 模式 (1倍, 2倍, 3倍)
+        total_bsz = encoder_hidden_states[0].shape[0]
+        cfg_factor = total_bsz // bsz
+        # 解析 Scale (如果是双重引导，scale 可能是个 tuple)
+        scale_style, scale_scene = self._parse_cfg_scales(scale, cfg_factor)
+        latents = torch.randn((bsz, self.latent_dim[0], self.latent_dim[-1]), device=device, dtype=torch.float)
+        latents = latents * self.scheduler.init_noise_sigma
 
-        latents = latents.permute(1, 0, 2) # torch.Size([7, 1, 256])
+        self.scheduler.set_timesteps(self.cfg.model.scheduler.num_inference_timesteps)
+        timesteps = self.scheduler.timesteps.to(device)
+        
+        # 准备引导所需的静态数据 (避免在循环里重复提取)
+        guidance_context = {
+            'target_pos': target_global_pos,
+            'obstacles': scene_data['environment']['obstacles'] if scene_data else [],
+            'cond_embeddings': [h[bsz:] for h in encoder_hidden_states], # 剥离出 cond 部分用于引导
+            'lengths': lengths,
+            'bsz': bsz
+        }
+
+        for i, t in enumerate(timesteps):
+            # Step 1: 空间引导 (Spatial Guidance) - 修改 Latent 位置
+            # 这里的 if 逻辑被封装在函数内部，主循环不需要关心
+            latents = self._apply_spatial_guidance(latents, t, guidance_context)
+
+            # Step 2: 噪声预测 (Noise Prediction with CFG) - 预测噪声
+            noise_pred = self._compute_cfg_noise(
+                latents, t, encoder_hidden_states, lengths, 
+                cfg_factor, scale_style, scale_scene
+            )  # torch.Size([6, 7, 256])
+
+            # Step 3: 调度器步进 (Scheduler Step) - 走向下一步
+            # 处理 eta (DDIM)
+            extra_kwargs = {}
+            if "eta" in inspect.signature(self.scheduler.step).parameters:
+                extra_kwargs["eta"] = self.cfg.model.scheduler.eta
+                
+            latents = self.scheduler.step(noise_pred, t, latents, **extra_kwargs).prev_sample
+
+        # 维度调整 [B, C, T] -> [B, T, C]
+        latents = latents.permute(1, 0, 2) # torch.Size([7, 6, 256])
         return latents
-
-
-
-
-
+    
     def _diffusion_process(self, latents, encoder_hidden_states, lengths=None):
         """
         heavily from https://github.com/huggingface/diffusers/blob/main/examples/dreambooth/train_dreambooth.py
@@ -2028,12 +1623,14 @@ class MLD(BaseModel):
         # 关于训练的时候的旋转增强以及随机mask掉的策略
         feats_content = feats_ref.clone()
         traj_cfg = stage_cfg['TRAJECTORY']
+        current_mean = self.mean.to(feats_content.device)
+        current_std = self.std.to(feats_content.device)
         if traj_cfg.get('ROTATION_AUG', False):
             angle = traj_cfg.get('ROTATION_RANGE', 0) # 如果yaml里没写 range，默认0或者去全局cfg取
-            feats_content_phys = feats_content * self.std + self.mean  # 在反归一化的空间做完旋转增强后，再归一化回来，因为x和z方向的mean和std不一样，会让模型生成长短不一的腿
+            feats_content_phys = feats_content * current_std + current_mean  # 在反归一化的空间做完旋转增强后，再归一化回来，因为x和z方向的mean和std不一样，会让模型生成长短不一的腿
             # 这里调用你原来的 augment 函数，假设它叫 augment_content_rotation
             feats_content_rotated_phys = self.augment_content_rotation(feats_content_phys, angle)
-            feats_content = (feats_content_rotated_phys - self.mean) / self.std
+            feats_content = (feats_content_rotated_phys - current_mean) / current_std
         
         dims_to_mask = 4 if self.cfg.SCENEMODIFF_GLOBAL_CONFIG.ROOT_MASKING_DIM4 else 3
         feats_content[..., :dims_to_mask] = 0.0
@@ -2059,20 +1656,20 @@ class MLD(BaseModel):
                 cond_emb[mask_content_drop] = 0.0
 
             # B. Style Encoding (MotionCLIP)
-            motion_seq = feats_ref * self.std + self.mean
+            motion_seq = feats_ref * current_std + current_mean
             motion_seq[..., :3] = 0.0 # 去除根节点位移
             motion_seq = motion_seq.unsqueeze(-1).permute(0, 2, 3, 1)
             
             motion_emb_raw = self.motionclip.encoder({
                 'x': motion_seq,
-                'y': torch.zeros(bsz, dtype=int, device=self.device),
-                'mask': lengths_to_mask(lengths, device=self.device)
+                'y': torch.zeros(bsz, dtype=int, device=feats_content.device),
+                'mask': lengths_to_mask(lengths, device=feats_content.device)
             })["mu"].unsqueeze(1) # [B, 1, 512]
 
         # C. Scene Encoding (Text or Image)，这一步需要梯度
         # 优化：如果是纯轨迹阶段，根本不需要跑 Scene Encoder
         if stage_cfg['MASKING']['STRATEGY'] == 'keep_style_only':
-            scene_feat = torch.zeros(bsz, 1, 512, device=self.device)
+            scene_feat = torch.zeros(bsz, 1, 512, device=feats_content.device)
         else:
             scene_feat = self._encode_scene_condition(batch)
         mask_style, mask_scene = self._generate_condition_masks(bsz, stage_cfg['MASKING'])

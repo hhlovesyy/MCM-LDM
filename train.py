@@ -137,8 +137,10 @@ def main():
     logger.info("Callbacks initialized")
 
     if len(cfg.DEVICE) > 1:
-        # ddp_strategy = DDPStrategy(find_unused_parameters=False)
-        ddp_strategy = "ddp"
+        # 【修改这里】
+        # 原来的 ddp 会导致含有 frozen layers 的模型报错
+        # 必须显式指定 find_unused_parameters_true
+        ddp_strategy = "ddp_find_unused_parameters_true"
     else:
         ddp_strategy = None
 
@@ -148,7 +150,7 @@ def main():
         max_epochs=cfg.TRAIN.END_EPOCH,
         accelerator=cfg.ACCELERATOR,
         devices=cfg.DEVICE,
-        #strategy=ddp_strategy,
+        strategy=ddp_strategy,
         # move_metrics_to_cpu=True,
         default_root_dir=cfg.FOLDER_EXP,
         log_every_n_steps=cfg.LOGGER.VAL_EVERY_STEPS,

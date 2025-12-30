@@ -400,7 +400,8 @@ def main():
             "scene_text": scene_text_batch,
             "scene_image": scene_image_batch,
             "scene_id": scene_id_batch,
-            "has_image": has_image
+            "has_image": has_image,
+            "ablation_no_scene": True  # 如果需要场景的话，把这一项改成False就可以了
         }
 
         # F. 推理
@@ -415,11 +416,13 @@ def main():
         
         if isinstance(joints, torch.Tensor):
             joints = joints.detach().cpu().numpy()
-            
+        
+        hint_trajectory = None
         for idx, save_name in enumerate(batch_names):
             # 获取单个结果
             motion_res = joints[idx]
-            hint_trajectory = global_pos[idx] # torch.Size([199, 3])
+            if global_pos is not None:
+                hint_trajectory = global_pos[idx] # torch.Size([199, 3])
             
             # 如果是 Tensor 且没被 remove_padding 处理成 List，可能需要手动切片
             # 假设你的 forward 已经处理好了，或者在这里处理：
@@ -427,11 +430,13 @@ def main():
                  # 截取真实长度 (以防 model 返回的是 pad 过的结果)
                  real_len = batch_c_lengths[idx]
                  motion_res = motion_res[:real_len]
-                 hint_trajectory = hint_trajectory[:real_len]
+                 if global_pos is not None:
+                    hint_trajectory = hint_trajectory[:real_len]
             elif isinstance(motion_res, torch.Tensor):
                  real_len = batch_c_lengths[idx]
                  motion_res = motion_res[:real_len].detach().cpu().numpy()
-                 hint_trajectory = hint_trajectory[:real_len].detach().cpu().numpy() # shape:(199, 3)
+                 if global_pos is not None:
+                    hint_trajectory = hint_trajectory[:real_len].detach().cpu().numpy() # shape:(199, 3)
 
             # 保存 NPY
             npypath = str(output_dir / f"{save_name}.npy")
@@ -442,7 +447,7 @@ def main():
             # with open(scene_info_path, 'w') as f_json:
             #     json.dump(scene_data, f_json)
             mp4path = npypath.replace('.npy', '.mp4')
-            if render_video:
+            if render_video or True:
                 visual_pos(npypath, mp4path)
             traj_npypath = str(output_dir / f"{save_name}_givenTraj.npy")
             np.save(traj_npypath, hint_trajectory)

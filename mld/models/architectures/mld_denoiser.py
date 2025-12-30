@@ -100,13 +100,17 @@ class TrajectoryEncoderV2(nn.Module):
         # trajectory: [Batch, Frames, 4]
         # print("lets check trajectory shape:", trajectory.shape) # lets check trajectory shape
         x = self.input_proj(trajectory) # [Batch, Frames, 256]
-        
+        # 1. PE 模块通常期望第 0 维是 Time/Frames
+        #    所以我们需要先把 x 从 [B, T, D] 变成 [T, B, D]
+        x = x.permute(1, 0, 2) 
+
         # 加位置编码
         # 注意 pe 的维度处理，这里简化写
         if self.pe is not None:
             # 假设 pe 返回 [Batch, Frames, Dim]
             x = x + self.pe(x) 
-            
+        
+        x = x.permute(1, 0, 2)
         # Transformer 处理
         # 注意：这里我们**不**加 Global Token，也**不**做 Pooling
         # 我们要的就是序列对序列 (Seq2Seq)
@@ -299,7 +303,16 @@ class MldDenoiser(nn.Module):
         else:
             self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
         
+        # 【新增】定义三个模态的 Segment Embedding
+        # 维度是 [1, 1, latent_dim] 以便广播
+        self.seg_emb_content = nn.Parameter(torch.zeros(1, 1, self.latent_dim))
+        self.seg_emb_traj = nn.Parameter(torch.zeros(1, 1, self.latent_dim))
+        self.seg_emb_sample = nn.Parameter(torch.zeros(1, 1, self.latent_dim))
 
+        # 初始化为小的随机数
+        nn.init.normal_(self.seg_emb_content, std=0.02)
+        nn.init.normal_(self.seg_emb_traj, std=0.02)
+        nn.init.normal_(self.seg_emb_sample, std=0.02)
 
 
     def forward(self,
@@ -348,13 +361,17 @@ class MldDenoiser(nn.Module):
             latent_len = sample.shape[0]  # 7
             # trajectory encoder
             trans_emb = self.trans_Encoder(trans_cond, lengths, target_len=latent_len) # torch.Size([32, 7, 256])
-            # trans_emb = trans_emb + time_emb
+            trans_emb = trans_emb.permute(1, 0, 2) # [7, 32, 256]
+            trans_emb = trans_emb + time_emb
             # trans_emb = trans_emb.squeeze() # torch.Size([32, 256])
             sample = self.query_pos(sample)  # torch.Size([7, 32, 256])
+            seg_content = content_emb_latent + self.seg_emb_content
+            seg_traj = trans_emb + self.seg_emb_traj
+            seg_sample = sample + self.seg_emb_sample
 
             # 这里 query_pos 是类似 build_position_encoding 的正弦编码
             # sample = sample + sample_pe 
-            xseq = torch.cat((content_emb_latent, trans_emb.permute(1,0,2), sample), axis=0)  # torch.Size([6 + 7 + 7, 32, 256])
+            xseq = torch.cat((seg_content, seg_traj, seg_sample), axis=0)  # torch.Size([6 + 7 + 7, 32, 256])
         else:
             xseq = torch.cat((content_emb_latent, sample), axis=0)  # torch.Size([13, 32, 256])
             trans_emb = self.trans_Encoder(trans_cond, lengths) # torch.Size([1, 32, 256])

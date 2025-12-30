@@ -1,28 +1,30 @@
-NAME: SceneMo_1220_2320_Full
+NAME: scenemoDiff_1230_Baseline_no_scene_wo_seq2seqTraj
 DEBUG: false
 ACCELERATOR: gpu
 DEVICE:
 - 0
+- 1
+- 2
 SCENE_MODIFF_ABLATION:
   FUSION_MODE: film
   USE_SCENE_CLS: true
   LAMBDA_SCENE: 0.2
   DIFFUSION_PENALTY: 0.5
   UPDATE_BASELINE: true
-  JUST_FINETUNE_BASELINE: false
+  JUST_FINETUNE_BASELINE: true
 TRAIN:
   STAGE: diffusion
   DATASETS:
-  - stylescenedataset
-  NUM_WORKERS: 4
-  BATCH_SIZE: 32
-  END_EPOCH: 300
+  - humanml3d
+  NUM_WORKERS: 16
+  BATCH_SIZE: 170
+  END_EPOCH: 1200
   RESUME: ''
   PRETRAINED_VAE: checkpoints/vae_checkpoint/vae7.ckpt
-  PRETRAINED: /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/Varsapura_from_scratch_1220/checkpoints/epoch=799.ckpt
+  PRETRAINED: ''
   OPTIM:
     TYPE: AdamW
-    LR: 2.0e-05
+    LR: 0.0001
     LR_DENOISER: 1.0e-05
     LR_ADAPTER: 0.0001
   ABLATION:
@@ -36,7 +38,7 @@ EVAL:
   BATCH_SIZE: 32
   SPLIT: test
 TEST:
-  CHECKPOINTS: /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/SceneMo_1220_2320_Full/checkpoints/epoch=124.ckpt
+  CHECKPOINTS: /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1230_Baseline_no_scene_wo_seq2seqTraj/checkpoints/epoch=499.ckpt
   DATASETS:
   - humanml3d
   SPLIT: test
@@ -83,7 +85,7 @@ model:
   guidance_scale: 5
   guidance_uncondp: 0.25
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 25
+  SACE_CHECKPOINT_EPOCH: 100
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: true
@@ -95,23 +97,53 @@ TRAIN_STRTEGY:
   MULTI_MODAL_FUSION: text
 TRAJECTORY:
   ENABLED: true
-  INJECTION_MODE: concat
-  ENCODER_TYPE: seq
+  INJECTION_MODE: adaln
+  ENCODER_TYPE: pool
   AUGMENTATION:
     ENABLED: false
     ROTATION_RANGE: 90.0
-  ROOT_MASKING_DIM4: true
+  ROOT_MASKING_DIM4: false
   USE_CONTENT_DROPOUT: true
   CONTENT_DROPOUT_PROB: 0.15
   GUIDANCE:
-    ENABLED: false
+    ENABLED: true
     STRENGTH: 2.0
     GUIDANCE_START: 1000
     GUIDACE_END: 0
     WAYPOINTS_MODE: true
-    WAYPOINTS_GUIDE_STRENGTH: 100.0
-    WAYPOINTS_INTERVAL: 10
+    WAYPOINTS_GUIDE_STRENGTH: 200.0
+    WAYPOINTS_INTERVAL: 8
     OBSTACLE_MODE: false
-    OBSTACLE_GUIDE_STRENGTH: 1.0
+    OBSTACLE_GUIDE_STRENGTH: 2.0
     STRICT_TRACK_MODE: false
     STRICT_TRACK_STRENGTH: 2.0
+SCENEMODIFF_GLOBAL_CONFIG:
+  JUST_FINETUNE_BASELINE: false
+  ROOT_MASKING_DIM4: false
+  STEP1_DROP_STYLE_PROB: 0.1
+SCENEMODIFF_DENOISER_GLOBAL_CONFIG:
+  INJECTION_MODE: adaln
+  ENCODER_TYPE: pool
+SCENEMODIFF_GLOBAL_CONFIG_TRAIN:
+  MULTI_MODAL_FUSION: text
+  USE_SCENE_CLS: false
+SCENEMODIFF_GLOBAL_CONFIG_INFERENCE: null
+CURRICULUM:
+  ENABLED: true
+  DEFAULT_STAGE: stage0_force_alignment
+  STAGES:
+  - NAME: stage0_force_alignment
+    EPOCH_START: 0
+    EPOCH_END: 1200
+    TRAJECTORY:
+      ROTATION_AUG: true
+      ROTATION_RANGE: 45.0
+      CONTENT_DROPOUT_PROB: 0.1
+      CONTENT_SPARSITY:
+        ENABLED: false
+        MODE: first_frame
+        NUM_KEY_FRAMES: 5
+    MASKING:
+      STRATEGY: keep_style_only
+    LOSS:
+      LAMBDA_SCENE: 0.0

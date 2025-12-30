@@ -14,7 +14,27 @@ from mld.config import parse_args
 from mld.data.get_data import get_datasets
 from mld.models.get_model import get_model
 from mld.utils.logger import create_logger
+import torch.distributed as dist
 import json
+from math import ceil
+
+def setup_ddp():
+    """初始化 DDP 环境"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl")
+        return rank, world_size, local_rank
+    else:
+        # 单卡模式回退
+        return 0, 1, 0
+
+def cleanup_ddp():
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 # 场景定义保持不变
 SCENE_LIST = sorted([
@@ -42,6 +62,9 @@ SCENE_DESCRIPTIONS = {
 
 def main():
     start_time = time.perf_counter()
+    rank, world_size, local_rank = setup_ddp()
+    is_main_process = (rank == 0)
+
     # 1. 配置与初始化
     cfg = parse_args(phase="demo")
     cfg.FOLDER = cfg.TEST.FOLDER
@@ -70,10 +93,11 @@ def main():
 
     logger.info(f"💾 Save path: {save_path}")
 
-    # CUDA
-    if cfg.ACCELERATOR == "gpu":
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in cfg.DEVICE)
-        device = torch.device("cuda:0")
+    # # CUDA
+    # if cfg.ACCELERATOR == "gpu":
+    #     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in cfg.DEVICE)
+    #     device = torch.device("cuda:0")
+    device = torch.device(f"cuda:{local_rank}")
 
     # Load Model
     dataset = get_datasets(cfg, logger=logger, phase="test")[0]
@@ -84,7 +108,8 @@ def main():
     model.eval()
 
     # 2. 数据加载
-    print("🚀 Pre-loading data...")
+    if is_main_process:
+        print("🚀 Pre-loading data metadata...")
     
     all_contents = []
     # 使用 sorted 确保顺序一致，过滤非 npy 文件
@@ -119,25 +144,35 @@ def main():
     all_tasks = list(itertools.product(all_contents, all_styles))
     total_tasks = len(all_tasks)
     
-    print(f"📊 Content files: {len(all_contents)}")
-    print(f"📊 Style files: {len(all_styles)}")
-    print(f"🔥 Total Pairs to Generate: {total_tasks}")
+    # 4. 数据分片 (Data Sharding) - 核心逻辑！
+    # 每个 Rank 只跑属于自己的那一部分
+    num_tasks_per_rank = ceil(total_tasks / world_size)
+    start_idx = rank * num_tasks_per_rank
+    end_idx = min(start_idx + num_tasks_per_rank, total_tasks)
     
-    # 【预警】如果任务数超过 10,000，可能真的会生成很大的文件
-    if total_tasks > 10000:
-        print("⚠️ Warning: Task count is large. The output file might be huge.")
-        print("   If you only want a subset, please modify the code to sample styles.")
+    my_tasks = all_tasks[start_idx:end_idx]
+    
+    if is_main_process:
+        print(f"🔥 Total Tasks: {total_tasks}")
+        print(f"🚀 World Size: {world_size}")
+    
+    print(f"[Rank {rank}] Processing tasks {start_idx} to {end_idx} (Count: {len(my_tasks)})")
 
     # 4. Batch 推理
-    save_all = {"joints": [], "id": [], "label_content": [], "label_style": [], "scene_id": [], "label_scene": []}
+    save_all = {"joints": [], "id": [], "label_content": [], "label_style": [], "scene_id": [], "label_scene": [], "target_traj": []}
     
-    BATCH_SIZE = 128
+    BATCH_SIZE = 256
     print(f"🚀 Inference Batch Size: {BATCH_SIZE}")
+    # 只有主进程显示进度条，防止刷屏；或者每个进程都显示，加上 position
+    iterator = range(0, len(my_tasks), BATCH_SIZE)
+    # if is_main_process:
+    #     iterator = tqdm(iterator, desc=f"Rank {rank} Batches")
+    iterator = tqdm(iterator, desc=f"Rank {rank}", position=rank)
 
     dummy_image = torch.zeros(1, 3, 224, 224, device=device)
     dummy_has_image = torch.tensor([False], device=device)
 
-    for i in tqdm(range(0, total_tasks, BATCH_SIZE), desc="Eval Batches"):
+    for i in iterator:
         batch_tasks = all_tasks[i : i + BATCH_SIZE]
         current_bs = len(batch_tasks)
 
@@ -179,18 +214,23 @@ def main():
             "scene_text": b_scene_texts,
             "scene_id": b_scene_ids,
             "has_image": dummy_has_image,
-            "scene_image": dummy_image.repeat(current_bs, 1, 1, 1)
+            "scene_image": dummy_image.repeat(current_bs, 1, 1, 1),
+            "ablation_no_scene": True
         }
 
         with torch.no_grad():
-            joints, _ = model(batch, scene_data) # 修复后的 forward 返回 [B, L, J, 3] 或 [B, J, 3, L]
+            joints, target_traj = model(batch, scene_data) # 修复后的 forward 返回 [B, L, J, 3] 或 [B, J, 3, L]
 
         if isinstance(joints, torch.Tensor):
             joints = joints.detach().cpu().numpy()
+        
+        if isinstance(target_traj, torch.Tensor):
+            target_traj = target_traj.detach().cpu().numpy()
             
         for idx, item in enumerate(batch_tasks):
             c_data, s_data = item
             motion_res = joints[idx]
+            traj_res = target_traj[idx] 
             # ================= [修复点 Start] =================
             # 1. 强制转 Numpy (防止它是 Tensor)
             if isinstance(motion_res, torch.Tensor):
@@ -216,8 +256,14 @@ def main():
             # ================= [空间优化] float32 -> float16 =================
             # 这步能让文件大小直接减半，且不影响评估指标
             # motion_res = motion_res.astype(np.float16)
-            
+            if traj_res.shape[0] >= real_len:
+                traj_res = traj_res[:real_len]
+            # 如果是 [1, Length, 3] 这种怪异 shape，加个判断
+            elif len(traj_res.shape) == 3 and traj_res.shape[1] >= real_len:
+                traj_res = traj_res[:, :real_len]
+
             save_all["joints"].append(motion_res)
+            save_all["target_traj"].append(traj_res)
             
             # 构建 ID
             idid = f"content{c_data['name']}_style{s_data['name']}_scale_{str(scale).replace('.', '-')}"
@@ -227,17 +273,45 @@ def main():
             save_all["label_scene"].append(b_scene_names[idx])
             save_all["scene_id"].append(b_scene_ids[idx]) # 【关键修复】这里存进去，SCA脚本才能读到！
 
-    # 6. 保存 PKL
-    print(f"💾 Saving results to {save_path}...")
-    with open(save_path, 'wb') as f:
+    # 6. 保存分片结果
+    # 每个 rank 保存一个临时文件
+    temp_save_path = str(save_path).replace('.pkl', f'_part_{rank}.pkl')
+    with open(temp_save_path, 'wb') as f:
         pickle.dump(save_all, f)
     
-    print("✅ Evaluation Done!")
-    end_time = time.perf_counter()
+    print(f"[Rank {rank}] Saved part to {temp_save_path}")
+    
+    # 等待所有卡跑完
+    if dist.is_initialized():
+        dist.barrier()
 
-    # 计算差值
-    elapsed_time = end_time - start_time
-    print(f"🚀 CRA评估任务生成执行耗时: {elapsed_time:.4f} 秒")
+    # 7. 主进程合并结果
+    if is_main_process:
+        print("🔄 Merging results from all ranks...")
+        final_results = {"joints": [], "id": [], "label_content": [], "label_style": [], "scene_id": [], "label_scene": [], "target_traj": []}
+        
+        for r in range(world_size):
+            part_path = str(save_path).replace('.pkl', f'_part_{r}.pkl')
+            if os.path.exists(part_path):
+                with open(part_path, 'rb') as f:
+                    part_data = pickle.load(f)
+                
+                # 合并 Dict 中的 List
+                for key in final_results:
+                    final_results[key].extend(part_data[key])
+                
+                # 删掉临时文件
+                os.remove(part_path)
+        
+        # 保存最终大文件
+        print(f"💾 Saving FINAL results to {save_path}...")
+        with open(save_path, 'wb') as f:
+            pickle.dump(final_results, f)
+            
+        end_time = time.perf_counter()
+        print(f"🚀 Total Time: {end_time - start_time:.4f} s")
+
+    cleanup_ddp()
 
 if __name__ == "__main__":
     main()

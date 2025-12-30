@@ -286,7 +286,7 @@ if __name__ == '__main__':
     print(f"Collate fn: {collate_fn.__name__ if collate_fn else 'None'}")
     DEVICE = 'cuda:{}'.format(cfg["DEVICE"][0])
 
-    input_path = "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceneMo_1220_2320_Full_Eval/crafmd-0_expname_SceneMo_1220_2320_Full_Eval_scale_2-5.pkl"
+    input_path = "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/scenemoDiff_1229_Baseline_no_scene_Eval/crafmd-0_expname_scenemoDiff_1229_Baseline_no_scene_Eval_scale_2-5.pkl"
 
     evaluate_sca(input_path, 
                  "checkpoints/1204/scene_classifier.pth", 

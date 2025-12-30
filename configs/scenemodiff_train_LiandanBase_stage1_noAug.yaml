@@ -1,4 +1,4 @@
-NAME: scenemoDiff_1229_Baseline_no_scene
+NAME: scenemoDiff_1230_Baseline_no_scene_no_Aug
 DEBUG: False
 ACCELERATOR: 'gpu'
 # DEVICE: [0]
@@ -25,7 +25,7 @@ TRAIN:
   END_EPOCH: 1200
 
   # /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=249.ckpt
-  RESUME: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=599.ckpt' # Resume training from this path
+  RESUME: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1230_Baseline_no_scene_no_Aug/checkpoints/epoch=149.ckpt' # Resume training from this path
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
   PRETRAINED: ''
   # PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll/checkpoints/epoch=69.ckpt'
@@ -58,7 +58,7 @@ EVAL:
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=149.ckpt'
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=699.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1230_Baseline_no_scene_no_Aug/checkpoints/epoch=399.ckpt'
   #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
   DATASETS: ['humanml3d'] # training datasets
   SPLIT: test
@@ -136,7 +136,7 @@ TRAIN_STRTEGY:
   MULTI_MODAL_FUSION: "text"  # 会使用图像/文本的一侧，概率各50%, 也可以设置为 "text" 或 "image"(表示为纯文本或者纯图像)
 
 TRAJECTORY:
-  ENABLED: True  # 是False的话会用content的轨迹,baseline的推理需要把这个改成False
+  ENABLED: True  # 是False的话会用content的轨迹
   # ================= 架构相关 =================
   # 是否启用强力注入 (Concat 方式)
   # 如果 False，则回退到原始的 AdaLN 弱注入
@@ -169,10 +169,10 @@ TRAJECTORY:
     GUIDACE_END: 0
 
     WAYPOINTS_MODE: True # 是否启用关键路点追踪功能
-    WAYPOINTS_GUIDE_STRENGTH: 300.0
-    WAYPOINTS_INTERVAL: 5
+    WAYPOINTS_GUIDE_STRENGTH: 200.0
+    WAYPOINTS_INTERVAL: 8
 
-    OBSTACLE_MODE: False  # 是否启用避障功能
+    OBSTACLE_MODE: True  # 是否启用避障功能
     OBSTACLE_GUIDE_STRENGTH: 2.0
 
     STRICT_TRACK_MODE: False  # 是否要严格按照轨迹来走（效果比较差，不建议启用）
@@ -213,7 +213,7 @@ CURRICULUM:
       EPOCH_START: 0
       EPOCH_END: 1200
       TRAJECTORY:
-        ROTATION_AUG: True
+        ROTATION_AUG: False
         ROTATION_RANGE: 45.0
         CONTENT_DROPOUT_PROB: 0.1
         CONTENT_SPARSITY:
@@ -222,45 +222,5 @@ CURRICULUM:
           NUM_KEY_FRAMES: 5 
       MASKING:
         STRATEGY: "keep_style_only"  # 没有场景
-      LOSS:
-        LAMBDA_SCENE: 0.0
-
-    # =======================================================
-    # Stage 1: 撤掉辅助轮 (100 Epochs)
-    # 增加难度，每隔一段距离才给一个参考点，逼迫模型学会连线。
-    # =======================================================
-    - NAME: "stage1_keyframe_guidance"
-      EPOCH_START: 600
-      EPOCH_END: 1200
-      TRAJECTORY:
-        ROTATION_AUG: True
-        ROTATION_RANGE: 45.0
-        CONTENT_DROPOUT_PROB: 0.1
-        CONTENT_SPARSITY:
-          ENABLED: False
-          MODE: "key_frames" # 开启关键帧模式
-          NUM_KEY_FRAMES: 5 # 每隔多少帧给一次content motion
-      MASKING:
-        STRATEGY: "keep_style_only"
-      LOSS:
-        LAMBDA_SCENE: 0.0
-
-    # =======================================================
-    # Stage 2: 实战模拟 (450 Epochs)
-    # 这是最漫长的长征。只有第一帧，模型必须学会完全依赖 Trajectory 
-    # 和自身的先验知识来生成动作。
-    # =======================================================
-    - NAME: "stage2_first_frame_only"
-      EPOCH_START: 600
-      EPOCH_END: 1000
-      TRAJECTORY:
-        ROTATION_AUG: True
-        ROTATION_RANGE: 180.0
-        CONTENT_DROPOUT_PROB: 0.5 # 加大 Dropout，模拟推理时的无条件生成
-        CONTENT_SPARSITY:
-          ENABLED: False
-          MODE: "first_frame" # 地狱难度：只有第一帧
-      MASKING:
-        STRATEGY: "keep_style_only"
       LOSS:
         LAMBDA_SCENE: 0.0

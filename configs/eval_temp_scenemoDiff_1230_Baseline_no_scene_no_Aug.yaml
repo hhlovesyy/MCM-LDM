@@ -1,0 +1,149 @@
+NAME: scenemoDiff_1230_Baseline_no_scene_no_Aug
+DEBUG: false
+ACCELERATOR: gpu
+DEVICE:
+- 0
+- 1
+- 2
+SCENE_MODIFF_ABLATION:
+  FUSION_MODE: film
+  USE_SCENE_CLS: true
+  LAMBDA_SCENE: 0.2
+  DIFFUSION_PENALTY: 0.5
+  UPDATE_BASELINE: true
+  JUST_FINETUNE_BASELINE: true
+TRAIN:
+  STAGE: diffusion
+  DATASETS:
+  - humanml3d
+  NUM_WORKERS: 16
+  BATCH_SIZE: 170
+  END_EPOCH: 1200
+  RESUME: /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1230_Baseline_no_scene_no_Aug/checkpoints/epoch=149.ckpt
+  PRETRAINED_VAE: checkpoints/vae_checkpoint/vae7.ckpt
+  PRETRAINED: ''
+  OPTIM:
+    TYPE: AdamW
+    LR: 0.0001
+    LR_DENOISER: 1.0e-05
+    LR_ADAPTER: 0.0001
+  ABLATION:
+    SKIP_CONNECT: true
+    PE_TYPE: mld
+    DIFF_PE_TYPE: mld
+    FUSION_MODE: film
+EVAL:
+  DATASETS:
+  - humanml3d
+  BATCH_SIZE: 32
+  SPLIT: test
+TEST:
+  CHECKPOINTS: /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1230_Baseline_no_scene_no_Aug/checkpoints/epoch=399.ckpt
+  DATASETS:
+  - humanml3d
+  SPLIT: test
+  BATCH_SIZE: 128
+  MEAN: false
+  NUM_SAMPLES: 1
+  FACT: 1
+  MULTI_MODAL_TYPE: text
+  MULTI_MODAL_TEXT_PROMPT: Walking in strong wind.
+  MULTI_MODAL_IMAGE_PATH: /root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene/scene_images/Dumuqiao/01.jpg
+  CFG_STYLE: 10.0
+  CFG_SCENE: 10.0
+DATASET:
+  JOINT_TYPE: humanml3d
+METRIC:
+  TYPE:
+  - TemosMetric
+  - TM2TMetrics
+LOSS:
+  TYPE: mld
+  LAMBDA_LATENT: 1.0e-05
+  LAMBDA_KL: 0.0001
+  LAMBDA_REC: 1.0
+  LAMBDA_GEN: 1.0
+  LAMBDA_CROSS: 1.0
+  LAMBDA_CYCLE: 0.0
+  LAMBDA_PRIOR: 0.0
+  DIST_SYNC_ON_STEP: false
+  USE_SCENE_CLS: false
+  LAMBDA_SCENE: 0.2
+  CORRUPTION_PROB: 0.7
+model:
+  vae: true
+  model_type: mld
+  condition: text
+  latent_dim:
+  - 7
+  - 256
+  ff_size: 1024
+  num_layers: 9
+  num_head: 4
+  droupout: 0.1
+  activation: gelu
+  guidance_scale: 5
+  guidance_uncondp: 0.25
+LOGGER:
+  SACE_CHECKPOINT_EPOCH: 50
+  LOG_EVERY_STEPS: 1
+  VAL_EVERY_STEPS: 100
+  TENSORBOARD: true
+  WANDB:
+    PROJECT: null
+    OFFLINE: false
+    RESUME_ID: null
+TRAIN_STRTEGY:
+  MULTI_MODAL_FUSION: text
+TRAJECTORY:
+  ENABLED: true
+  INJECTION_MODE: concat
+  ENCODER_TYPE: seq
+  AUGMENTATION:
+    ENABLED: false
+    ROTATION_RANGE: 90.0
+  ROOT_MASKING_DIM4: true
+  USE_CONTENT_DROPOUT: true
+  CONTENT_DROPOUT_PROB: 0.15
+  GUIDANCE:
+    ENABLED: true
+    STRENGTH: 2.0
+    GUIDANCE_START: 1000
+    GUIDACE_END: 0
+    WAYPOINTS_MODE: true
+    WAYPOINTS_GUIDE_STRENGTH: 200.0
+    WAYPOINTS_INTERVAL: 8
+    OBSTACLE_MODE: true
+    OBSTACLE_GUIDE_STRENGTH: 2.0
+    STRICT_TRACK_MODE: false
+    STRICT_TRACK_STRENGTH: 2.0
+SCENEMODIFF_GLOBAL_CONFIG:
+  JUST_FINETUNE_BASELINE: false
+  ROOT_MASKING_DIM4: true
+  STEP1_DROP_STYLE_PROB: 0.1
+SCENEMODIFF_DENOISER_GLOBAL_CONFIG:
+  INJECTION_MODE: concat
+  ENCODER_TYPE: seq
+SCENEMODIFF_GLOBAL_CONFIG_TRAIN:
+  MULTI_MODAL_FUSION: text
+  USE_SCENE_CLS: true
+SCENEMODIFF_GLOBAL_CONFIG_INFERENCE: null
+CURRICULUM:
+  ENABLED: true
+  DEFAULT_STAGE: stage0_force_alignment
+  STAGES:
+  - NAME: stage0_force_alignment
+    EPOCH_START: 0
+    EPOCH_END: 1200
+    TRAJECTORY:
+      ROTATION_AUG: false
+      ROTATION_RANGE: 45.0
+      CONTENT_DROPOUT_PROB: 0.1
+      CONTENT_SPARSITY:
+        ENABLED: false
+        MODE: first_frame
+        NUM_KEY_FRAMES: 5
+    MASKING:
+      STRATEGY: keep_style_only
+    LOSS:
+      LAMBDA_SCENE: 0.0

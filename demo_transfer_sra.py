@@ -201,7 +201,8 @@ def main():
             "tag_scale": scale,
             "scene_text": [""] * current_bs, # 原代码逻辑：空字符串
             "has_image": dummy_has_image,
-            "scene_image": dummy_image.repeat(current_bs, 1, 1, 1)
+            "scene_image": dummy_image.repeat(current_bs, 1, 1, 1),
+            "ablation_no_scene": True
         }
 
         # 推理

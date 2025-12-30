@@ -5,12 +5,12 @@
 # ==============================================================================
 
 # 基础配置路径
-CONFIG_MLD="/root/autodl-tmp/MyRepository/MCM-LDM/configs/eval_temp_SceneMo_1220_2320_Full.yaml"
+CONFIG_MLD="/root/autodl-tmp/MyRepository/MCM-LDM/configs/eval_temp_scenemoDiff_1230_Baseline_no_scene_wo_seq2seqTraj.yaml"
 CONFIG_ASSETS="./configs/assets.yaml"
 SCALE="2.5"
 
 # 模型名称 (用于生成输出文件名的一部分)
-EXP_NAME="SceneMo_1220_2320_Full_Eval" # 假设您有一个统一的实验名称
+EXP_NAME="scenemoDiff_1230_Baseline_no_scene_wo_seq2seqTraj_Eval" # 假设您有一个统一的实验名称
 EVAL_ID=0
 
 # 期望的输出基础目录（两个生成脚本的输出应该都在这个目录下）
@@ -80,7 +80,7 @@ if [ "$SKIP_GENERATION" = false ]; then
     
     # 3.1 FMD/CRA 数据生成
     echo "Running FMD/CRA data generation..."
-    python demo_transfer_crafmd.py \
+    torchrun --nproc_per_node=3 demo_transfer_crafmd.py \
         --cfg "${CONFIG_MLD}" \
         --cfg_assets "${CONFIG_ASSETS}" \
         --style_motion_dir demo/content_test_feats \
@@ -180,5 +180,5 @@ echo "✨ 最终关键指标已存储到 ${RESULTS_FILE}，并打印在控制台
 # (base) root@autodl-container-32de4894e4-6d817059:~/autodl-tmp/MyRepository/MCM-LDM# python /root/autodl-tmp/MCM-LDM_Evaluation/MCM-LDM_Evaluation/calc_traj_metrics.py --pkl_path=/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/SceMoDiff_Evaluation/crafmd-0_expname_SceMoDiff_Evaluation_scale_2-5.pkl --gt_joints_dir=/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_test_joints
 echo "====================================================="
 echo "轨迹和脚滑的相关指标，追加到 ${RESULTS_FILE}，并打印在控制台。"
-python /root/autodl-tmp/MyRepository/MCM-LDM/calc_traj_metrics.py --pkl_path="${FMD_CRA_PKL_PATH}" --gt_joints_dir="/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_test_joints" 2>&1 | tee -a "${RESULTS_FILE}"
+python /root/autodl-tmp/MyRepository/MCM-LDM/calc_traj_metrics.py --pkl_path="${FMD_CRA_PKL_PATH}" 2>&1 | tee -a "${RESULTS_FILE}"  # --gt_joints_dir="/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_test_joints"
 echo "====================================================="
