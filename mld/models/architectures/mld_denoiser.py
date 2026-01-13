@@ -193,9 +193,32 @@ class DiTBlock_Phys(nn.Module):
         shift_msa, scale_msa, gate_msa = self.adaLN_modulation(style_emb).chunk(3, dim=1)
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation_trans(trans_emb).chunk(3, dim=1)
         
+        # === [DEBUG 测试] 强制屏蔽物理影响 ===
+        # 我们让 scale=0, shift=0，这样 (1+0)*x + 0 = x，完全等于没加
+        # p_scale1 = torch.zeros_like(x) 
+        # p_shift1 = torch.zeros_like(x)
+        # p_scale2 = torch.zeros_like(x)
+        # p_shift2 = torch.zeros_like(x)
+        
+        # 注释掉原来的计算，或者保留上面那几行zeros
+        # p_scale1, p_shift1 = self.phys_adapter_attn(x, phys_emb) <-- 注释掉这行
+        # p_scale2, p_shift2 = self.phys_adapter_mlp(x, phys_emb)  <-- 注释掉这行
+        # ===================================
+        
+        
         # 2. [核心修改] 物理调制参数 (Scale & Shift)
         p_scale1, p_shift1 = self.phys_adapter_attn(x, phys_emb)
         p_scale2, p_shift2 = self.phys_adapter_mlp(x, phys_emb)
+        
+         # === 救命稻草 ===
+        # 既然模型学得太 aggressive 了，我们给它打个 0.2 折
+        # 这样它对原动作的破坏力就只有原来的 20%
+        # 但这同时也意味着物理效果（低头）也会变弱，需要找平衡点
+        scale_factor = 0.8 
+        
+        # x_mod1 = x_mod1 * (1 + p_scale1 * scale_factor) + (p_shift1 * scale_factor)
+        # # ...
+        # x_mod2 = x_mod2 * (1 + p_scale2 * scale_factor) + (p_shift2 * scale_factor)
 
         # 3. 混合调制逻辑
         # 我们希望物理影响也是全局的。
@@ -206,7 +229,8 @@ class DiTBlock_Phys(nn.Module):
         # 先应用原版 Time/Style 调制
         x_mod1 = modulate(x_norm1, shift_msa, scale_msa)
         # [新增] 再应用物理调制: x * (1 + p_scale) + p_shift
-        x_mod1 = x_mod1 * (1 + p_scale1) + p_shift1
+        # x_mod1 = x_mod1 * (1 + p_scale1) + p_shift1
+        x_mod1 = x_mod1 * (1 + p_scale1 * scale_factor) + (p_shift1 * scale_factor)
 
         # 计算 Attention 并加残差 (gate_msa 控制原版权重的门控，依然保留)
         x = x + gate_msa.unsqueeze(1) * self.attn(x_mod1)
@@ -216,7 +240,9 @@ class DiTBlock_Phys(nn.Module):
         # 先应用原版 Time/Trajectory 调制
         x_mod2 = modulate(x_norm2, shift_mlp, scale_mlp)
         # [新增] 再应用物理调制
-        x_mod2 = x_mod2 * (1 + p_scale2) + p_shift2
+        # x_mod2 = x_mod2 * (1 + p_scale2) + p_shift2
+        x_mod2 = x_mod2 * (1 + p_scale2 * scale_factor) + (p_shift2 * scale_factor)
+
 
         # 计算 MLP 并加残差
         x = x + gate_mlp.unsqueeze(1) * self.mlp(x_mod2)
@@ -477,6 +503,8 @@ class MldDenoiserNew(nn.Module):
         # 这里必须用 shape[0] 切片，对应的是 Sequence 维度。
         # 注意：xseq 是 [B, S, D]，切片 xseq[:, S_cont:, :] 是对的。 torch.Size([bs, 13, 256])
         sample = xseq[:, content_emb_latent.shape[0]:, :]  # torch.Size([bs, 7, 256])
+        
+        # testtest0109
         
         # 原版没有再 permute 回去吗？
         # 检查原版 return (sample, )。

@@ -174,7 +174,8 @@ def get_datasets(cfg, logger=None, phase="train"):
                 std = std,
                 split_file=None,
                 motion_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/new_joint_vecs",
-                json_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/json_files"
+                json_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/json_files",
+                is_train=True # <--- 加上这个 # ============0108=================
             )
 
 
@@ -283,7 +284,8 @@ def get_datasets(cfg, logger=None, phase="train"):
                 std = std,
                 split_file=None,
                 motion_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/new_joint_vecs",
-                json_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/json_files"
+                json_dir="/root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/json_files",
+                is_train=False # <--- 加上这个，验证/测试时不加噪声 # ============0108=================
             )
 
             datasets.append(SimpleDataModule(train_phase_dataset, val_phase_dataset, mean, std))

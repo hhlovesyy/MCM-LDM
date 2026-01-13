@@ -38,7 +38,8 @@ env/
 /deps/
 /results/
 /experiments/
-/visual_pkl
+
+/demo/
 
 # 非本分支的文件
 AddingCodes/
@@ -46,5 +47,23 @@ AddingCodes/
 # 操作系统生成的文件
 .DS_Store
 Thumbs.db
-debug_dumps/tensors_first_batch.pt
+
+/debug_dumps/
 style_translator_dataset.pt
+/visual_pkl
+
+
+
+/dataset_multi_part_v1/
+/dataset_raise_hand_test/
+/dataset_raise_hand_train_safe_v1/
+/dataset_toptier_final/
+
+/verify_toptier_results_fixed/
+/verify_toptier_results_fixed1/
+/verify_toptier_results_fixedOld/
+
+/ar2026Edit/arGenDatasets/dataset_toptier_final/
+/ar2026Edit/arGenDatasets/Tooli/check_results/
+
+/ar2026Edit/

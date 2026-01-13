@@ -28,7 +28,8 @@ path_config = {
     "pretrained_denoiser": "checkpoints/denoiser_checkpoint/denoiser.ckpt",
     
     # 你的微调权重 (灵魂 - 163MB那个)
-    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2_1125_3scenes/checkpoints/epoch=499.ckpt" 
+    # "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Finetune_v2_1125_3scenes/checkpoints/epoch=499.ckpt" ,
+    "finetuned_checkpoint": "/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/debug--PhysiMoS_Finetune_v2_1125_3scenes/checkpoints/epoch=1149.ckpt" ,
 }
 
 def plot_attention(attn_weights, scene_name, save_path):
@@ -220,10 +221,26 @@ def load_pretrained_weights(model, vae_path, denoiser_path):
     model.load_state_dict(new_denoiser_dict, strict=False)
     print("  -> Backbone loaded successfully (Strict=False).")
 
-
+from omegaconf import OmegaConf # 确保引入了这个
 def main():
     # 1. 配置与环境
     cfg = parse_args(phase="demo")
+    
+    # === [暴力修复] 强行读取你的 YAML 补全 DEMO 部分 ===
+    # 既然 parse_args 没读进去，我们就自己动手
+    print(">>> [DEBUG] Manually reloading config to fix missing DEMO keys...")
+    
+    # 手动加载你的配置文件
+    my_cfg = OmegaConf.load("configs/config_physimos_probe.yaml")
+    
+    # 只要 DEMO 里的内容，拼接到 cfg 里
+    if "DEMO" in my_cfg:
+        cfg.DEMO = my_cfg.DEMO
+        print(f">>> [DEBUG] Force loaded DEMO config: {cfg.DEMO}")
+    else:
+        print(">>> [ERROR] Still cannot find DEMO in the yaml file!")
+    # =======================================================
+    
     cfg.TRAIN.BATCH_SIZE = 1 # 推理时 Batch Size 设为 1
     
     if cfg.ACCELERATOR == "gpu":
@@ -276,7 +293,12 @@ def main():
 
     # 4. 准备 I/O
     content_folder = cfg.DEMO.content_motion_dir
-    physics_json_file = cfg.DEMO.PHYSICS_JSON 
+    # physics_json_file = cfg.DEMO.PHYSICS_JSON 
+        # 直接写死路径，绝对不会错
+    physics_json_file = "/root/autodl-tmp/MyRepository/MCM-LDM/heavy.json" 
+    
+    if not os.path.exists(physics_json_file):
+        print("完了，文件真的不存在！路径写错了！")
     
     # 确保输出目录存在
     if physics_json_file:

@@ -45,7 +45,8 @@ EVAL:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' #<-- 7. [CRITICAL] UPDATE THIS PATH
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Probe_Finetune_v1/checkpoints/epoch=849.ckpt'
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Probe_Finetune_v1/checkpoints/epoch=849.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/debug--PhysiMoS_Finetune_v2_1125_3scenes/checkpoints/epoch=649.ckpt' #<-- 12. MODIFIED
   DATASETS: ['PHYSIMOS100STYLE']
   SPLIT: test
   BATCH_SIZE: 16
@@ -132,4 +133,5 @@ LOGGER:
 
 DEMO:
   content_motion_dir: '/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_motion'
+  # PHYSICS_JSON: '/root/autodl-tmp/MyRepository/MCM-LDM/heavy.json'
   PHYSICS_JSON: '/root/autodl-tmp/MyRepository/MCM-LDM/heavy.json'

@@ -237,6 +237,7 @@ class PhysicsDataset(data.Dataset):
         unit_length=4,
         max_wind_force=330000.0, # 【关键】根据你的数据统计设定，用于归一化
         max_ceiling_height=220.0,
+        is_train=True,# ============0108=================
         **kwargs,
     ):
         self.mean = mean
@@ -246,6 +247,8 @@ class PhysicsDataset(data.Dataset):
         self.unit_length = unit_length
         self.max_wind_force = max_wind_force
         self.max_ceiling_height = max_ceiling_height
+        
+        self.is_train = is_train # <--- 【改动2】把参数存下来！就是缺了这一行导致的报错 
 
         self.phys_dim = 6 # [wind_x, wind_y, wind_mag, ceiling_height, gap_width, gap_offset]
         

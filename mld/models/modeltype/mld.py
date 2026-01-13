@@ -479,6 +479,17 @@ class MLD(BaseModel):
 # train
     # [PhysiMoS 修改] 核心训练逻辑
     def train_diffusion_forward(self, batch):
+        
+        # === [DEBUG 埋点: 开始] ===
+        # 打印一下，看看是不是真的进来了，顺便看看物理参数长什么样
+        if self.global_step % 10 == 0: # 防止刷屏，每10步打印一次
+            print(f"\n[DEBUG] >>> Training Step {self.global_step} Entered! <<<")
+            print(f"[DEBUG] Batch Phys Params Shape: {batch['phys_params'].shape}")
+            # 这里的 shape 应该是 [BatchSize, 4] (如果你还没改 Dataset)
+            # 或者 [BatchSize, Length, 4] (如果你已经改了 Dataset)
+        # === [DEBUG 埋点: 结束] ===
+        
+        
         # 1. 获取数据
         # feats_ref (Target): motion_after
         feats_ref = batch["motion_after"]  # torch.Size([bs, motion_seq_len, 263])
