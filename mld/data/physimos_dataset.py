@@ -268,17 +268,99 @@ class PhysicsDataset(data.Dataset):
     def __len__(self):
         return len(self.data_list)
 
+    # def __getitem__(self, item):
+    #     data_item = self.data_list[item]
+        
+    #     # --- A. 加载动作数据 ---
+    #     motion = np.load(data_item["motion_path"]) # (Total_Frames, 263)
+    #     total_frames = motion.shape[0]
+        
+    #     # --- B. 随机裁剪 (Random Crop) ---
+    #     # 确保裁剪长度是 unit_length 的倍数 (VAE requirement)
+    #     # 策略：如果有足够长度，随机切一段；否则取全部
+        
+    #     target_len = self.max_motion_length
+    #     # 确保 target_len 是 4 的倍数
+    #     target_len = (target_len // self.unit_length) * self.unit_length
+        
+    #     if total_frames > target_len:
+    #         # 随机选择起始点
+    #         max_start = total_frames - target_len
+    #         start_idx = random.randint(0, max_start)
+    #         motion_crop = motion[start_idx : start_idx + target_len]
+    #     else:
+    #         # 如果太短，就裁剪掉尾部多余的帧使其符合 unit_length
+    #         valid_len = (total_frames // self.unit_length) * self.unit_length
+    #         if valid_len < self.unit_length: valid_len = self.unit_length # 至少留一点
+    #         motion_crop = motion[:valid_len]
+            
+    #     # --- C. 动作归一化 (Motion Normalization) ---
+    #     motion_norm = (motion_crop - self.mean) / self.std
+        
+    #     # --- D. 加载物理参数 (Physics Condition) ---
+    #     with open(data_item["json_path"], 'r') as f:
+    #         meta = json.load(f)
+        
+    #     phys_params_np = np.zeros(self.phys_dim, dtype=np.float32)
+    #     params = meta.get("parameters", {})
+        
+    #     # 处理风力
+    #     if "wind_force" in params:
+    #         wf = params["wind_force"]
+    #         wind_vec = np.array([wf.get('x', 0), wf.get('y', 0)])
+    #         mag = np.linalg.norm(wind_vec)
+    #         phys_params_np[0] = wf.get('x', 0) / self.max_wind_force
+    #         phys_params_np[1] = wf.get('y', 0) / self.max_wind_force
+    #         phys_params_np[2] = mag / self.max_wind_force
+            
+    #     # 处理天花板
+    #     if "ceiling_height" in params:
+    #         ch = params["ceiling_height"]
+    #         # 值越低 -> 特征值越高 (1.0)
+    #         phys_params_np[3] = max(0, 1.0 - (ch / self.max_ceiling_height))
+        
+    #     if "gap_width" in params:
+    #         gw = params["gap_width"]
+    #         phys_params_np[4] = gw / 120.0
+    #     if "gap_offset" in params:
+    #         go = params["gap_offset"]
+    #         phys_params_np[5] = go / 20.0
+
+    #     if self.is_train: # 在训练的时候添加一个随机噪声，避免模型
+    #         noise_scale = 0.05
+    #         noise = np.random.randn(*phys_params_np.shape) * noise_scale
+    #         phys_params_np += noise
+    #         # 可以选择性地 clamp 到 [-1, 1]
+    #         phys_params_np = np.clip(phys_params_np, -1.0, 1.0)
+    #     phys_params = torch.from_numpy(phys_params_np).float()
+
+    #     # [修改] 生成一个虚拟的、长度为1的 scene_cat，以匹配 mld.py 的接口
+    #     scene_cat = torch.ones(1).float()
+
+    #     motion_after = torch.from_numpy(motion_norm).float()
+    #     motion_before = motion_after.clone()
+
+    #     dummy_caption = "Varsapura"
+    #     return {
+    #         "motion_after": motion_after,
+    #         "motion_before": motion_before,
+    #         "length": len(motion_after),
+    #         "phys_params": phys_params,
+    #         "scene_cat": scene_cat, # 喂一个虚拟值
+    #         "caption": dummy_caption,
+    #     }
     def __getitem__(self, item):
+        print("33333333333Debug: __getitem__ called with item =", item)  # <--- 【改动1】添加调试打印
         data_item = self.data_list[item]
         
-        # --- A. 加载动作数据 ---
+        # [新增] 获取文件名，用于判断当前是哪种场景 (Wind/Ceiling/Gap)
+        filename = os.path.basename(data_item["json_path"]) 
+
+        # --- A. 加载动作数据 (保持不变) ---
         motion = np.load(data_item["motion_path"]) # (Total_Frames, 263)
         total_frames = motion.shape[0]
         
-        # --- B. 随机裁剪 (Random Crop) ---
-        # 确保裁剪长度是 unit_length 的倍数 (VAE requirement)
-        # 策略：如果有足够长度，随机切一段；否则取全部
-        
+        # --- B. 随机裁剪 (保持不变) ---
         target_len = self.max_motion_length
         # 确保 target_len 是 4 的倍数
         target_len = (target_len // self.unit_length) * self.unit_length
@@ -294,7 +376,7 @@ class PhysicsDataset(data.Dataset):
             if valid_len < self.unit_length: valid_len = self.unit_length # 至少留一点
             motion_crop = motion[:valid_len]
             
-        # --- C. 动作归一化 (Motion Normalization) ---
+        # --- C. 动作归一化 (保持不变) ---
         motion_norm = (motion_crop - self.mean) / self.std
         
         # --- D. 加载物理参数 (Physics Condition) ---
@@ -303,38 +385,109 @@ class PhysicsDataset(data.Dataset):
         
         phys_params_np = np.zeros(self.phys_dim, dtype=np.float32)
         params = meta.get("parameters", {})
-        
-        # 处理风力
-        if "wind_force" in params:
-            wf = params["wind_force"]
-            wind_vec = np.array([wf.get('x', 0), wf.get('y', 0)])
-            mag = np.linalg.norm(wind_vec)
-            phys_params_np[0] = wf.get('x', 0) / self.max_wind_force
-            phys_params_np[1] = wf.get('y', 0) / self.max_wind_force
-            phys_params_np[2] = mag / self.max_wind_force
-            
-        # 处理天花板
-        if "ceiling_height" in params:
-            ch = params["ceiling_height"]
-            # 值越低 -> 特征值越高 (1.0)
-            phys_params_np[3] = max(0, 1.0 - (ch / self.max_ceiling_height))
-        
-        if "gap_width" in params:
-            gw = params["gap_width"]
-            phys_params_np[4] = gw / 120.0
-        if "gap_offset" in params:
-            go = params["gap_offset"]
-            phys_params_np[5] = go / 20.0
 
-        if self.is_train: # 在训练的时候添加一个随机噪声，避免模型
-            noise_scale = 0.05
+        # [新增] 定义场景判断逻辑
+        is_wind = filename.startswith("W") or "Wind" in filename
+        is_ceiling = "Ceiling" in filename
+        is_gap = "Gap" in filename
+
+        # [新增] 定义 Hack 用到的临时常量 (建议根据你的实际数据调整)
+        HACK_MAX_WIND = 30000.0      # 风力归一化分母
+        HACK_MAX_CEIL = 220.0        # 天花板安全高度 (超过此高度为0)
+        HACK_MAX_GAP_WIDTH = 130.0   # [修改] 缝隙宽度阈值 (超过此宽度为0)
+        HACK_MAX_GAP_OFFSET = 50.0   # 缝隙偏移分母
+
+        # ============================================================
+        # [修改] 核心逻辑：使用互斥判断 (if/elif)，防止不同场景数据打架
+        # ============================================================
+        
+        if is_wind:
+            # --- 风力处理 ---
+            if "wind_force" in params:
+                wf = params["wind_force"]
+                raw_x = wf.get('x', 0.0)
+                raw_y = wf.get('y', 0.0)
+            else:
+                raw_x, raw_y = 0.0, 0.0
+            
+            raw_mag = np.linalg.norm([raw_x, raw_y])
+
+            # [新增] 修正方向：解决 0 风无方向问题
+            # 如果原始模长极小(0风)，根据可视化结果，强制设为向右 (1.0, 0.0)
+            if raw_mag < 1e-4:
+                dir_x, dir_y = 1.0, 0.0
+            else:
+                dir_x = raw_x / raw_mag
+                dir_y = raw_y / raw_mag
+            
+            # [新增] 偏移强度：将 [0, max] 映射到 [0.5, 1.0]
+            # 让 0 风也变成有效的中等风信号 (0.5)，解决"0也挡风"的矛盾
+            normalized_mag = 0.5 + 0.5 * (min(raw_mag, HACK_MAX_WIND) / HACK_MAX_WIND)
+            
+            phys_params_np[0] = dir_x * normalized_mag
+            phys_params_np[1] = dir_y * normalized_mag
+            phys_params_np[2] = normalized_mag
+            
+            # [新增] 显式清零其他参数 (防止数据污染)
+            phys_params_np[3:] = 0.0
+
+        elif is_ceiling:
+            # --- 天花板处理 ---
+            if "ceiling_height" in params:
+                ch = params["ceiling_height"]
+                # [修改] 反向归一化逻辑：
+                # 220cm -> 1.0 - 1.0 = 0.0 (Mask掉，无影响)
+                # 80cm  -> 1.0 - 0.36 = 0.64 (强信号)
+                val = max(0.0, 1.0 - (ch / HACK_MAX_CEIL))
+                
+                # [新增] 极小值截断：防止 219cm 产生微弱噪音
+                if val < 0.01: val = 0.0
+                
+                phys_params_np[3] = val
+            
+            # [新增] 显式清零其他参数
+            phys_params_np[0:3] = 0.0
+            phys_params_np[4:] = 0.0
+
+        elif is_gap:
+            # --- 缝隙处理 ---
+            if "gap_width" in params:
+                gw = params["gap_width"]
+                # [修改] Gap Width 反向归一化 (逻辑同天花板)
+                # 130cm (宽) -> 0.0 (无影响)
+                # 40cm (窄)  -> >0.6 (强信号)
+                val = max(0.0, 1.0 - (gw / HACK_MAX_GAP_WIDTH))
+                if val < 0.01: val = 0.0
+                phys_params_np[4] = val
+
+            if "gap_offset" in params:
+                go = params["gap_offset"]
+                # Gap Offset 保持正向逻辑 (0就是0)
+                phys_params_np[5] = go / HACK_MAX_GAP_OFFSET
+            
+            # [新增] 显式清零其他参数
+            phys_params_np[0:4] = 0.0
+
+        # ============================================================
+        # [修改] 噪声注入逻辑：只对非 0 值加噪声 (保护 Mask)
+        # ============================================================
+        if hasattr(self, 'is_train') and self.is_train: 
+            noise_scale = 0.05 
             noise = np.random.randn(*phys_params_np.shape) * noise_scale
-            phys_params_np += noise
-            # 可以选择性地 clamp 到 [-1, 1]
+            
+            # [新增] 制作掩码，只对有值 (>1e-6) 的地方加噪声
+            # 这样原本被我们设为 0 的参数（如 Wind 场景下的 Ceiling）会保持纯 0
+            mask = np.abs(phys_params_np) > 1e-6
+            
+            phys_params_np[mask] += noise[mask]
+            
+            # Clamp
             phys_params_np = np.clip(phys_params_np, -1.0, 1.0)
+
+        # 转 Tensor (保持不变)
         phys_params = torch.from_numpy(phys_params_np).float()
 
-        # [修改] 生成一个虚拟的、长度为1的 scene_cat，以匹配 mld.py 的接口
+        # [修改] 生成虚拟 scene_cat (保持不变，为了兼容)
         scene_cat = torch.ones(1).float()
 
         motion_after = torch.from_numpy(motion_norm).float()
@@ -346,6 +499,6 @@ class PhysicsDataset(data.Dataset):
             "motion_before": motion_before,
             "length": len(motion_after),
             "phys_params": phys_params,
-            "scene_cat": scene_cat, # 喂一个虚拟值
+            "scene_cat": scene_cat, 
             "caption": dummy_caption,
         }

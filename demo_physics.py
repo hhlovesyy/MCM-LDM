@@ -15,6 +15,8 @@ from visual import visual_pos
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+import shutil   # <--- 【新增】用于复制文件的工具库
+
 # [新增] 硬编码场景列表，必须与训练时的 Dataset 一致
 SCENE_CATEGORIES = [
     "Front", "Back", "Left", "Right", 
@@ -122,6 +124,12 @@ def parse_inference_json(json_path, max_wind=330000.0, max_height=220.0):
     [纯物理驱动版]
     直接从 JSON 解析 physical_parameters 列表，并归一化。
     """
+    """
+    [推理专用] 解析用户输入
+    Wind: 输入 0-100 (0=无风, 100=最大风) -> 映射为 0.0-1.0
+    Ceiling: 输入 80-220 (80=低, 220=高) -> 映射为 1.0-0.0
+    Gap: 输入 40-130 (40=窄, 130=宽) -> 映射为 1.0-0.0
+    """
     with open(json_path, 'r') as f:
         data = json.load(f)
         
@@ -130,26 +138,75 @@ def parse_inference_json(json_path, max_wind=330000.0, max_height=220.0):
     # 初始化 4 维向量
     phys_vec = torch.zeros(6)
     
-    # 填充风力
+    # === 1. 风力处理 (用户输入 0-100) ===
     if "wind_force" in params:
         wf = params["wind_force"]
-        wind_vec_xy = np.array([wf.get('x', 0), wf.get('y', 0)])
-        mag = np.linalg.norm(wind_vec_xy)
-        phys_vec[0] = wf.get('x', 0) / max_wind
-        phys_vec[1] = wf.get('y', 0) / max_wind
-        phys_vec[2] = mag / max_wind
+        # 假设用户在 json 里填写的 x,y 是 0-100 的数值
+        user_x = wf.get('x', 0.0)
+        user_y = wf.get('y', 0.0)
         
-    # 填充天花板
+        user_mag = np.sqrt(user_x**2 + user_y**2)
+        
+        if user_mag < 1e-4:
+            # 输入 0 -> 模型接收 0 -> 对应 Gap 场景学到的"正常走"
+            phys_vec[0:3] = 0.0
+        else:
+            # 计算方向
+            dir_x = user_x / user_mag
+            dir_y = user_y / user_mag
+            
+            # 映射: 0-100 -> 0.0-1.0
+            # 输入 50 -> 0.5 (触发挡风)
+            # 输入 100 -> 1.0 (最大挡风)
+            norm_mag = min(user_mag, 100.0) / 100.0
+            
+            phys_vec[0] = dir_x * norm_mag
+            phys_vec[1] = dir_y * norm_mag
+            phys_vec[2] = norm_mag
+            
+    # === 2. 天花板处理 (反向归一化) ===
+    # 只要 json 里有这个字段就处理，不再用 elif
     if "ceiling_height" in params:
         ch = params["ceiling_height"]
-        phys_vec[3] = max(0, 1.0 - (ch / max_height))
-    
+        # 训练时的逻辑: 220->0, 80->0.64
+        # 这里保持一致
+        MAX_CEIL = 220.0
+        val = max(0.0, 1.0 - (ch / MAX_CEIL))
+        if val < 0.01: val = 0.0
+        phys_vec[3] = val
+
+    # === 3. 缝隙处理 (反向归一化) ===
     if "gap_width" in params:
         gw = params["gap_width"]
-        phys_vec[4] = gw / 120.0
-    if "gap_offset" in params:
-        go = params["gap_offset"]
-        phys_vec[5] = go / 20.0
+        # 训练时的逻辑: 130->0 (宽), 40->0.7 (窄)
+        MAX_GAP_W = 130.0
+        val = max(0.0, 1.0 - (gw / MAX_GAP_W))
+        if val < 0.01: val = 0.0
+        phys_vec[4] = val
+        
+        # Offset 保持除以 50 (根据之前的逻辑)
+        if "gap_offset" in params:
+            phys_vec[5] = params["gap_offset"] / 50.0
+    # 填充风力
+    # if "wind_force" in params:
+    #     wf = params["wind_force"]
+    #     wind_vec_xy = np.array([wf.get('x', 0), wf.get('y', 0)])
+    #     mag = np.linalg.norm(wind_vec_xy)# 计算风力模长
+    #     phys_vec[0] = wf.get('x', 0) / max_wind
+    #     phys_vec[1] = wf.get('y', 0) / max_wind
+    #     phys_vec[2] = mag / max_wind
+        
+    # # 填充天花板
+    # if "ceiling_height" in params:
+    #     ch = params["ceiling_height"]
+    #     phys_vec[3] = max(0, 1.0 - (ch / max_height))
+    
+    # if "gap_width" in params:
+    #     gw = params["gap_width"]
+    #     phys_vec[4] = gw / 120.0
+    # if "gap_offset" in params:
+    #     go = params["gap_offset"]
+    #     phys_vec[5] = go / 20.0
 
     # 生成一个虚拟的 scene_cat
     scene_cat = torch.ones(1)
@@ -222,6 +279,7 @@ def load_pretrained_weights(model, vae_path, denoiser_path):
     print("  -> Backbone loaded successfully (Strict=False).")
 
 from omegaconf import OmegaConf # 确保引入了这个
+import datetime # <--- 【新增】引入时间模块
 def main():
     # 1. 配置与环境
     cfg = parse_args(phase="demo")
@@ -306,11 +364,61 @@ def main():
     else:
          config_name = "default"
          
-    output_dir = Path(os.path.join(cfg.TEST.FOLDER, "demo_outputs", cfg.NAME, config_name))
+    # output_dir = Path(os.path.join(cfg.TEST.FOLDER, "demo_outputs", cfg.NAME, config_name))
+    # === [修改开始] ===
+    # 1. 获取当前时间，格式为 年-月-日-时-分 (例如: 2023-10-27-14-30)
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
+    
+    # 2. 拼接文件夹名称： 原有配置名 + 时间戳
+    # 这样每次运行都不会覆盖旧文件，而是生成新文件夹
+    folder_name = f"{config_name}_{current_time}"
+    
+    # 3. 组合完整路径
+    output_dir = Path(os.path.join(cfg.TEST.FOLDER, "demo_outputs", cfg.NAME, folder_name))
+    # === [修改结束] ===
+
+
+
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving outputs to: {output_dir}")
 
     # scenes_json_path = cfg.DATASET.PHYSIMOS100STYLE.SCENE_MAPPING_PATH
+
+    # # === [新增代码开始] ===
+    # # 将 physics_json_file 复制到 output_dir 中
+    # if os.path.exists(physics_json_file):
+    #     try:
+    #         # shutil.copy(源文件路径, 目标文件夹路径)
+    #         shutil.copy(physics_json_file, output_dir)
+    #         print(f">>> [Backup] Configuration file copied to: {output_dir}")
+    #     except Exception as e:
+    #         print(f">>> [Warning] Failed to backup config file: {e}")
+    # else:
+    #     print(f">>> [Warning] Config file not found, cannot backup: {physics_json_file}")
+    # # === [新增代码结束] ===
+    
+    # === [修改后的备份代码] ===
+    if os.path.exists(physics_json_file):
+        try:
+            # 1. 在这里自定义你想要的新名字
+            new_filename = "config_backup.json" 
+            
+            # 2. 拼接完整的【目标路径 + 目标文件名】
+            # output_dir 是 Path 对象，可以直接用 / 拼接
+            target_path = output_dir / new_filename
+            
+            # 3. 复制文件 (源路径 -> 带新名字的目标路径)
+            shutil.copy(physics_json_file, target_path)
+            
+            print(f">>> [Backup] Configuration file copied as: {new_filename}")
+        except Exception as e:
+            print(f">>> [Warning] Failed to backup config file: {e}")
+    else:
+        print(f">>> [Warning] Config file not found, cannot backup: {physics_json_file}")
+    # ========================
+
+    
+
 
     # 5. 加载条件
     print(f"Loading physics from: {physics_json_file}")

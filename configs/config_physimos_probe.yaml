@@ -5,7 +5,7 @@
 ####################################
 # The following are general settings
 ####################################
-NAME: "PhysiMoS_Finetune_v2_1125_3scenes" #<-- 1. MODIFIED
+NAME: "PhysiMoS_Finetune_v2_0114_3scenes" #<-- 1. MODIFIED
 FOLDER_EXP: "experiments/physimos_probe"   #<-- 2. NEW
 DEBUG: False
 ACCELERATOR: 'gpu'
@@ -16,7 +16,7 @@ DEVICE: [0]
 #####################################
 TRAIN:
   STAGE: diffusion
-  DATASETS: ['PHYSIMOS100STYLE'] #<-- 3. MODIFIED
+  DATASETS: ['PHYSIMOS100STYLE'] #<-- 3. MODIFIED 
   NUM_WORKERS: 4 #<-- Can increase if IO is a bottleneck
   BATCH_SIZE: 16 #<-- 4. MODIFIED
   END_EPOCH: 2000 #<-- 5. MODIFIED
@@ -46,7 +46,8 @@ EVAL:
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' #<-- 7. [CRITICAL] UPDATE THIS PATH
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/PhysiMoS_Probe_Finetune_v1/checkpoints/epoch=849.ckpt'
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/debug--PhysiMoS_Finetune_v2_1125_3scenes/checkpoints/epoch=649.ckpt' #<-- 12. MODIFIED
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/debug--PhysiMoS_Finetune_v2_1125_3scenes/checkpoints/epoch=649.ckpt' #<-- 12. MODIFIED
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/debug--PhysiMoS_Finetune_v2_0114_3scenes/checkpoints/epoch=699.ckpt' #<-- 13. MODIFIED
   DATASETS: ['PHYSIMOS100STYLE']
   SPLIT: test
   BATCH_SIZE: 16

@@ -1,0 +1,12 @@
+
+{
+    "physical_parameters": {
+      "wind_force": {
+        "x": 0.0,  
+        "y": 0.0
+      },
+      "ceiling_height": 220.0,
+      "gap_width": 30,
+      "gap_offset": 0.0
+    }
+}

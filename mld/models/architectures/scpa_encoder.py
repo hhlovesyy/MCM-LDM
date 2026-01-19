@@ -34,21 +34,47 @@ class SCPAEncoderBlock(nn.Module):
         self.linear2 = nn.Linear(ff_dim, d_model)
         self.activation = nn.GELU()
 
-    def forward(self, x, memory, need_weights=False):
-        # x: Query (Scene Context)
-        # memory: Key/Value (Physics Params)
+    # def forward(self, x, memory, need_weights=False):
+    #     # x: Query (Scene Context)
+    #     # memory: Key/Value (Physics Params)
         
-        # Part 1: Self Attention (with Residual)
+    #     # Part 1: Self Attention (with Residual)
+    #     x2 = self.norm1(x)
+    #     x2, _ = self.self_attn(x2, x2, x2)
+    #     x = x + self.dropout(x2)
+        
+    #     # Part 2: Cross Attention (with Residual) & Weight Extraction
+    #     x2 = self.norm2(x)
+    #     x2, attn_weights = self.cross_attn(query=x2, key=memory, value=memory, need_weights=need_weights)
+    #     x = x + self.dropout(x2)
+        
+    #     # Part 3: FFN (with Residual)
+    #     x2 = self.norm3(x)
+    #     x2 = self.linear2(self.dropout(self.activation(self.linear1(x2))))
+    #     x = x + self.dropout(x2)
+        
+    #     return x, attn_weights
+    # 修改 forward，增加 key_padding_mask 参数
+    def forward(self, x, memory, need_weights=False, key_padding_mask=None):
+        # Part 1: Self Attention (不变)
         x2 = self.norm1(x)
         x2, _ = self.self_attn(x2, x2, x2)
         x = x + self.dropout(x2)
         
-        # Part 2: Cross Attention (with Residual) & Weight Extraction
+        # Part 2: Cross Attention (核心修改)
         x2 = self.norm2(x)
-        x2, attn_weights = self.cross_attn(query=x2, key=memory, value=memory, need_weights=need_weights)
+        # 这里的 key_padding_mask 是 PyTorch MultiheadAttention 的标准参数
+        # 它会自动屏蔽掉 mask 为 True 的位置
+        x2, attn_weights = self.cross_attn(
+            query=x2, 
+            key=memory, 
+            value=memory, 
+            key_padding_mask=key_padding_mask, # <--- 加上这行
+            need_weights=need_weights
+        )
         x = x + self.dropout(x2)
         
-        # Part 3: FFN (with Residual)
+        # Part 3: FFN (不变)
         x2 = self.norm3(x)
         x2 = self.linear2(self.dropout(self.activation(self.linear1(x2))))
         x = x + self.dropout(x2)
@@ -130,64 +156,163 @@ class SCPAEncoder(nn.Module):
         return final_emb
     
 
+# class SCPAEncoder1125(nn.Module):
+#     """
+#     [最终版] 纯物理参数注意力编码器 (Scene-Agnostic)
+#     不再接收场景标签，而是用一个可学习的全局Query去理解物理参数序列。
+#     """
+#     def __init__(self, phys_params_dim: int, d_model: int = 256, 
+#                  n_head: int = 4, n_layers: int = 1, **kwargs): # 吸收多余的 scene_cat_dim
+#         super().__init__()
+        
+#         self.d_model = d_model
+#         self.phys_params_dim = phys_params_dim
+        
+#         # --- Embeddings ---
+#         self.phys_value_embedding = nn.Linear(1, d_model)
+#         self.phys_type_embedding = nn.Embedding(phys_params_dim, d_model)
+        
+#         # [核心修改] 可学习的全局令牌
+#         self.physics_query_token = nn.Parameter(torch.randn(1, 1, d_model))
+        
+#         # --- Transformer Blocks ---
+#         self.layers = nn.ModuleList([
+#             SCPAEncoderBlock(d_model, n_head, 1024, 0.1) 
+#             for _ in range(n_layers)
+#         ])
+        
+#         self.output_norm = nn.LayerNorm(d_model)
+
+#     def forward(self, phys_params: torch.Tensor, scene_cat: torch.Tensor = None, need_weights: bool = False):
+#         # [核心修改] scene_cat 变为可选参数，但我们不再使用它
+#         # print("in forward , phys params:", phys_params.shape)
+#         batch_size = phys_params.shape[0]  # torch.Size([16, 4])
+
+#         # A. 构建 Memory (同之前)
+#         phys_params_seq = phys_params.unsqueeze(-1)  # torch.Size([16, 4, 1])
+#         phys_value_emb = self.phys_value_embedding(phys_params_seq) # torch.Size([16, 4, 256])
+#         param_indices = torch.arange(self.phys_params_dim, device=phys_params.device) # tensor([0, 1, 2, 3], device='cuda:0')
+#         phys_type_emb = self.phys_type_embedding(param_indices).unsqueeze(0).expand(batch_size, -1, -1) # torch.Size([16, 4, 256])
+#         memory = phys_value_emb + phys_type_emb
+
+#         # B. 构建 Query (新逻辑)
+#         query = self.physics_query_token.expand(batch_size, -1, -1) # torch.Size([16, 1, 256])
+
+#         # C. 通过 Transformer
+#         all_attn_weights = []
+#         x = query
+#         for layer in self.layers:
+#             x, weights = layer(x, memory, need_weights=need_weights)  # x:torch.Size([16, 1, 256]), weights:0
+#             if need_weights:
+#                 all_attn_weights.append(weights)
+
+#         # D. 输出
+#         final_emb = self.output_norm(x)
+        
+#         weights_tuple = all_attn_weights[0] if (need_weights and all_attn_weights) else None
+#         if need_weights:
+#             return final_emb, weights_tuple
+#         return final_emb
+
 class SCPAEncoder1125(nn.Module):
     """
-    [最终版] 纯物理参数注意力编码器 (Scene-Agnostic)
-    不再接收场景标签，而是用一个可学习的全局Query去理解物理参数序列。
+    [论文级升级版] Input-Guided Attention Encoder
+    原理：使用输入物理参数动态生成 Query，并配合 Padding Mask 强制模型关注有效信号。
     """
     def __init__(self, phys_params_dim: int, d_model: int = 256, 
-                 n_head: int = 4, n_layers: int = 1, **kwargs): # 吸收多余的 scene_cat_dim
+                 n_head: int = 4, n_layers: int = 1, **kwargs): 
         super().__init__()
         
         self.d_model = d_model
         self.phys_params_dim = phys_params_dim
         
-        # --- Embeddings ---
+        # --- 1. Embedding (保持不变) ---
+        # 用于把具体的物理数值映射成向量 (Value)
         self.phys_value_embedding = nn.Linear(1, d_model)
+        # 用于标识这是第几个参数 (Key 的一部分)
         self.phys_type_embedding = nn.Embedding(phys_params_dim, d_model)
         
-        # [核心修改] 可学习的全局令牌
-        self.physics_query_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # --- 2. [核心修改点A] 动态 Query 生成器 ---
+        # 以前是：self.physics_query_token = nn.Parameter(...) 
+        # 现在改成：一个简单的线性层，把输入的 6维 物理参数 直接映射成 Query
+        # 这样 Query 就自带了 "当前哪个参数有值" 的信息！
+        self.query_generator = nn.Linear(phys_params_dim, d_model)
         
-        # --- Transformer Blocks ---
+        # --- 3. Transformer Blocks (保持不变) ---
         self.layers = nn.ModuleList([
-            SCPAEncoderBlock(d_model, n_head, 1024, 0.1) 
+            SCPAEncoderBlock(d_model, n_head, 1024, 0.1)
             for _ in range(n_layers)
         ])
         
         self.output_norm = nn.LayerNorm(d_model)
 
     def forward(self, phys_params: torch.Tensor, scene_cat: torch.Tensor = None, need_weights: bool = False):
-        # [核心修改] scene_cat 变为可选参数，但我们不再使用它
-        # print("in forward , phys params:", phys_params.shape)
-        batch_size = phys_params.shape[0]  # torch.Size([16, 4])
+        # phys_params shape: [Batch_Size, 6] (例如: [16, 6])
+        batch_size = phys_params.shape[0]
+        device = phys_params.device
 
-        # A. 构建 Memory (同之前)
-        phys_params_seq = phys_params.unsqueeze(-1)  # torch.Size([16, 4, 1])
-        phys_value_emb = self.phys_value_embedding(phys_params_seq) # torch.Size([16, 4, 256])
-        param_indices = torch.arange(self.phys_params_dim, device=phys_params.device) # tensor([0, 1, 2, 3], device='cuda:0')
-        phys_type_emb = self.phys_type_embedding(param_indices).unsqueeze(0).expand(batch_size, -1, -1) # torch.Size([16, 4, 256])
-        memory = phys_value_emb + phys_type_emb
+        # ====================================================
+        # Part A: 构建 Memory (Key & Value) - 这里的书架逻辑不变
+        # ====================================================
+        # (B, 6) -> (B, 6, 1)
+        phys_params_seq = phys_params.unsqueeze(-1) 
+        
+        # Value: 数值映射
+        phys_value_emb = self.phys_value_embedding(phys_params_seq) # (B, 6, D)
+        
+        # Type: 位置编码 (告诉模型这是 WindX 还是 GapWidth)
+        param_indices = torch.arange(self.phys_params_dim, device=device)
+        phys_type_emb = self.phys_type_embedding(param_indices).unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Memory = Value + Type (书的内容 + 书的标签)
+        memory = phys_value_emb + phys_type_emb # (B, 6, D)
 
-        # B. 构建 Query (新逻辑)
-        query = self.physics_query_token.expand(batch_size, -1, -1) # torch.Size([16, 1, 256])
+        # ====================================================
+        # Part B: [核心修改点B] 构建 Dynamic Query (动态查询)
+        # ====================================================
+        # 以前 Query 是固定的，现在由 phys_params 全局信息生成
+        # 含义：如果输入里有 Ceiling，Query 向量就会长得像 Ceiling，去吸附 Ceiling 的 Key
+        query = self.query_generator(phys_params) # (B, D)
+        query = query.unsqueeze(1) # 变成序列形式 (B, 1, D)
 
-        # C. 通过 Transformer
+        # ====================================================
+        # Part C: [核心修改点C] 构建 Key Padding Mask (防呆机制)
+        # ====================================================
+        # 原理：有些参数是 0 (比如没风的时候风是0)，我们要告诉 Attention "别看这些 0"
+        # 逻辑：True 的位置会被忽略，False 的位置会被保留
+        # 我们认为绝对值 < 0.0001 的就是无效输入 (Padding)
+        # key_padding_mask shape: (B, 6)
+        key_padding_mask = torch.abs(phys_params) < 1e-4
+
+        # 【极其重要】防止全 0 崩溃
+        # 如果某一行全是 0 (比如无风无缝隙无天花板)，Attention 会报错或输出 NaN。
+        # 这种情况下，我们临时允许它看第一个位置，反正全是 0 也没影响。
+        all_zero_mask = key_padding_mask.all(dim=1) # (B,)
+        if all_zero_mask.any():
+            # 将全0样本的第一个位置设为 False (允许关注)，防止 NaN
+            key_padding_mask[all_zero_mask, 0] = False
+
+        # ====================================================
+        # Part D: 传入 Transformer
+        # ====================================================
         all_attn_weights = []
         x = query
+        
         for layer in self.layers:
-            x, weights = layer(x, memory, need_weights=need_weights)  # x:torch.Size([16, 1, 256]), weights:0
+            # 注意：这里我们传入了 key_padding_mask
+            # 你需要确保你的 SCPAEncoderBlock 的 forward 函数能接收这个参数
+            # 如果之前的 Block 写死了没接收，我在下面会补上 Block 的代码
+            x, weights = layer(x, memory, need_weights=need_weights, key_padding_mask=key_padding_mask)
+            
             if need_weights:
                 all_attn_weights.append(weights)
 
-        # D. 输出
         final_emb = self.output_norm(x)
         
         weights_tuple = all_attn_weights[0] if (need_weights and all_attn_weights) else None
         if need_weights:
             return final_emb, weights_tuple
         return final_emb
-
 class SCPAEncoderSimple(nn.Module):
     """
     [简化版] 物理参数编码器

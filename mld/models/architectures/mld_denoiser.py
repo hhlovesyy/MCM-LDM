@@ -214,7 +214,7 @@ class DiTBlock_Phys(nn.Module):
         # 既然模型学得太 aggressive 了，我们给它打个 0.2 折
         # 这样它对原动作的破坏力就只有原来的 20%
         # 但这同时也意味着物理效果（低头）也会变弱，需要找平衡点
-        scale_factor = 0.8 
+        scale_factor = 0.9 
         
         # x_mod1 = x_mod1 * (1 + p_scale1 * scale_factor) + (p_shift1 * scale_factor)
         # # ...
