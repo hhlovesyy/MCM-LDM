@@ -46,6 +46,53 @@ from mld.models.architectures.scpa_encoder import SCPAEncoder, SCPAEncoderSimple
 
 from .base import BaseModel
 
+def calculate_trajectory_correct(data):
+    """
+    修正后的积分逻辑
+    data: [Batch, Seq, 4] (RotVel, VelX, VelZ, Height)
+    """
+    # 1. 提取特征
+    rot_vel = data[..., 0]
+    local_vel_x = data[..., 1]
+    local_vel_z = data[..., 2]
+    
+    # 2. 积分角度
+    # r_rot_ang[i] 代表第 i 帧相对于第 0 帧的旋转角
+    r_rot_ang = torch.zeros_like(rot_vel)
+    r_rot_ang[..., 1:] = rot_vel[..., :-1]
+    r_rot_ang = torch.cumsum(r_rot_ang, dim=-1)
+    
+    real_angle = r_rot_ang * 2.0 # Quaternion mapping
+    
+    c = torch.cos(real_angle)
+    s = torch.sin(real_angle)
+    
+    # 3. 准备世界坐标速度
+    # 依然保持 shift，因为特征是对上一帧的 delta
+    vel_x_shifted = torch.zeros_like(local_vel_x)
+    vel_z_shifted = torch.zeros_like(local_vel_z)
+    vel_x_shifted[..., 1:] = local_vel_x[..., :-1]
+    vel_z_shifted[..., 1:] = local_vel_z[..., :-1]
+    
+    # 旋转投影
+    # HumanML3D/T2M GPT 使用的是 (vel_x * c - vel_z * s, vel_x * s + vel_z * c)
+    # 对应逆时针旋转
+    global_vel_x = vel_x_shifted * c - vel_z_shifted * s
+    global_vel_z = vel_x_shifted * s + vel_z_shifted * c
+    
+    # 4. 积分位置
+    pred_pos = torch.zeros_like(data[..., :3])
+    pred_pos[..., 0] = torch.cumsum(global_vel_x, dim=-1)
+    pred_pos[..., 2] = torch.cumsum(global_vel_z, dim=-1)
+    
+    # 【强制对齐】：确保第 0 帧一定是 (0,0,0)，消除任何累积误差的初始偏移
+    # 这样 guidance 计算 diff 时，起点永远是对齐的
+    pred_pos = pred_pos - pred_pos[:, 0:1, :]
+    
+    pred_pos[..., 1] = data[..., 3] # 高度直接赋值
+    
+    return pred_pos
+
 
 class MLD(BaseModel):
     """
@@ -221,12 +268,302 @@ class MLD(BaseModel):
             p.requires_grad = False
 
 
+    def _compute_waypoint_loss(self, latents, t, target_global_pos, encoder_hidden_states, lengths, interval=20):
+            
+        # 1. 预测 & 反推 (保持不变)
+        noise_pred = self.denoiser(
+            sample=latents,
+            timestep=t,
+            encoder_hidden_states=encoder_hidden_states,
+            lengths=lengths,
+        )[0]
+        
+        alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+        beta_prod_t = 1 - alpha_prod_t
+        pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+        
+        # 2. Decode & 反归一化 (保持不变)
+        pred_z0_input = pred_z0.permute(1, 0, 2) 
+        fake_lengths = [target_global_pos.shape[1]] * latents.shape[0]
+        pred_motion_norm = self.vae.decode(pred_z0_input, fake_lengths)
+        
+        if self.mean.device != latents.device:
+            self.mean = self.mean.to(latents.device)
+            self.std = self.std.to(latents.device)
+        pred_motion = pred_motion_norm * self.std + self.mean
+        
+        # 3. 积分得到物理轨迹 (使用修正后的 calculate_trajectory_correct)
+        # calculate_pos: [Batch, Seq, 3]
+        calculate_pos = calculate_trajectory_correct(pred_motion)
+        
+        # ================== 【修改点 1: 坐标系对齐】 ==================
+        # 我们不关心绝对坐标，只关心相对形状。
+        # 让生成轨迹和目标轨迹的第0帧都归零。
+        # 这样消除了“起点不一致”带来的巨大 Loss。
+        pred_traj_centered = calculate_pos - calculate_pos[:, 0:1, :]
+        target_traj_centered = target_global_pos - target_global_pos[:, 0:1, :]
+        
+        # 生成索引: [0, 20, 40, ..., last_frame]
+        # ================= [新增/检查 Mask 逻辑] =================
+        # 我们只计算 valid 长度内的 loss
+        # 创建一个 [B, L] 的 mask
+        seq_len = calculate_pos.shape[1] # 199，batch里最长的动作的长度
+        bs = calculate_pos.shape[0] 
+        
+        # 生成 Mask: True 代表有效帧，False 代表 Padding
+        # range_tensor: [0, 1, 2, ..., L-1]
+        range_tensor = torch.arange(seq_len, device=latents.device).unsqueeze(0) # [1, L]
+        # lengths_tensor: [B, 1]
+        lengths_tensor = torch.tensor(lengths, device=latents.device).unsqueeze(1)
+        mask = range_tensor < lengths_tensor # [B, L]
+        mask = mask.unsqueeze(-1) # [B, L, 1] 广播到坐标维度
+        key_indices = torch.arange(0, seq_len, interval, device=latents.device)
+        
+        # 1. 提取关键帧 (Key Indices)
+        pred_sampled = pred_traj_centered[:, key_indices, :]
+        target_sampled = target_traj_centered[:, key_indices, :]
+        mask_sampled = mask[:, key_indices, :] # [B, K, 1]
+        
+        # 2. 手动计算 MSE
+        # 只有 mask 为 1 的地方有值，其他地方 diff 为 0
+        diff = (pred_sampled - target_sampled) * mask_sampled 
+        
+        # 平方误差总和
+        sum_squared_error = (diff ** 2).sum()
+        
+        # 有效像素总和 (防止除以0，加个极小值)
+        valid_element_count = mask_sampled.sum() * 3 + 1e-8 # *3 是因为坐标有 (x,y,z) 3个维度
+        
+        # 计算真正的平均 Loss
+        loss = sum_squared_error / valid_element_count
+        
+        # # 4. 求导
+        # grad = torch.autograd.grad(loss, latents)[0]
+        
+        # return grad
+        return loss
 
 
+    # def _apply_spatial_guidance(self, latents, t, ctx):
+    #     class TempConf:
+    #         ENABLED = True
+    #         GUIDANCE_START = 1000
+    #         GUIDACE_END = 0
+    #         WAYPOINTS_MODE = True
+    #         WAYPOINTS_GUIDE_STRENGTH = 100.0 # 这个值控制引导力度，如果平移太严重，调小它！
+    #         OBSTACLE_MODE = False
+    #     conf = TempConf()
+        
+    #     """
+    #     计算并应用基于梯度的空间引导 (Waypoints & Obstacles)。
+    #     """
+    #     # 1. 全局开关检查
+    #     # conf = self.cfg.TRAJECTORY.GUIDANCE
+    #     if not conf.ENABLED:
+    #         return latents
 
+    #     # 2. 时间窗口检查 (Guard Clause)
+    #     # 只有在特定的去噪阶段才进行引导
+    #     if not (conf.GUIDACE_END < t < conf.GUIDANCE_START):
+    #         return latents
 
+    #     # 3. 确定优化步数 (Dynamic K Strategy)
+    #     # 将硬编码的逻辑保留在这里，或者提取到配置中
+    #     if t > 500: num_opt_steps = 1
+    #     elif t > 100: num_opt_steps = 5
+    #     else: num_opt_steps = 10
 
+    #     # 4. 梯度下降循环
+    #     # 注意：这里我们是在冻结模型的情况下，通过梯度修改 latents
+    #     current_latents = latents.detach().requires_grad_(True)
+        
+    #     with torch.enable_grad():
+    #         for _ in range(num_opt_steps):
+    #             total_loss = 0.0
+                
+    #             # A. 路点引导 (Waypoints)
+    #             if conf.WAYPOINTS_MODE and ctx['target_pos'] is not None:
+    #                 # 这里的 compute_spatial_loss 是你原来的 compute_spatial_guidance 里的 loss 计算部分
+    #                 # 需要你把它拆出来，只返回 loss，不要在里面求导
+    #                 loss_traj = self._compute_waypoint_loss(
+    #                     current_latents, t.unsqueeze(0).repeat(ctx['bsz']), ctx['target_pos'], ctx['cond_embeddings'], ctx['lengths'],
+    #                     interval = self.cfg.TRAJECTORY.GUIDANCE.WAYPOINTS_INTERVAL
+    #                 )
+    #                 total_loss += loss_traj * conf.WAYPOINTS_GUIDE_STRENGTH
 
+    #             # B. 避障引导 (Obstacles)
+    #             if conf.OBSTACLE_MODE and len(ctx['obstacles']) > 0:
+    #                 loss_obs = self._compute_obstacle_loss(
+    #                     current_latents, t, ctx['obstacles'], ctx['cond_embeddings'], ctx['lengths']
+    #                 )
+    #                 total_loss += loss_obs * conf.OBSTACLE_GUIDE_STRENGTH
+                
+    #             # 如果没有 Loss，直接退出
+    #             if isinstance(total_loss, float) and total_loss == 0.0:
+    #                 break
+
+    #             # C. 反向传播
+    #             grad = torch.autograd.grad(total_loss, current_latents)[0]
+
+    #             # D. 梯度裁剪 (Gradient Clipping)
+    #             grad_norm = grad.norm()
+    #             max_norm = 5.0 # 可以写进配置
+    #             if grad_norm > max_norm:
+    #                 grad = grad * (max_norm / (grad_norm + 1e-8))
+
+    #             # E. 更新 Latents
+    #             # alpha 缩放: 随着 t 变小(接近真实图像)，梯度的权重应该变小
+    #             # 或者直接用 step_size = 1.0
+    #             # scale_factor = (1 - self.scheduler.alphas_cumprod[t]) ** 0.5
+    #             step_size = 1.0 
+    #             current_latents = current_latents - step_size * grad
+    #             current_latents = current_latents.detach().requires_grad_(True)
+                
+    #     # 5. 返回更新后的 Latents (不再需要梯度)
+    #     return current_latents.detach()
+    
+    # def _apply_spatial_guidance(self, latents, t, ctx):
+    #     """
+    #     计算并应用基于梯度的空间引导
+    #     Args:
+    #         latents: 当前的 noisy latents
+    #         t: 当前的时间步 [Batch_Size] (注意：这里已经是 Batch 形式了)
+    #         ctx: 上下文，包含 'target_pos' 等
+    #     """
+    #     # 1. 确定优化步数
+    #     # 取第一个 batch 的时间步来判断
+    #     t_val = t[0].item()
+        
+    #     # 简单的动态步数策略：前期多修，后期少修
+    #     if t_val > 500: num_opt_steps = 1
+    #     elif t_val > 100: num_opt_steps = 5
+    #     else: num_opt_steps = 10
+        
+    #     # 2. 梯度下降循环
+    #     current_latents = latents.detach().requires_grad_(True)
+
+    #     # 临时的配置参数 (对应你手动复制的那部分)
+    #     # 这样就不用去改 yaml 文件了，防止报错
+    #     class TempConf:
+    #         WAYPOINTS_MODE = True
+    #         WAYPOINTS_GUIDE_STRENGTH = 1000.0 # 引导力度
+    #         OBSTACLE_MODE = False
+    #     conf = TempConf()
+
+    #     with torch.enable_grad():
+    #         for _ in range(num_opt_steps):
+    #             total_loss = 0.0
+                
+    #             # A. 路点引导 (Waypoints)
+    #             if conf.WAYPOINTS_MODE and ctx.get('target_pos') is not None:
+    #                 # 【核心修复点】
+    #                 # 之前的报错是因为 t 已经是 [Batch] 了，旧代码还试图 unsqueeze/repeat
+    #                 # 这里直接传 t 即可！
+    #                 loss_traj = self._compute_waypoint_loss(
+    #                     current_latents, 
+    #                     t,  # <--- 直接传 t，不要 repeat
+    #                     ctx['target_pos'], 
+    #                     ctx['encoder_hidden_states'], 
+    #                     ctx['lengths']
+    #                 )
+    #                 total_loss += loss_traj * conf.WAYPOINTS_GUIDE_STRENGTH
+                
+    #             # 如果没有 Loss，直接退出
+    #             if isinstance(total_loss, float) and total_loss == 0.0:
+    #                 break
+                    
+    #             # C. 反向传播
+    #             grad = torch.autograd.grad(total_loss, current_latents)[0]
+                
+    #             # D. 梯度裁剪 (防止平移的关键)
+    #             grad_norm = grad.norm()
+    #             max_norm = 0.2 # 【重要】这个值越小，越不容易发生整个人平移；设大容易飞
+    #             if grad_norm > max_norm:
+    #                 grad = grad * (max_norm / (grad_norm + 1e-8))
+                
+    #             # E. 更新 Latents
+    #             step_size = 1.0 
+    #             current_latents = current_latents - step_size * grad
+
+    #     return current_latents.detach()
+    
+
+    # 基于你提供的原始代码修改，添加了 Config Mock 和 t 的处理
+    def _apply_spatial_guidance(self, latents, t, ctx):
+        """
+        计算并应用基于梯度的空间引导 (Waypoints & Obstacles)。
+        """
+        # ================= [临时 Config Mock] =================
+        # 既然你不想改 yaml，我们在这里手动定义配置，保证能跑
+        class TempConf:
+            ENABLED = True
+            GUIDANCE_START = 1000
+            GUIDACE_END = 0
+            WAYPOINTS_MODE = True
+            WAYPOINTS_GUIDE_STRENGTH = 2000.0 # 强度加大，确保能看到直线效果
+            OBSTACLE_MODE = False
+            WAYPOINTS_INTERVAL = 20
+        conf = TempConf()
+        # ======================================================
+
+        if not conf.ENABLED:
+            return latents
+
+        # 2. 时间窗口检查
+        # t 可能是 Tensor，取值
+        t_val = t.item() if isinstance(t, torch.Tensor) else t
+        if not (conf.GUIDACE_END < t_val < conf.GUIDANCE_START):
+            return latents
+
+        # 3. 确定优化步数
+        if t_val > 500: num_opt_steps = 1
+        elif t_val > 100: num_opt_steps = 5
+        else: num_opt_steps = 10
+
+        # 4. 梯度下降循环
+        current_latents = latents.detach().requires_grad_(True)
+        
+        with torch.enable_grad():
+            for _ in range(num_opt_steps):
+                total_loss = 0.0
+                
+                # A. 路点引导 (Waypoints)
+                if conf.WAYPOINTS_MODE and ctx.get('target_pos') is not None:
+                    # 处理 timestep 的维度问题：如果是标量，扩展为 [Batch]
+                    # 如果已经是 [Batch]，则直接使用
+                    if t.dim() == 0:
+                        t_input = t.unsqueeze(0).repeat(ctx['bsz'])
+                    else:
+                        t_input = t
+
+                    loss_traj = self._compute_waypoint_loss(
+                        current_latents, 
+                        t_input, 
+                        ctx['target_pos'], 
+                        ctx['cond_embeddings'], 
+                        ctx['lengths'],
+                        interval = conf.WAYPOINTS_INTERVAL # 使用配置里的间隔
+                    )
+                    total_loss += loss_traj * conf.WAYPOINTS_GUIDE_STRENGTH
+
+                # 如果没有 Loss，直接退出
+                if isinstance(total_loss, float) and total_loss == 0.0:
+                    break
+
+                # C. 反向传播
+                grad = torch.autograd.grad(total_loss, current_latents)[0]
+
+                # D. 梯度裁剪
+                grad_norm = grad.norm()
+                max_norm = 0.5 # 防止平移的关键，如果不动可以稍微调大
+                if grad_norm > max_norm:
+                    grad = grad * (max_norm / (grad_norm + 1e-8))
+
+                # E. 更新 Latents
+                step_size = 1.0 
+                current_latents = current_latents - step_size * grad
+                
+        return current_latents.detach()
 
 
 # 
@@ -340,49 +677,124 @@ class MLD(BaseModel):
         return joints
     
     
+    # def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None):
+    #     # init latents
+    #     # 注意：encoder_hidden_states[0] 已经是翻倍后的 batch (2B)，如果开了 CFG
+    #     bsz = encoder_hidden_states[0].shape[0] # Batch dimension is 1 for content [S, B, D]
+    #     if self.do_classifier_free_guidance:
+    #         bsz = bsz // 2
+
+    #     latents = torch.randn(
+    #         (bsz, self.latent_dim[0], self.latent_dim[-1]),
+    #         device=encoder_hidden_states[0].device,
+    #         dtype=torch.float,
+    #     )  # torch.Size([1, 7, 256])
+
+    #     latents = latents * self.scheduler.init_noise_sigma
+    #     self.scheduler.set_timesteps(self.cfg.model.scheduler.num_inference_timesteps)
+    #     timesteps = self.scheduler.timesteps.to(encoder_hidden_states[0].device)
+        
+    #     extra_step_kwargs = {}
+    #     if "eta" in set(inspect.signature(self.scheduler.step).parameters.keys()):
+    #         extra_step_kwargs["eta"] = self.cfg.model.scheduler.eta
+        
+    #     # reverse
+    #     for i, t in enumerate(timesteps):
+    #         latent_model_input = (torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents)
+    #         lengths_reverse = (lengths * 2 if self.do_classifier_free_guidance else lengths)
+            
+    #         # [重要] Denoiser Forward
+    #         noise_pred = self.denoiser(
+    #             sample=latent_model_input,
+    #             timestep=t,
+    #             encoder_hidden_states=encoder_hidden_states,
+    #             lengths=lengths_reverse,
+    #         )[0]  # torch.Size([2, 7, 256])
+            
+    #         if self.do_classifier_free_guidance:
+    #             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+    #             noise_pred = noise_pred_uncond + scale * (noise_pred_text - noise_pred_uncond) # torch.Size([1, 7, 256])
+            
+    #         latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
+    #     latents = latents.permute(1, 0, 2) # torch.Size([7, 1, 256])
+    #     return latents
+    
+    # 包含直线生成的 Reverse 函数
     def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None):
-        # init latents
-        # 注意：encoder_hidden_states[0] 已经是翻倍后的 batch (2B)，如果开了 CFG
-        bsz = encoder_hidden_states[0].shape[0] # Batch dimension is 1 for content [S, B, D]
+        bsz = encoder_hidden_states[0].shape[0]
         if self.do_classifier_free_guidance:
             bsz = bsz // 2
+        device = encoder_hidden_states[0].device
+
+        # ================= [构造直线 Waypoint] =================
+        max_len = max(lengths) if lengths else 196
+        # 生成一个向 Z 轴 (前方) 走的直线
+        # [Batch, Length, 3]
+        target_global_pos = torch.zeros((bsz, max_len, 3), device=device)
+        speed = 0.05 
+        z_steps = torch.arange(max_len, device=device).float().unsqueeze(0) * speed
+        target_global_pos[..., 2] = z_steps.repeat(bsz, 1)
+        # =====================================================
 
         latents = torch.randn(
             (bsz, self.latent_dim[0], self.latent_dim[-1]),
-            device=encoder_hidden_states[0].device,
+            device=device,
             dtype=torch.float,
-        )  # torch.Size([1, 7, 256])
-
+        )
         latents = latents * self.scheduler.init_noise_sigma
         self.scheduler.set_timesteps(self.cfg.model.scheduler.num_inference_timesteps)
-        timesteps = self.scheduler.timesteps.to(encoder_hidden_states[0].device)
+        timesteps = self.scheduler.timesteps.to(device)
         
         extra_step_kwargs = {}
         if "eta" in set(inspect.signature(self.scheduler.step).parameters.keys()):
             extra_step_kwargs["eta"] = self.cfg.model.scheduler.eta
         
-        # reverse
+        # 准备 Guidance Context
+        # 剥离 Cond 部分传给 Guidance
+        cond_embs = []
+        for emb in encoder_hidden_states:
+            if self.do_classifier_free_guidance:
+                cond_embs.append(emb[bsz:]) 
+            else:
+                cond_embs.append(emb)
+
+        guidance_ctx = {
+            'target_pos': target_global_pos,
+            'cond_embeddings': cond_embs,
+            'lengths': lengths,
+            'bsz': bsz,
+            'obstacles': []
+        }
+
+        # 循环
         for i, t in enumerate(timesteps):
+            # 1. 调用引导 (使用你提供的逻辑)
+            # 注意：传入原始标量 t，函数内部会处理
+            latents = self._apply_spatial_guidance(latents, t, guidance_ctx)
+
+            # 2. 原生去噪
             latent_model_input = (torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents)
             lengths_reverse = (lengths * 2 if self.do_classifier_free_guidance else lengths)
             
-            # [重要] Denoiser Forward
+            # timestep 扩展
+            t_batch = torch.tensor([t] * latent_model_input.shape[0], device=device)
+
             noise_pred = self.denoiser(
                 sample=latent_model_input,
-                timestep=t,
+                timestep=t_batch,
                 encoder_hidden_states=encoder_hidden_states,
                 lengths=lengths_reverse,
-            )[0]  # torch.Size([2, 7, 256])
+            )[0]
             
             if self.do_classifier_free_guidance:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + scale * (noise_pred_text - noise_pred_uncond) # torch.Size([1, 7, 256])
+                noise_pred = noise_pred_uncond + scale * (noise_pred_text - noise_pred_uncond)
             
             latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
-        latents = latents.permute(1, 0, 2) # torch.Size([7, 1, 256])
+        latents = latents.permute(1, 0, 2)
         return latents
-
 
 
 

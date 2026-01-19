@@ -478,7 +478,8 @@ class MldDenoiserNew(nn.Module):
         # 输出 [B, D] -> squeeze 后 [B, D] (原版逻辑)
         trans_emb = self.trans_Encoder(trans_cond, lengths)
         trans_emb = trans_emb + time_emb.squeeze(0) # [B, D] + [B, D]
-        trans_emb = trans_emb.squeeze() # torch.Size([bs, 256])
+        # trans_emb = trans_emb.squeeze() # torch.Size([bs, 256])
+        trans_emb = trans_emb.squeeze(0) # 只压缩序列维，保留Batch维
 
         # B. Style 替代品
         # 原版是 style_emb + time_emb。我们没有 style_emb。
