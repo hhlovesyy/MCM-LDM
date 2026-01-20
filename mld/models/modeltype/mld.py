@@ -494,18 +494,22 @@ class MLD(BaseModel):
         计算并应用基于梯度的空间引导 (Waypoints & Obstacles)。
         """
         # ================= [临时 Config Mock] =================
-        # 既然你不想改 yaml，我们在这里手动定义配置，保证能跑
-        class TempConf:
-            ENABLED = True
-            GUIDANCE_START = 1000
-            GUIDACE_END = 0
-            WAYPOINTS_MODE = True
-            WAYPOINTS_GUIDE_STRENGTH = 2000.0 # 强度加大，确保能看到直线效果
-            OBSTACLE_MODE = False
-            WAYPOINTS_INTERVAL = 20
-        conf = TempConf()
+        # class TempConf:
+        #     ENABLED = True
+        #     GUIDANCE_START = 1000
+        #     GUIDACE_END = 0
+        #     WAYPOINTS_MODE = True
+        #     WAYPOINTS_GUIDE_STRENGTH = 2000.0 # 强度加大，确保能看到直线效果
+        #     OBSTACLE_MODE = False
+        #     WAYPOINTS_INTERVAL = 20
+        # conf = TempConf()
         # ======================================================
-
+        
+        # ================= [读取 YAML 配置] =================
+        # 直接指向 configs/config_physimos_probe.yaml 里新加的 TRAJECTORY.GUIDANCE
+        conf = self.cfg.TRAJECTORY.GUIDANCE
+        # ======================================================
+        
         if not conf.ENABLED:
             return latents
 
@@ -727,15 +731,39 @@ class MLD(BaseModel):
             bsz = bsz // 2
         device = encoder_hidden_states[0].device
 
-        # ================= [构造直线 Waypoint] =================
+        # ================= [构造 Waypoint (Config版)] =================
+        # 1. 读取配置
+        conf = self.cfg.TRAJECTORY.GUIDANCE
         max_len = max(lengths) if lengths else 196
-        # 生成一个向 Z 轴 (前方) 走的直线
-        # [Batch, Length, 3]
         target_global_pos = torch.zeros((bsz, max_len, 3), device=device)
-        speed = 0.05 
-        z_steps = torch.arange(max_len, device=device).float().unsqueeze(0) * speed
-        target_global_pos[..., 2] = z_steps.repeat(bsz, 1)
+        
+        # 2. 基础直线逻辑 (读取 conf.SPEED)
+        t_steps = torch.arange(max_len, device=device).float()
+        
+        # 判断形状 (目前先只写 straight，下个回答我们在 helper 函数里扩展)
+        if conf.SHAPE == 'straight':
+            target_z = t_steps * conf.SPEED
+            target_x = torch.zeros_like(t_steps)
+        else:
+            # 暂时 fallback 到直线，防止报错
+            target_z = t_steps * conf.SPEED
+            target_x = torch.zeros_like(t_steps)
+
+        # 3. 组合并扩展维度
+        # X轴在 index 0, Z轴在 index 2
+        target_global_pos[..., 0] = target_x.unsqueeze(0).repeat(bsz, 1)
+        target_global_pos[..., 2] = target_z.unsqueeze(0).repeat(bsz, 1)
         # =====================================================
+
+        # # ================= [构造直线 Waypoint] =================
+        # max_len = max(lengths) if lengths else 196
+        # # 生成一个向 Z 轴 (前方) 走的直线
+        # # [Batch, Length, 3]
+        # target_global_pos = torch.zeros((bsz, max_len, 3), device=device)
+        # speed = 0.05 
+        # z_steps = torch.arange(max_len, device=device).float().unsqueeze(0) * speed
+        # target_global_pos[..., 2] = z_steps.repeat(bsz, 1)
+        # # =====================================================
 
         latents = torch.randn(
             (bsz, self.latent_dim[0], self.latent_dim[-1]),

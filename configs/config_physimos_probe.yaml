@@ -136,3 +136,27 @@ DEMO:
   content_motion_dir: '/root/autodl-tmp/MyRepository/MCM-LDM/demo/content_motion'
   # PHYSICS_JSON: '/root/autodl-tmp/MyRepository/MCM-LDM/heavy.json'
   PHYSICS_JSON: '/root/autodl-tmp/MyRepository/MCM-LDM/heavy.json'
+
+
+
+
+#####################################
+# Trajectory Guidance Settings
+#####################################
+TRAJECTORY:
+  GUIDANCE:
+    ENABLED: True
+    GUIDANCE_START: 1000      # 开始引导的时间步 (t)
+    GUIDACE_END: 0            # 结束引导的时间步
+    WAYPOINTS_MODE: True      # 是否开启路径点引导
+    WAYPOINTS_GUIDE_STRENGTH: 2000.0 # 引导强度
+    WAYPOINTS_INTERVAL: 20    # 关键帧间隔
+    OBSTACLE_MODE: False      # 避障模式 (暂关)
+    OBSTACLE_GUIDE_STRENGTH: 100.0
+    MAX_NORM: 0.5             # 梯度裁剪阈值
+    
+    # 轨迹形状参数
+    SHAPE: 'straight'         # 可选: straight, left, right, s_curve
+    SPEED: 0.05               # 速度 (米/帧)
+    TURN_START: 60            # 转弯开始帧
+    CURVE_AMPLITUDE: 1.5      # 弯曲幅度
