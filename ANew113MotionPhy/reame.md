@@ -1,4 +1,5 @@
 
+cd /root/autodl-tmp/MyRepository/MCM-LDM
 跑推理：
 
 python demo_physics.py --cfg ./configs/config_physimos_probe.yaml --cfg_assets ./configs/assets.yaml --content_motion_dir demo/content_motion --scale 2.5

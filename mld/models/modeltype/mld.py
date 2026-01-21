@@ -93,6 +93,53 @@ def calculate_trajectory_correct(data):
     
     return pred_pos
 
+# ================= [新增：多形状轨迹生成器] =================
+def generate_target_trajectory(batch_size, length, device, conf):
+    """
+    根据配置生成不同形状的目标轨迹 (X, 0, Z)。
+    """
+    # 1. 读取参数
+    shape = conf.SHAPE.lower() # 确保不区分大小写
+    speed = conf.SPEED
+    turn_start = conf.TURN_START # 第几帧开始转弯
+    amp = conf.CURVE_AMPLITUDE   # 弯曲幅度/偏转力度
+
+    # 2. 基础 Z 轴推进 (所有人都要向前走)
+    # [0, 1, ..., L-1]
+    t_steps = torch.arange(length, device=device).float()
+    target_z = t_steps * speed
+    target_x = torch.zeros(length, device=device)
+
+    # 3. 根据形状修改 X 轴
+    if shape == 'straight':
+        pass # 保持 X=0
+
+    elif shape == 'left':
+        # 直走一段，然后向左偏移 (假设 +X 是左，具体看数据集定义，反了改符号即可)
+        # 逻辑：在 turn_start 之前为 0，之后线性偏转
+        mask = t_steps > turn_start
+        steps_from_turn = t_steps[mask] - turn_start
+        # 0.02 是一个经验系数，让 amp=1.0 时偏转比较自然
+        target_x[mask] = steps_from_turn * 0.02 * amp 
+
+    elif shape == 'right':
+        # 直走一段，然后向右偏移 (-X)
+        mask = t_steps > turn_start
+        steps_from_turn = t_steps[mask] - turn_start
+        target_x[mask] = -1.0 * steps_from_turn * 0.02 * amp
+
+    elif shape == 's_curve':
+        # S形曲线: x = A * sin(freq * t)
+        # 频率控制：让它在整个序列长度内大概扭 1.5 个周期
+        freq = (2 * torch.pi) / (length * 0.6) 
+        target_x = torch.sin(t_steps * freq) * (amp * 0.5)
+
+    # 4. 组合 [X, Y, Z] -> [Batch, Length, 3]
+    # Y 轴设为 0 (只引导水平面位置)
+    traj = torch.stack([target_x, torch.zeros_like(t_steps), target_z], dim=-1)
+    
+    return traj.unsqueeze(0).expand(batch_size, -1, -1)
+# ==========================================================
 
 class MLD(BaseModel):
     """
@@ -343,6 +390,156 @@ class MLD(BaseModel):
         # return grad
         return loss
 
+    # 以下这个是root会适应高度，但是其他部位不会
+    # def _compute_ceiling_loss(self, latents, t, ceiling_height, encoder_hidden_states, lengths):
+    #     # 1. 预测噪声 & 反推 x0 (跟 Waypoint 逻辑一样，直接复用)
+    #     noise_pred = self.denoiser(
+    #         sample=latents,
+    #         timestep=t,
+    #         encoder_hidden_states=encoder_hidden_states,
+    #         lengths=lengths,
+    #     )[0]
+
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+
+    #     # 2. 解码 (VAE Decode)
+    #     # [B, Seq, Dim] -> [Seq, B, Dim] 适配 VAE
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     # 3. 反归一化 (必须在真实物理尺度下计算)
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     pred_motion = pred_motion_norm * d_std + d_mean
+
+    #     # 4. 提取高度特征
+    #     # HumanML3D 特征定义: Index 3 是 Root Height (Y轴高度)
+    #     root_y = pred_motion[..., 3] 
+
+    #     # 5. 计算排斥 Loss (Repulsion)
+    #     # 公式: ReLU(Current - Limit)，只有超过 limit 才会有 loss
+    #     limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+    #     excess = torch.nn.functional.relu(root_y - limit_tensor)
+    #     loss = (excess ** 2).mean()
+
+    #     return loss
+
+    # def _compute_ceiling_loss(self, latents, t, ceiling_height, encoder_hidden_states, lengths):
+    #     # 1. 预测 & 反推 x0 (保持不变)
+    #     noise_pred = self.denoiser(
+    #         sample=latents,
+    #         timestep=t,
+    #         encoder_hidden_states=encoder_hidden_states,
+    #         lengths=lengths,
+    #     )[0]
+
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+
+    #     # 2. Decode & 反归一化 (保持不变)
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     # 反归一化
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     pred_motion = pred_motion_norm * d_std + d_mean
+
+    #     # ================= [修改开始：计算全身高度] =================
+    #     # HumanML3D 格式解析：
+    #     # Index 3: Root Height (骨盆高度)
+    #     # Index 4~66: 21个关节的局部位置 (相对于骨盆)
+        
+    #     # 1. 获取骨盆绝对高度 [B, L, 1]
+    #     root_y = pred_motion[..., 3:4] 
+
+    #     # 2. 获取所有子关节的局部位置
+    #     # pred_motion[..., 4:67] 是展平的 21 * 3 = 63 维
+    #     # 我们 reshape 成 [Batch, Length, 21, 3]
+    #     bs, seq_len = pred_motion.shape[:2]
+    #     local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
+        
+    #     # 3. 提取局部 Y 轴 (通常 Y 是 index 1)
+    #     # 注意：这里假设 HumanML3D 是 (x, y, z) 格式。如果不对，可能是 index 2
+    #     # HumanML3D 标准确实是 Y-up，所以取 [..., 1]
+    #     local_joints_y = local_joints[..., 1] # [B, L, 21]
+
+    #     # 4. 计算所有关节的绝对高度
+    #     # 绝对高度 = 骨盆高度 + 局部偏移
+    #     # 广播相加: [B, L, 1] + [B, L, 21] -> [B, L, 21]
+    #     abs_joints_y = root_y + local_joints_y
+        
+    #     # 把骨盆自己也拼进去，组成完整的 22 个关节高度
+    #     all_joints_y = torch.cat([root_y, abs_joints_y], dim=2) # [B, L, 22]
+
+    #     # 5. 计算排斥 Loss
+    #     # 只要有任何一个关节超过 ceiling_height，就产生 Loss
+    #     limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+        
+    #     # 核心逻辑：超过的部分 (excess) 会产生梯度，推着关节往下走
+    #     excess = torch.nn.functional.relu(all_joints_y - limit_tensor)
+        
+    #     # 对所有超出的关节求平方和
+    #     loss = (excess ** 2).mean()
+    #     # ================= [修改结束] =================
+
+    #     return loss
+    def _compute_ceiling_loss(self, latents, t, ceiling_height, encoder_hidden_states, lengths):
+        # 1. 预测 & 反推 x0 (保持不变)
+        noise_pred = self.denoiser(
+            sample=latents,
+            timestep=t,
+            encoder_hidden_states=encoder_hidden_states,
+            lengths=lengths,
+        )[0]
+
+        alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+        beta_prod_t = 1 - alpha_prod_t
+        pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+
+        # 2. Decode (保持不变)
+        pred_z0_input = pred_z0.permute(1, 0, 2)
+        pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+        # 3. 反归一化
+        d_mean = self.mean.to(latents.device)
+        d_std = self.std.to(latents.device)
+        pred_motion = pred_motion_norm * d_std + d_mean
+
+        # 4. 计算全身高度 (保持不变)
+        root_y = pred_motion[..., 3:4] 
+        bs, seq_len = pred_motion.shape[:2]
+        local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
+        local_joints_y = local_joints[..., 1]
+        
+        # 绝对高度 [B, L, 22]
+        abs_joints_y = root_y + local_joints_y
+        
+        limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+        
+        # ================= [核心修改：混合惩罚策略] =================
+        # 1. 计算每个关节超出的部分
+        excess = torch.nn.functional.relu(abs_joints_y - limit_tensor)
+        
+        # 2. 基础惩罚：所有关节的平均超高 (防止整体太高)
+        loss_mean = (excess ** 2).mean()
+        
+        # 3. 重点惩罚：找出每一帧里最高的那个关节 (通常是头)，重罚它！
+        # max(dim=2) 返回 [B, L]
+        max_excess = excess.max(dim=2)[0]
+        loss_max = (max_excess ** 2).mean()
+        
+        # 4. 组合 Loss
+        # 这里的 5.0 是权重，意思是：依然要压低整体，但我更在意最高点(头)是不是降下来了
+        # 强迫模型去处理"最高点"，通常会导致弯腰
+        loss = loss_mean + 3.0 * loss_max 
+        # ==========================================================
+
+        return loss
+
 
     # def _apply_spatial_guidance(self, latents, t, ctx):
     #     class TempConf:
@@ -550,6 +747,28 @@ class MLD(BaseModel):
                     )
                     total_loss += loss_traj * conf.WAYPOINTS_GUIDE_STRENGTH
 
+                # ================= [插入在这里] =================
+                # B. 天花板引导 (Low Ceiling)
+                # 读取配置: 如果没配置，默认 False
+                if conf.get('CEILING_MODE', False):
+                    # 处理 t 维度 (同上)
+                    if t.dim() == 0: t_input = t.unsqueeze(0).repeat(ctx['bsz'])
+                    else: t_input = t
+                    
+                    # 获取参数
+                    c_height = conf.get('CEILING_HEIGHT', 0.9)   # 限制高度
+                    c_strength = conf.get('CEILING_STRENGTH', 5000.0) # 惩罚力度
+
+                    loss_ceil = self._compute_ceiling_loss(
+                        current_latents, 
+                        t_input, 
+                        c_height,
+                        ctx['cond_embeddings'], 
+                        ctx['lengths']
+                    )
+                    total_loss += loss_ceil * c_strength
+                # ===============================================
+                
                 # 如果没有 Loss，直接退出
                 if isinstance(total_loss, float) and total_loss == 0.0:
                     break
@@ -726,34 +945,59 @@ class MLD(BaseModel):
     
     # 包含直线生成的 Reverse 函数
     def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None):
+        
+        # ================= [物理开关逻辑] =================
+        # 默认开启 (True)，如果在 yaml 里写了 False 则关闭
+        # 注意：这里我们直接修改 encoder_hidden_states 这个列表
+        if not self.cfg.get('ENABLE_PHYSICS', True):
+            # encoder_hidden_states 结构通常是: [Content, Physics, Trajectory]
+            # Index 1 是 Physics Embedding
+            if len(encoder_hidden_states) > 1:
+                # 创建全 0 的 Tensor，形状和设备与原 Physics Emb 一致
+                zero_phys = torch.zeros_like(encoder_hidden_states[1])
+                encoder_hidden_states[1] = zero_phys
+                
+                # 打印一次提示，防止你忘了自己关了物理
+                print(">>> [WARNING] Physics effect is MANUALLY DISABLED in inference!")
+        # =================================================
+        
         bsz = encoder_hidden_states[0].shape[0]
         if self.do_classifier_free_guidance:
             bsz = bsz // 2
         device = encoder_hidden_states[0].device
 
-        # ================= [构造 Waypoint (Config版)] =================
-        # 1. 读取配置
+        # # ================= [构造 Waypoint (Config版)] =================
+        # # 1. 读取配置
+        # conf = self.cfg.TRAJECTORY.GUIDANCE
+        # max_len = max(lengths) if lengths else 196
+        # target_global_pos = torch.zeros((bsz, max_len, 3), device=device)
+        
+        # # 2. 基础直线逻辑 (读取 conf.SPEED)
+        # t_steps = torch.arange(max_len, device=device).float()
+        
+        # # 判断形状 (目前先只写 straight，下个回答我们在 helper 函数里扩展)
+        # if conf.SHAPE == 'straight':
+        #     target_z = t_steps * conf.SPEED
+        #     target_x = torch.zeros_like(t_steps)
+        # else:
+        #     # 暂时 fallback 到直线，防止报错
+        #     target_z = t_steps * conf.SPEED
+        #     target_x = torch.zeros_like(t_steps)
+
+        # # 3. 组合并扩展维度
+        # # X轴在 index 0, Z轴在 index 2
+        # target_global_pos[..., 0] = target_x.unsqueeze(0).repeat(bsz, 1)
+        # target_global_pos[..., 2] = target_z.unsqueeze(0).repeat(bsz, 1)
+        # # =====================================================
+        
+        
+        # ================= [调用新函数生成轨迹] =================
         conf = self.cfg.TRAJECTORY.GUIDANCE
         max_len = max(lengths) if lengths else 196
-        target_global_pos = torch.zeros((bsz, max_len, 3), device=device)
         
-        # 2. 基础直线逻辑 (读取 conf.SPEED)
-        t_steps = torch.arange(max_len, device=device).float()
-        
-        # 判断形状 (目前先只写 straight，下个回答我们在 helper 函数里扩展)
-        if conf.SHAPE == 'straight':
-            target_z = t_steps * conf.SPEED
-            target_x = torch.zeros_like(t_steps)
-        else:
-            # 暂时 fallback 到直线，防止报错
-            target_z = t_steps * conf.SPEED
-            target_x = torch.zeros_like(t_steps)
-
-        # 3. 组合并扩展维度
-        # X轴在 index 0, Z轴在 index 2
-        target_global_pos[..., 0] = target_x.unsqueeze(0).repeat(bsz, 1)
-        target_global_pos[..., 2] = target_z.unsqueeze(0).repeat(bsz, 1)
-        # =====================================================
+        # 直接把配置 conf 传进去，自动判断形状
+        target_global_pos = generate_target_trajectory(bsz, max_len, device, conf)
+        # ======================================================
 
         # # ================= [构造直线 Waypoint] =================
         # max_len = max(lengths) if lengths else 196

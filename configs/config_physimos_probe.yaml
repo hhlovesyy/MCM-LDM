@@ -138,17 +138,21 @@ DEMO:
   PHYSICS_JSON: '/root/autodl-tmp/MyRepository/MCM-LDM/heavy.json'
 
 
-
+#####################################
+# Physics Global Switch
+#####################################
+# 新增这个字段，设置为 False 即可关闭物理影响
+ENABLE_PHYSICS: False
 
 #####################################
 # Trajectory Guidance Settings
 #####################################
 TRAJECTORY:
   GUIDANCE:
-    ENABLED: True
+    ENABLED: True   
     GUIDANCE_START: 1000      # 开始引导的时间步 (t)
     GUIDACE_END: 0            # 结束引导的时间步
-    WAYPOINTS_MODE: True      # 是否开启路径点引导
+    WAYPOINTS_MODE: False      # 是否开启路径点引导
     WAYPOINTS_GUIDE_STRENGTH: 2000.0 # 引导强度
     WAYPOINTS_INTERVAL: 20    # 关键帧间隔
     OBSTACLE_MODE: False      # 避障模式 (暂关)
@@ -156,7 +160,14 @@ TRAJECTORY:
     MAX_NORM: 0.5             # 梯度裁剪阈值
     
     # 轨迹形状参数
-    SHAPE: 'straight'         # 可选: straight, left, right, s_curve
+    SHAPE: 'left'         # 可选: straight, left, right, s_curve
     SPEED: 0.05               # 速度 (米/帧)
-    TURN_START: 60            # 转弯开始帧
-    CURVE_AMPLITUDE: 1.5      # 弯曲幅度
+    TURN_START: 80            # 转弯开始帧
+    CURVE_AMPLITUDE: 2.0      # 弯曲幅度
+
+
+    # === 新增天花板配置 ===
+    CEILING_MODE: True        # 开关
+    CEILING_HEIGHT: 1.5    # 限制高度 
+                              # 注意：这是Root(骨盆)高度，不是头顶。假设头比骨盆高0.5米，限高1.4米意味着这里填0.9
+    CEILING_STRENGTH: 5000.0  # 惩罚力度
