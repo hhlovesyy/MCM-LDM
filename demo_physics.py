@@ -17,6 +17,10 @@ import seaborn as sns
 
 import shutil   # <--- 【新增】用于复制文件的工具库
 
+from visual_side_view import render_side_view # <--- 新增这行
+
+
+
 # [新增] 硬编码场景列表，必须与训练时的 Dataset 一致
 SCENE_CATEGORIES = [
     "Front", "Back", "Left", "Right", 
@@ -504,6 +508,33 @@ def main():
             print(f"  -> Video saved: {mp4path}")
         except Exception as e:
             print(f"  -> Video render failed (Skipping): {e}")
+            
+        # === [新增] 侧视图 + 天花板可视化 ===
+        # 1. 读取开关
+        vis_cfg = cfg.get("VISUALIZATION", {})
+        do_side_view = vis_cfg.get("SIDE_VIEW_EXPORT", False)
+        
+        if do_side_view:
+            # 2. 读取天花板高度
+            # 注意：要从 TRAJECTORY 配置里读，而不是从 json 文件读，因为引导用的是配置值
+            traj_cfg = cfg.get("TRAJECTORY", {}).get("GUIDANCE", {})
+            
+            # 只有当开启了天花板引导，且有高度值时，才画线
+            ceil_h = None
+            if traj_cfg.get("CEILING_MODE", False):
+                ceil_h = traj_cfg.get("CEILING_HEIGHT", None)
+            
+            # 3. 定义保存路径 (例如 jump_side.mp4)
+            side_mp4_path = output_dir / f"{content_name}_side.mp4"
+            
+            # 4. 调用独立脚本渲染
+            # motion_output 是 numpy array
+            render_side_view(
+                motion_data=motion_output, 
+                save_path=str(side_mp4_path), 
+                ceiling_height=ceil_h
+            )
+        # ========================================        
 
     print(f"\nDone. Processed {count} files.")
 
