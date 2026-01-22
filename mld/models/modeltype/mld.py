@@ -487,57 +487,270 @@ class MLD(BaseModel):
     #     # ================= [修改结束] =================
 
     #     return loss
-    def _compute_ceiling_loss(self, latents, t, ceiling_height, encoder_hidden_states, lengths):
-        # 1. 预测 & 反推 x0 (保持不变)
-        noise_pred = self.denoiser(
-            sample=latents,
-            timestep=t,
-            encoder_hidden_states=encoder_hidden_states,
-            lengths=lengths,
-        )[0]
+    # def _compute_ceiling_loss(self, latents, t, ceiling_height, encoder_hidden_states, lengths):
+    #     # 1. 预测 & 反推 x0 (保持不变)
+    #     noise_pred = self.denoiser(
+    #         sample=latents,
+    #         timestep=t,
+    #         encoder_hidden_states=encoder_hidden_states,
+    #         lengths=lengths,
+    #     )[0]
 
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+
+    #     # 2. Decode (保持不变)
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     # 3. 反归一化
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     pred_motion = pred_motion_norm * d_std + d_mean
+
+    #     # 4. 计算全身高度 (保持不变)
+    #     root_y = pred_motion[..., 3:4] 
+    #     bs, seq_len = pred_motion.shape[:2]
+    #     local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
+    #     local_joints_y = local_joints[..., 1]
+        
+    #     # 绝对高度 [B, L, 22]
+    #     abs_joints_y = root_y + local_joints_y
+        
+    #     limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+        
+    #     # ================= [核心修改：混合惩罚策略] =================
+    #     # 1. 计算每个关节超出的部分
+    #     excess = torch.nn.functional.relu(abs_joints_y - limit_tensor)
+        
+    #     # 2. 基础惩罚：所有关节的平均超高 (防止整体太高)
+    #     loss_mean = (excess ** 2).mean()
+        
+    #     # 3. 重点惩罚：找出每一帧里最高的那个关节 (通常是头)，重罚它！
+    #     # max(dim=2) 返回 [B, L]
+    #     max_excess = excess.max(dim=2)[0]
+    #     loss_max = (max_excess ** 2).mean()
+        
+    #     # 4. 组合 Loss
+    #     # 这里的 5.0 是权重，意思是：依然要压低整体，但我更在意最高点(头)是不是降下来了
+    #     # 强迫模型去处理"最高点"，通常会导致弯腰
+    #     loss = loss_mean + 3.0 * loss_max 
+    #     # ==========================================================
+
+    #     return loss
+    
+    # def _compute_ceiling_loss(self, latents, t, ceiling_height, encoder_hidden_states, lengths):
+    #     # 1. 预测 & 反推 x0
+    #     noise_pred = self.denoiser(
+    #         sample=latents,
+    #         timestep=t,
+    #         encoder_hidden_states=encoder_hidden_states,
+    #         lengths=lengths,
+    #     )[0]
+
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+
+    #     # 2. Decode
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     # 3. 反归一化
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     pred_motion = pred_motion_norm * d_std + d_mean
+
+    #     # 4. 计算全身绝对高度
+    #     # HumanML3D: Index 3 是 Root Height, 4~66 是局部关节
+    #     root_y = pred_motion[..., 3:4] 
+    #     bs, seq_len = pred_motion.shape[:2]
+    #     local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
+    #     local_joints_y = local_joints[..., 1]
+        
+    #     # 绝对高度 [B, L, 22] (Root + 21 Joints)
+    #     all_joints_y = torch.cat([root_y, root_y + local_joints_y], dim=2) 
+
+    #     limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+
+    #     # ================= [DEBUG 探针] =================
+    #     # 找出目前所有关节里的最高值
+    #     current_max_height = all_joints_y.max()
+        
+    #     # 如果最高值超过了限制，打印详细信息
+    #     if current_max_height > limit_tensor:
+    #         # 找到是哪个 Batch、哪一帧、哪个关节超标了
+    #         # 展平寻找 argmax
+    #         flat_idx = torch.argmax(all_joints_y)
+    #         # 反算索引
+    #         joint_idx = flat_idx % 22
+    #         frame_idx = (flat_idx // 22) % seq_len
+    #         batch_idx = (flat_idx // 22) // seq_len
+            
+    #         # HumanML3D 关节名称映射 (大概率是这个顺序)
+    #         joint_names = [
+    #             "Root", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee", "Spine2", 
+    #             "L_Ankle", "R_Ankle", "Spine3", "L_Foot", "R_Foot", "Neck", 
+    #             "L_Collar", "R_Collar", "Head", "L_Shoulder", "R_Shoulder", 
+    #             "L_Elbow", "R_Elbow", "L_Wrist", "R_Wrist"
+    #         ]
+    #         j_name = joint_names[joint_idx] if joint_idx < 22 else str(joint_idx.item())
+
+    #         print(f"\n[DEBUG] 撞头警报! Limit={ceiling_height}")
+    #         print(f"  -> Max Height Detected: {current_max_height.item():.4f} m")
+    #         print(f"  -> Culprit: Batch={batch_idx}, Frame={frame_idx}, Joint={j_name} ({joint_idx})")
+    #         print(f"  -> Time Step (t): {t[0].item()}")
+    #     # ===============================================
+
+    #     # ================= [回归纯粹的避障逻辑] =================
+    #     # 只要不超过 limit，Loss 就是 0。
+    #     # 这样老人走路(1.5m)在 3.0m 天花板下，Loss=0，完全保持原样。
+        
+    #     # 计算超出部分
+    #     excess = torch.nn.functional.relu(all_joints_y - limit_tensor)
+        
+    #     # 策略：
+    #     # 对最高点（通常是头）进行加权，确保头一定低下去
+    #     # 对整体进行平均，防止其他部位乱翘
+    #     loss_mean = (excess ** 2).mean()
+    #     loss_max = (excess.max(dim=2)[0] ** 2).mean() # [B, L] -> scalar
+        
+    #     loss = loss_mean + 3.0 * loss_max 
+    #     print("Ceiling Loss Components: Mean={:.8f}, Max={:.8f}".format(loss_mean.item(), loss_max.item()))
+    #     # ======================================================
+    #     # print 包含小数点后尽量多的位数
+    #     # print("Ceiling Loss: {:.8f}".format(loss.item()))
+    #     # print("Ceiling Loss:", loss.item())
+    #     return loss
+    
+    # def _compute_ceiling_loss(self, latents, t, ceiling_height, encoder_hidden_states, lengths):
+    #     # 1. 预测 & 反推 x0
+    #     noise_pred = self.denoiser(
+    #         sample=latents,
+    #         timestep=t,
+    #         encoder_hidden_states=encoder_hidden_states,
+    #         lengths=lengths,
+    #     )[0]
+
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+
+    #     # 2. Decode
+    #     # [B, 7, 256] -> [7, B, 256]
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     # 3. 反归一化
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     pred_motion = pred_motion_norm * d_std + d_mean
+
+    #     # ================= [修复：只使用可靠的 Root Height] =================
+    #     # 放弃使用 local_joints (Index 4-66)，因为它们可能与旋转数据不一致(Ghosting)
+        
+    #     # 获取骨盆绝对高度 (Index 3)
+    #     # shape: [Batch, Length, 1]
+    #     root_y = pred_motion[..., 3:4] 
+        
+    #     # 定义一个“虚拟头顶偏移量” (Heuristic Spine Length)
+    #     # 正常成年人 骨盆到头顶 大约 0.6m - 0.7m
+    #     # 我们用 0.6m 作为安全缓冲
+    #     spine_offset = 0.6
+        
+    #     # 估算头顶高度
+    #     estimated_head_height = root_y + spine_offset
+        
+    #     limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+
+    #     # DEBUG 探针 (现在应该会显示正常的数值了)
+    #     current_max = estimated_head_height.max()
+        
+    #     # print(f"====[Debug] Root={root_y.max().item():.2f} + 0.6 -> Head={current_max.item():.2f} > Limit={ceiling_height}")
+    #     # 只有当不仅超过limit，且超过一定幅度(防止浮点抖动)时才打印
+    #     if current_max > limit_tensor + 0.05 and t[0].item() < 200: 
+    #          # 为了不刷屏，只在最后阶段或偶尔打印
+    #          pass 
+    #          print(f"*****[Debug] Root={root_y.max().item():.2f} + 0.6 -> Head={current_max.item():.2f} > Limit={ceiling_height}")
+
+    #     # 计算 Loss: 只要虚拟头顶超过天花板，就惩罚
+    #     excess = torch.nn.functional.relu(estimated_head_height - limit_tensor)
+        
+    #     # 使用平方惩罚，对严重越界更敏感
+    #     loss = (excess ** 2).mean()
+    #     # ================================================================
+
+    #     return loss
+    def _compute_ceiling_loss(self, latents, t, ceiling_height, safety_margin, encoder_hidden_states, lengths):
+        # 1. 预测 & 反推 x0 (保持不变)
+        noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
         alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
         beta_prod_t = 1 - alpha_prod_t
         pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
-
-        # 2. Decode (保持不变)
+        
+        # 2. Decode & 反归一化
         pred_z0_input = pred_z0.permute(1, 0, 2)
         pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
         
-        # 3. 反归一化
         d_mean = self.mean.to(latents.device)
         d_std = self.std.to(latents.device)
         pred_motion = pred_motion_norm * d_std + d_mean
 
-        # 4. 计算全身高度 (保持不变)
-        root_y = pred_motion[..., 3:4] 
+        # 3. 组装全身高度
+        root_y = pred_motion[..., 3:4] # [B, L, 1]
         bs, seq_len = pred_motion.shape[:2]
+        
         local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
-        local_joints_y = local_joints[..., 1]
+        local_joints_y = local_joints[..., 1] # [B, L, 21]
         
-        # 绝对高度 [B, L, 22]
-        abs_joints_y = root_y + local_joints_y
+        # 绝对高度 = Root + Local
+        joints_y_abs = root_y + local_joints_y
         
-        limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+        # 拼合 Root 和其他关节 -> [B, L, 22]
+        all_joints_y = torch.cat([root_y, joints_y_abs], dim=2)
+
+        # ================= [核心修正：全局地面校准] =================
+        # 你的逻辑是对的：要找所有帧、所有关节里的最低点作为地面参考
         
-        # ================= [核心修改：混合惩罚策略] =================
-        # 1. 计算每个关节超出的部分
-        excess = torch.nn.functional.relu(abs_joints_y - limit_tensor)
+        # 1. 先找每一帧的最低点 [B, L]
+        frame_min_y, _ = all_joints_y.min(dim=2)
         
-        # 2. 基础惩罚：所有关节的平均超高 (防止整体太高)
+        # 2. 再找整个序列的最低点 [B]
+        # 这就是这个动作的"地面水平面"
+        sequence_min_y, _ = frame_min_y.min(dim=1)
+        
+        # 3. 广播维度以匹配 [B, L, 22]
+        floor_level = sequence_min_y.view(bs, 1, 1)
+        
+        # 4. 校准：所有高度减去地面高度
+        # 这样如果 Frame 10 跳起来了，它的高度 = (AbsHeight - Floor) 就会包含跳跃高度
+        grounded_joints_y = all_joints_y - floor_level
+        
+        # ================= [计算 Loss] =================
+        # limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+        
+        
+        # ================= [修改点：应用安全距离] =================
+        # 实际限制 = 物理天花板高度 - 安全缓冲
+        # 比如天花板 1.5m，缓冲 0.1m -> 关节不能超过 1.4m
+        effective_limit = ceiling_height - safety_margin
+        
+        limit_tensor = torch.tensor(effective_limit, device=latents.device)
+        
+        
+        # 计算超出部分
+        excess = torch.nn.functional.relu(grounded_joints_y - limit_tensor)
+        
+        # 策略：
+        # 最高点惩罚 (Loss Max): 只要有任何一帧、任何一个关节撞了，就重罚
+        # 整体惩罚 (Loss Mean): 压低整体趋势
+        loss_max = (excess.max(dim=2)[0].max(dim=1)[0] ** 2).mean() # [B] -> scalar
         loss_mean = (excess ** 2).mean()
         
-        # 3. 重点惩罚：找出每一帧里最高的那个关节 (通常是头)，重罚它！
-        # max(dim=2) 返回 [B, L]
-        max_excess = excess.max(dim=2)[0]
-        loss_max = (max_excess ** 2).mean()
+        # 组合 (给最高点更高权重，逼它把头缩回去)
+        loss = loss_mean + 4.0 * loss_max
         
-        # 4. 组合 Loss
-        # 这里的 5.0 是权重，意思是：依然要压低整体，但我更在意最高点(头)是不是降下来了
-        # 强迫模型去处理"最高点"，通常会导致弯腰
-        loss = loss_mean + 3.0 * loss_max 
-        # ==========================================================
-
         return loss
 
 
@@ -707,7 +920,7 @@ class MLD(BaseModel):
         conf = self.cfg.TRAJECTORY.GUIDANCE
         # ======================================================
         
-        if not conf.ENABLED:
+        if not conf.ENABLED:    
             return latents
 
         # 2. 时间窗口检查
@@ -756,13 +969,17 @@ class MLD(BaseModel):
                     else: t_input = t
                     
                     # 获取参数
-                    c_height = conf.get('CEILING_HEIGHT', 0.9)   # 限制高度
-                    c_strength = conf.get('CEILING_STRENGTH', 5000.0) # 惩罚力度
+                    c_height = conf.get('CEILING_HEIGHT', 1.4)
+                    c_strength = conf.get('CEILING_STRENGTH', 1000.0)
+                    
+                    # 读取安全距离，默认为 0.1m
+                    c_margin = conf.get('SAFETY_MARGIN', 0.1)
 
                     loss_ceil = self._compute_ceiling_loss(
                         current_latents, 
                         t_input, 
                         c_height,
+                        c_margin, # <--- 传入这个新参数
                         ctx['cond_embeddings'], 
                         ctx['lengths']
                     )
