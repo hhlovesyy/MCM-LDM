@@ -167,8 +167,8 @@ TRAJECTORY:
 
 
     # === 新增天花板配置 ===
-    CEILING_MODE: True        # 开关
-    CEILING_HEIGHT: 1.5    # 限制高度 
+    CEILING_MODE: False        # 开关
+    CEILING_HEIGHT: 2.0    # 限制高度 
                               # 注意：这是Root(骨盆)高度，不是头顶。假设头比骨盆高0.5米，限高1.4米意味着这里填0.9
     CEILING_STRENGTH: 5000.0  # 惩罚力度
     
@@ -176,9 +176,17 @@ TRAJECTORY:
     # 建议 0.10 ~ 0.15 米 (10cm - 15cm)
     SAFETY_MARGIN: 0.10
 
+    # === [新增] 狭窄缝隙配置 ===
+    GAP_MODE: True
+    GAP_WIDTH: 0.2           # 缝隙宽度 (米)。正常人肩宽约 0.45-0.5m。
+                              # 设为 0.5 意味着左右只有 0.25 的空间，非常极限，必须夹着手走。
+    GAP_STRENGTH: 2000.0      # 惩罚力度
+    SAFETY_MARGIN_GAP: 0.00
 
 #####################################
 # Visualization Settings
 #####################################
 VISUALIZATION:
   SIDE_VIEW_EXPORT: True  # 开关：是否生成侧视图调试视频
+  TOP_VIEW_EXPORT: True   # 开关：是否生成顶视图调试视频
+  FRONT_VIEW_EXPORT: True # 开关：是否生成前视图调试视频

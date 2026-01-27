@@ -18,8 +18,8 @@ import seaborn as sns
 import shutil   # <--- 【新增】用于复制文件的工具库
 
 from visual_side_view import render_side_view # <--- 新增这行
-
-
+from visual_top_view import render_top_view
+from visual_front_view import render_front_view
 
 # [新增] 硬编码场景列表，必须与训练时的 Dataset 一致
 SCENE_CATEGORIES = [
@@ -535,6 +535,34 @@ def main():
                 ceiling_height=ceil_h
             )
         # ========================================        
+        
+        do_top_view = vis_cfg.get("TOP_VIEW_EXPORT", False)
+        # === [新增] 俯视图可视化 ===
+        if do_top_view: # 复用开关
+            traj_cfg = cfg.get("TRAJECTORY", {}).get("GUIDANCE", {})
+            gap_w = None
+            if traj_cfg.get("GAP_MODE", False):
+                gap_w = traj_cfg.get("GAP_WIDTH", None)
+            
+            top_mp4_path = output_dir / f"{content_name}_top.mp4"
+            
+            render_top_view(
+                motion_data=motion_output, # 注意检查是否需要转置
+                save_path=str(top_mp4_path),
+                gap_width=gap_w
+            )
+            
+        # === [新增] 正视图 (Front View) 可视化 ===
+        do_front_view = vis_cfg.get("FRONT_VIEW_EXPORT", False)
+        if do_front_view: 
+            # 复用 gap_w 变量
+            front_mp4_path = output_dir / f"{content_name}_front.mp4"
+            
+            render_front_view(
+                motion_data=motion_output,
+                save_path=str(front_mp4_path),
+                gap_width=gap_w
+            )
 
     print(f"\nDone. Processed {count} files.")
 
