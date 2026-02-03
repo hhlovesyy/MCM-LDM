@@ -143,6 +143,7 @@ DEMO:
 #####################################
 # 新增这个字段，设置为 False 即可关闭物理影响
 ENABLE_PHYSICS: False
+DRAW_ATTN_MAP: False
 
 #####################################
 # Trajectory Guidance Settings
@@ -152,16 +153,16 @@ TRAJECTORY:
     ENABLED: True   
     GUIDANCE_START: 1000      # 开始引导的时间步 (t)
     GUIDACE_END: 0            # 结束引导的时间步
-    WAYPOINTS_MODE: False      # 是否开启路径点引导
-    WAYPOINTS_GUIDE_STRENGTH: 2000.0 # 引导强度
-    WAYPOINTS_INTERVAL: 20    # 关键帧间隔
+    WAYPOINTS_MODE: True         # 是否开启路径点引导
+    WAYPOINTS_GUIDE_STRENGTH: 20000.0 # 引导强度
+    WAYPOINTS_INTERVAL: 8    # 关键帧间隔
     OBSTACLE_MODE: False      # 避障模式 (暂关)
     OBSTACLE_GUIDE_STRENGTH: 100.0
     MAX_NORM: 0.5             # 梯度裁剪阈值
     
     # 轨迹形状参数
-    SHAPE: 'left'         # 可选: straight, left, right, s_curve
-    SPEED: 0.05               # 速度 (米/帧)
+    SHAPE: 'straight'         # 可选: straight, left, right, s_curve, 'straight_then_left', 'straight_then_right','backward' ,backward_left
+    SPEED: 0.04               # 速度 (米/帧)
     TURN_START: 80            # 转弯开始帧
     CURVE_AMPLITUDE: 2.0      # 弯曲幅度
 
@@ -177,16 +178,24 @@ TRAJECTORY:
     SAFETY_MARGIN: 0.10
 
     # === [新增] 狭窄缝隙配置 ===
-    GAP_MODE: True
-    GAP_WIDTH: 0.2           # 缝隙宽度 (米)。正常人肩宽约 0.45-0.5m。
+    GAP_MODE:  False    
+    GAP_WIDTH: 0.5          # 缝隙宽度 (米)。正常人肩宽约 0.45-0.5m。
                               # 设为 0.5 意味着左右只有 0.25 的空间，非常极限，必须夹着手走。
-    GAP_STRENGTH: 2000.0      # 惩罚力度
+    GAP_STRENGTH: 40000.0      # 惩罚力度
     SAFETY_MARGIN_GAP: 0.00
+
+    # === [新增] 侧身引导 ===
+    SIDE_STEP_MODE: True 
+    # 当 GAP_WIDTH 小于此阈值时，强制开启侧身引导
+    SIDE_STEP_THRESHOLD: 2.5  # 暂时让它无论如何都开启）
+    SIDE_STEP_STRENGTH: 20000.0 # 旋转惩罚力度
+
+    
 
 #####################################
 # Visualization Settings
 #####################################
 VISUALIZATION:
-  SIDE_VIEW_EXPORT: True  # 开关：是否生成侧视图调试视频
+  # SIDE_VIEW_EXPORT: True  # 开关：是否生成侧视图调试视频
   TOP_VIEW_EXPORT: True   # 开关：是否生成顶视图调试视频
-  FRONT_VIEW_EXPORT: True # 开关：是否生成前视图调试视频
+  # FRONT_VIEW_EXPORT: True # 开关：是否生成前视图调试视频

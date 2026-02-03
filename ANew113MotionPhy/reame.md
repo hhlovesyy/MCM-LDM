@@ -8,6 +8,18 @@ python demo_physics.py --cfg ./configs/config_physimos_probe.yaml --cfg_assets .
 python -m train --cfg configs/config_physimos_probe.yaml --cfg_assets configs/assets.yaml
 # batch_size是16，在yaml中有记录
 
+
+### 关键的文件
+配置文件
+/root/autodl-tmp/MyRepository/MCM-LDM/configs/config_physimos_probe.yaml
+主要更改文件两个：
+/root/autodl-tmp/MyRepository/MCM-LDM/mld/models/modeltype/mld.py
+/root/autodl-tmp/MyRepository/MCM-LDM/mld/models/architectures/mld_denoiser.py
+入口
+/root/autodl-tmp/MyRepository/MCM-LDM/demo_physics.py
+
+
+
 数据集分布，
 (base) root@autodl-container-1421458302-b0bada58:~/autodl-tmp/MyRepository/MCM-LDM/ANew113MotionPhy/Tool# python check_dataset_distribution.py 
 正在读取数据目录: /root/autodl-tmp/MyRepository/MCM-LDM/datasets/PhysicsDataset/json_files ...

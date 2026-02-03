@@ -495,10 +495,12 @@ def main():
         current_scene_name = "Varsapura"
 
         # 如果 attn_weights 是 None，就跳过画图
-        if attn_weights is not None:
-            plot_attention(final_attn, current_scene_name, str(attpath))
-        else:
-            print("Note: MLP encoder does not produce attention maps.")
+        draw_attn_map = cfg.get("DRAW_ATTN_MAP", False)
+        if draw_attn_map:
+            if attn_weights is not None:
+                plot_attention(final_attn, current_scene_name, str(attpath))
+            else:
+                print("Note: MLP encoder does not produce attention maps.")
 
         count += 1
         

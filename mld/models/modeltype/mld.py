@@ -114,16 +114,26 @@ def generate_target_trajectory(batch_size, length, device, conf):
     if shape == 'straight':
         pass # 保持 X=0
 
+    # === [修改点开始] ===
+    
+    # 新增：纯向左 (从一开始就往左偏，配合 Z 轴就是走斜线)
     elif shape == 'left':
-        # 直走一段，然后向左偏移 (假设 +X 是左，具体看数据集定义，反了改符号即可)
-        # 逻辑：在 turn_start 之前为 0，之后线性偏转
+        # 简单的线性关系：X 随着时间变大
+        # 系数 0.5 可以控制偏的角度，amp 可以进一步放大
+        target_x = t_steps * speed * 0.5 * amp 
+
+    # 新增：纯向右
+    elif shape == 'right':
+        target_x = -1.0 * t_steps * speed * 0.5 * amp
+
+    # 修改：原先的"直走后左转"改名为 straight_then_left
+    elif shape == 'straight_then_left':
         mask = t_steps > turn_start
         steps_from_turn = t_steps[mask] - turn_start
-        # 0.02 是一个经验系数，让 amp=1.0 时偏转比较自然
         target_x[mask] = steps_from_turn * 0.02 * amp 
 
-    elif shape == 'right':
-        # 直走一段，然后向右偏移 (-X)
+    # 修改：原先的"直走后右转"改名为 straight_then_right
+    elif shape == 'straight_then_right':
         mask = t_steps > turn_start
         steps_from_turn = t_steps[mask] - turn_start
         target_x[mask] = -1.0 * steps_from_turn * 0.02 * amp
@@ -133,6 +143,18 @@ def generate_target_trajectory(batch_size, length, device, conf):
         # 频率控制：让它在整个序列长度内大概扭 1.5 个周期
         freq = (2 * torch.pi) / (length * 0.6) 
         target_x = torch.sin(t_steps * freq) * (amp * 0.5)
+        
+    # 新增：纯向后走 (倒退)
+    elif shape == 'backward':
+        # 覆盖掉默认的向前 Z，改为负数
+        target_z = -1.0 * t_steps * speed
+
+    # 新增：向左后方走 (斜着倒退)
+    elif shape == 'backward_left':
+        # Z 轴后退
+        target_z = -1.0 * t_steps * speed
+        # X 轴向左 (与 'left' 逻辑一致)
+        target_x = t_steps * speed * 0.5 * amp
 
     # 4. 组合 [X, Y, Z] -> [Batch, Length, 3]
     # Y 轴设为 0 (只引导水平面位置)
@@ -464,13 +486,87 @@ class MLD(BaseModel):
         return loss
 
 
+    # def _compute_gap_loss(self, latents, t, gap_width, safety_margin, encoder_hidden_states, lengths):
+    #     """
+    #     计算狭窄缝隙 Loss (基于局部坐标系)。
+        
+    #     原理：
+    #     不关心人在世界哪里，只关心肢体是否张得太开。
+    #     通过限制关节相对于 Root 的横向距离 (Local X)，强迫模型生成“缩手缩脚”的姿态。
+    #     """
+    #     # 1. 预测 & 反推 x0 (标准流程)
+    #     noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+        
+    #     # 2. Decode & 反归一化
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     # 得到真实的物理数值 [Batch, Length, 263]
+    #     pred_motion = pred_motion_norm * d_std + d_mean
+
+    #     # ================= [核心修改：使用局部特征] =================
+        
+    #     # 3. 提取局部关节位置
+    #     # HumanML3D 特征定义: 
+    #     # Index 4~66 是 21 个关节相对于 Root 的局部位置 (Local Position)
+    #     # 这些位置已经经过旋转对齐，X 轴永远代表"身体右侧"，Z 轴永远代表"身体前方"
+    #     bs, seq_len = pred_motion.shape[:2]
+    #     local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
+        
+    #     # 4. 提取局部 X 轴坐标 (Local Lateral Offset)
+    #     # 这代表了关节离脊柱中线的左右距离
+    #     local_joints_x = local_joints[..., 0] # [Batch, Length, 21]
+
+    #     # 5. 定义限制范围
+    #     # gap_width 是总宽度 (如 0.5m)，半宽就是 0.25m
+    #     # 意味着手脚伸出去不能超过中线 0.25m
+    #     half_width = gap_width / 2.0
+        
+    #     # 减去安全距离 (Safety Margin)
+    #     # 比如墙宽 0.5m (半宽0.25)，安全距离 0.05
+    #     # 那么关节必须限制在 0.20m 以内，留出 0.05 给皮肤/衣服厚度
+    #     effective_limit = half_width - safety_margin
+        
+    #     limit_tensor = torch.tensor(effective_limit, device=latents.device)
+        
+    #     # 6. 计算惩罚 (ReLU)
+    #     # abs(local_x) 代表偏离中线的程度，无论左右
+    #     # 只要 |x| > limit，就产生 Loss
+    #     excess = torch.nn.functional.relu(local_joints_x.abs() - limit_tensor)
+        
+    #     # ================= [策略：重点打击] =================
+    #     # 我们不能只算平均值，因为"平均宽度"可能很小，但手可能甩得很大。
+    #     # 只要有一个关节撞墙，整个动作就是失败的。
+        
+    #     # A. 最大违规惩罚 (Max Penalty): 
+    #     # 找出每一帧里最“宽”的那个关节 (通常是手腕或手肘)，重罚！
+    #     # max(dim=2)[0] 得到每一帧的最大违规量 [Batch, Length]
+    #     loss_max = (excess.max(dim=2)[0] ** 2).mean() 
+        
+    #     # B. 平均违规惩罚 (Mean Penalty):
+    #     # 压制整体趋势，让大家尽量往中间靠
+    #     loss_mean = (excess ** 2).mean()
+        
+    #     # 组合 Loss: 10倍权重给最大违规，强迫收回最突出的部位
+    #     loss = loss_mean + 10.0 * loss_max
+        
+    #     return loss
+    
     def _compute_gap_loss(self, latents, t, gap_width, safety_margin, encoder_hidden_states, lengths):
         """
-        计算狭窄缝隙 Loss (基于局部坐标系)。
+        [修正版] 世界坐标系缝隙 Loss (World-Space Gap Loss)。
         
         原理：
-        不关心人在世界哪里，只关心肢体是否张得太开。
-        通过限制关节相对于 Root 的横向距离 (Local X)，强迫模型生成“缩手缩脚”的姿态。
+        1. 恢复 Root 的世界位置和朝向角度。
+        2. 将 Local Joints 旋转并平移到世界坐标系。
+        3. 限制 World X 的范围 (模拟固定的直走廊)。
+        这样当角色侧身 (旋转90度) 时，原本宽的肩膀 (Local X) 会变成 World Z，
+        而较窄的胸背厚度变成 World X，从而通过缝隙。
         """
         # 1. 预测 & 反推 x0 (标准流程)
         noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
@@ -478,60 +574,135 @@ class MLD(BaseModel):
         beta_prod_t = 1 - alpha_prod_t
         pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
         
-        # 2. Decode & 反归一化
         pred_z0_input = pred_z0.permute(1, 0, 2)
         pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
         
         d_mean = self.mean.to(latents.device)
         d_std = self.std.to(latents.device)
-        # 得到真实的物理数值 [Batch, Length, 263]
-        pred_motion = pred_motion_norm * d_std + d_mean
+        pred_motion = pred_motion_norm * d_std + d_mean # [Batch, Length, 263]
 
-        # ================= [核心修改：使用局部特征] =================
+        # ================= [步骤 A: 计算 Root 的世界状态] =================
+        # 提取特征
+        rot_vel = pred_motion[..., 0]      # Y轴角速度
+        local_vel_x = pred_motion[..., 1]  # 局部线速度 X
+        local_vel_z = pred_motion[..., 2]  # 局部线速度 Z
         
-        # 3. 提取局部关节位置
-        # HumanML3D 特征定义: 
-        # Index 4~66 是 21 个关节相对于 Root 的局部位置 (Local Position)
-        # 这些位置已经经过旋转对齐，X 轴永远代表"身体右侧"，Z 轴永远代表"身体前方"
+        # 1. 积分得到绝对朝向角度 (Heading Angle)
+        # cumsum dim=1
+        rot_ang = torch.cumsum(rot_vel, dim=1) 
+        # 如果 Dataset 预处理有缩放，这里可能需要 * scale，通常 HumanML3D 不需要
+        
+        # 计算旋转矩阵所需的 sin/cos
+        c = torch.cos(rot_ang) # [Batch, Length]
+        s = torch.sin(rot_ang)
+        
+        # 2. 计算 Root 的世界坐标 (为了确定人走到哪了)
+        # 投影速度到世界系
+        global_vel_x = local_vel_x * c - local_vel_z * s
+        # 积分得到 Root World X
+        root_world_x = torch.cumsum(global_vel_x, dim=1)
+        # 归零起点 (假设走廊中心线从起点开始)
+        root_world_x = root_world_x - root_world_x[:, 0:1]
+        
+        # ================= [步骤 B: 将关节转到世界坐标] =================
         bs, seq_len = pred_motion.shape[:2]
+        # Index 4~66: 局部关节位置 (相对于 Root，且对齐 Root 朝向)
         local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
         
-        # 4. 提取局部 X 轴坐标 (Local Lateral Offset)
-        # 这代表了关节离脊柱中线的左右距离
-        local_joints_x = local_joints[..., 0] # [Batch, Length, 21]
-
-        # 5. 定义限制范围
-        # gap_width 是总宽度 (如 0.5m)，半宽就是 0.25m
-        # 意味着手脚伸出去不能超过中线 0.25m
-        half_width = gap_width / 2.0
+        # 提取局部坐标
+        # local_j_x: 左右 (Right)
+        # local_j_z: 前后 (Forward)
+        local_j_x = local_joints[..., 0] # [Batch, Length, 21]
+        local_j_z = local_joints[..., 2] # [Batch, Length, 21]
         
-        # 减去安全距离 (Safety Margin)
-        # 比如墙宽 0.5m (半宽0.25)，安全距离 0.05
-        # 那么关节必须限制在 0.20m 以内，留出 0.05 给皮肤/衣服厚度
+        # 扩展 c, s 维度以便广播: [B, L] -> [B, L, 1]
+        c_exp = c.unsqueeze(-1)
+        s_exp = s.unsqueeze(-1)
+        
+        # 3. 旋转变换 (2D Rotation)
+        # 公式: World_X_Offset = Local_X * cos - Local_Z * sin
+        # (注意：HumanML3D 是逆时针旋转定义)
+        joint_offset_world_x = local_j_x * c_exp - local_j_z * s_exp
+        
+        # 4. 加上 Root 的世界坐标
+        # Root_World_X 广播到 [B, L, 1]
+        root_world_x_exp = root_world_x.unsqueeze(-1)
+        
+        # 得到全身 21 个关节的 World X
+        joints_world_x = root_world_x_exp + joint_offset_world_x
+        
+        # 把 Root 自己也拼进去 (Root 的 Offset 是 0)
+        all_joints_world_x = torch.cat([root_world_x_exp, joints_world_x], dim=2) # [B, L, 22]
+
+        # ================= [步骤 C: 计算墙壁碰撞 Loss] =================
+        # 定义世界坐标系下的墙： X = ± (Width/2 - Margin)
+        half_width = gap_width / 2.0
         effective_limit = half_width - safety_margin
         
         limit_tensor = torch.tensor(effective_limit, device=latents.device)
         
-        # 6. 计算惩罚 (ReLU)
-        # abs(local_x) 代表偏离中线的程度，无论左右
-        # 只要 |x| > limit，就产生 Loss
-        excess = torch.nn.functional.relu(local_joints_x.abs() - limit_tensor)
+        # 计算绝对值超出部分 (不管是偏左还是偏右撞墙)
+        excess = torch.nn.functional.relu(all_joints_world_x.abs() - limit_tensor)
         
-        # ================= [策略：重点打击] =================
-        # 我们不能只算平均值，因为"平均宽度"可能很小，但手可能甩得很大。
-        # 只要有一个关节撞墙，整个动作就是失败的。
-        
-        # A. 最大违规惩罚 (Max Penalty): 
-        # 找出每一帧里最“宽”的那个关节 (通常是手腕或手肘)，重罚！
-        # max(dim=2)[0] 得到每一帧的最大违规量 [Batch, Length]
-        loss_max = (excess.max(dim=2)[0] ** 2).mean() 
-        
-        # B. 平均违规惩罚 (Mean Penalty):
-        # 压制整体趋势，让大家尽量往中间靠
+        # 策略：重罚最宽的部位
+        loss_max = (excess.max(dim=2)[0].max(dim=1)[0] ** 2).mean() 
         loss_mean = (excess ** 2).mean()
         
-        # 组合 Loss: 10倍权重给最大违规，强迫收回最突出的部位
         loss = loss_mean + 10.0 * loss_max
+        
+        return loss
+
+    def _compute_side_step_loss(self, latents, t, encoder_hidden_states, lengths):
+        """
+        [新增] 侧身引导 Loss。
+        强迫角色旋转 90 度 (Side-Stepping)。
+        """
+        # 1. 预测 & 反推 (标准流程)
+        noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
+        alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+        beta_prod_t = 1 - alpha_prod_t
+        pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+        
+        # 2. Decode
+        pred_z0_input = pred_z0.permute(1, 0, 2)
+        pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+        # 3. 提取旋转速度 (Index 0)
+        # 注意：这里不需要反归一化，因为我们只需要趋势，或者假设 std 接近 1。
+        # 为了严谨，最好反归一化，但直接用归一化数据的正负号通常也够用。
+        # 这里我们做完整的反归一化以防万一。
+        d_mean = self.mean.to(latents.device)
+        d_std = self.std.to(latents.device)
+        pred_motion = pred_motion_norm * d_std + d_mean
+        
+        rot_vel = pred_motion[..., 0] # [Batch, Length] Y轴角速度
+        
+        # 4. 积分得到绝对朝向角度 (Heading Angle)
+        # 假设初始朝向是 0 (面朝 Z 轴/前方)
+        rot_ang = torch.cumsum(rot_vel, dim=1)
+       
+        # 5. [修改] 强迫朝向特定的角度 (比如 +90度 = PI/2)
+        # 这样模型就不用纠结是左转还是右转了
+        # target_angle = torch.tensor(1.57, device=latents.device) # 1.57 ≈ 90度
+        # [修改] 不要在代码里硬编码 1.57，直接写角度让它自己算
+        target_degree = 45.0  # 如果你想试 30度，改成 30.0 即可
+        target_radian = float(target_degree * np.pi / 180.0)
+        
+        target_angle = torch.tensor(target_radian, device=latents.device)
+        # print(f"[Side-Step Loss] Target Angle (radian): {target_radian:.4f}")
+        
+        # 计算当前角度与目标角度的距离 (MSE)
+        # 注意：这里可能需要处理周期性 (比如 360度 = 0度)，但简单场景下直接 MSE 够用
+        loss = ((rot_ang - target_angle) ** 2).mean()
+        
+        # 5. 计算 Loss: 逼近 +/- 90 度
+        # 正常直走: 角度 ≈ 0, cos(0) = 1 -> Loss 大
+        # 侧身行走: 角度 ≈ 90, cos(90) = 0 -> Loss 小
+        
+        # cos_ang = torch.cos(rot_ang)
+        
+        # 目标是让 cos_ang 接近 0
+        # loss = (cos_ang ** 2).mean()
         
         return loss
 
@@ -643,7 +814,33 @@ class MLD(BaseModel):
                         ctx['lengths']
                     )
                     total_loss += loss_gap * g_strength
-                # =========================================================
+                    # =========================================================
+                # ================= [D. 侧身引导 (Side-Stepping)] =================
+                if conf.get('SIDE_STEP_MODE', False):
+                    # 2. [核心新增] 自动侧身触发器
+                    # 读取阈值，如果没配默认 0.6m
+                    # 只有当缝隙小于 0.6m 时，才强制侧身
+                    # 处理 t 维度 (同上)
+                    if t.dim() == 0: t_input = t.unsqueeze(0).repeat(ctx['bsz'])
+                    else: t_input = t
+                    
+                    
+                    side_thresh = conf.get('SIDE_STEP_THRESHOLD', 0.6)
+                    g_width = conf.get('GAP_WIDTH', 0.5)
+                    if g_width < side_thresh:
+                        side_strength = conf.get('SIDE_STEP_STRENGTH', 1500.0)
+                        
+                        loss_side = self._compute_side_step_loss(
+                            current_latents, t_input,
+                            ctx['cond_embeddings'], ctx['lengths']
+                        )
+                        total_loss += loss_side * side_strength
+                        
+                        # Debug 打印 (只打印一次防止刷屏)
+                        if _ == 0 and t_val % 100 == 0:
+                            print(f" [SideStep] Gap={g_width} < {side_thresh}, Loss={loss_side.item():.4f}")
+                # =======================================================
+                
                 
                 # 如果没有 Loss，直接退出
                 if isinstance(total_loss, float) and total_loss == 0.0:
