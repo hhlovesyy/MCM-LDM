@@ -459,6 +459,21 @@ class MLD(BaseModel):
         # 这样如果 Frame 10 跳起来了，它的高度 = (AbsHeight - Floor) 就会包含跳跃高度
         grounded_joints_y = all_joints_y - floor_level
         
+
+        # ================= [修改重点] =================
+        # 判断传入的 ceiling_height 是一个数字 还是 一个 [B, L] 的 Tensor
+        if isinstance(ceiling_height, torch.Tensor):
+            # 如果是 Tensor: [Batch, Length]
+            # 我们需要把它扩展成 [Batch, Length, 1]，这样才能和关节数据 [B, L, 22] 进行计算
+            limit_tensor = ceiling_height.unsqueeze(-1).to(latents.device)
+            # 减去安全距离
+            limit_tensor = limit_tensor - safety_margin
+        else:
+            # 如果是纯数字 (旧逻辑兼容)
+            effective_limit = ceiling_height - safety_margin
+            limit_tensor = torch.tensor(effective_limit, device=latents.device)
+        
+        # ============================================
         # ================= [计算 Loss] =================
         # limit_tensor = torch.tensor(ceiling_height, device=latents.device)
         
@@ -466,9 +481,9 @@ class MLD(BaseModel):
         # ================= [修改点：应用安全距离] =================
         # 实际限制 = 物理天花板高度 - 安全缓冲
         # 比如天花板 1.5m，缓冲 0.1m -> 关节不能超过 1.4m
-        effective_limit = ceiling_height - safety_margin
+        # effective_limit = ceiling_height - safety_margin
         
-        limit_tensor = torch.tensor(effective_limit, device=latents.device)
+        # limit_tensor = torch.tensor(effective_limit, device=latents.device)
         
         
         # 计算超出部分
@@ -485,77 +500,6 @@ class MLD(BaseModel):
         
         return loss
 
-
-    # def _compute_gap_loss(self, latents, t, gap_width, safety_margin, encoder_hidden_states, lengths):
-    #     """
-    #     计算狭窄缝隙 Loss (基于局部坐标系)。
-        
-    #     原理：
-    #     不关心人在世界哪里，只关心肢体是否张得太开。
-    #     通过限制关节相对于 Root 的横向距离 (Local X)，强迫模型生成“缩手缩脚”的姿态。
-    #     """
-    #     # 1. 预测 & 反推 x0 (标准流程)
-    #     noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
-    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
-    #     beta_prod_t = 1 - alpha_prod_t
-    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
-        
-    #     # 2. Decode & 反归一化
-    #     pred_z0_input = pred_z0.permute(1, 0, 2)
-    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
-        
-    #     d_mean = self.mean.to(latents.device)
-    #     d_std = self.std.to(latents.device)
-    #     # 得到真实的物理数值 [Batch, Length, 263]
-    #     pred_motion = pred_motion_norm * d_std + d_mean
-
-    #     # ================= [核心修改：使用局部特征] =================
-        
-    #     # 3. 提取局部关节位置
-    #     # HumanML3D 特征定义: 
-    #     # Index 4~66 是 21 个关节相对于 Root 的局部位置 (Local Position)
-    #     # 这些位置已经经过旋转对齐，X 轴永远代表"身体右侧"，Z 轴永远代表"身体前方"
-    #     bs, seq_len = pred_motion.shape[:2]
-    #     local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
-        
-    #     # 4. 提取局部 X 轴坐标 (Local Lateral Offset)
-    #     # 这代表了关节离脊柱中线的左右距离
-    #     local_joints_x = local_joints[..., 0] # [Batch, Length, 21]
-
-    #     # 5. 定义限制范围
-    #     # gap_width 是总宽度 (如 0.5m)，半宽就是 0.25m
-    #     # 意味着手脚伸出去不能超过中线 0.25m
-    #     half_width = gap_width / 2.0
-        
-    #     # 减去安全距离 (Safety Margin)
-    #     # 比如墙宽 0.5m (半宽0.25)，安全距离 0.05
-    #     # 那么关节必须限制在 0.20m 以内，留出 0.05 给皮肤/衣服厚度
-    #     effective_limit = half_width - safety_margin
-        
-    #     limit_tensor = torch.tensor(effective_limit, device=latents.device)
-        
-    #     # 6. 计算惩罚 (ReLU)
-    #     # abs(local_x) 代表偏离中线的程度，无论左右
-    #     # 只要 |x| > limit，就产生 Loss
-    #     excess = torch.nn.functional.relu(local_joints_x.abs() - limit_tensor)
-        
-    #     # ================= [策略：重点打击] =================
-    #     # 我们不能只算平均值，因为"平均宽度"可能很小，但手可能甩得很大。
-    #     # 只要有一个关节撞墙，整个动作就是失败的。
-        
-    #     # A. 最大违规惩罚 (Max Penalty): 
-    #     # 找出每一帧里最“宽”的那个关节 (通常是手腕或手肘)，重罚！
-    #     # max(dim=2)[0] 得到每一帧的最大违规量 [Batch, Length]
-    #     loss_max = (excess.max(dim=2)[0] ** 2).mean() 
-        
-    #     # B. 平均违规惩罚 (Mean Penalty):
-    #     # 压制整体趋势，让大家尽量往中间靠
-    #     loss_mean = (excess ** 2).mean()
-        
-    #     # 组合 Loss: 10倍权重给最大违规，强迫收回最突出的部位
-    #     loss = loss_mean + 10.0 * loss_max
-        
-    #     return loss
     
     def _compute_gap_loss(self, latents, t, gap_width, safety_margin, encoder_hidden_states, lengths):
         """
@@ -745,6 +689,36 @@ class MLD(BaseModel):
         # 4. 梯度下降循环
         current_latents = latents.detach().requires_grad_(True)
         
+        #============
+        # [准备工作] 获取当前 Batch 的相关信息
+        bsz = ctx['bsz']
+        # 获取这批数据里最长的长度，这就是你问的“咋知道一共有几帧”
+        max_len = max(ctx['lengths']) 
+        device = latents.device
+
+        # === [辅助函数：构建时序高度 Tensor] ===
+        def build_timeline_tensor(bs, length, default_val, timeline_cfg):
+            # 1. 先全部填满默认值
+            tensor = torch.full((bs, length), float(default_val), device=device)
+            
+            # 2. 如果 YAML 里写了 timeline，就覆盖对应段
+            if timeline_cfg is not None:
+                for segment in timeline_cfg:
+                    # YAML 格式: [start, end, value]
+                    s, e, val = segment
+                    
+                    # 防止负数
+                    s = max(0, int(s))
+                    # 防止越界：如果 YAML 写了 9999，这里 min(length) 会把它截断到实际长度
+                    e = min(length, int(e))
+                    
+                    if s < e:
+                        tensor[:, s:e] = float(val)
+            return tensor
+        # ========================================
+
+        #===========
+
         with torch.enable_grad():
             for _ in range(num_opt_steps):
                 total_loss = 0.0
@@ -768,32 +742,58 @@ class MLD(BaseModel):
                     )
                     total_loss += loss_traj * conf.WAYPOINTS_GUIDE_STRENGTH
 
-                # ================= [插入在这里] =================
-                # B. 天花板引导 (Low Ceiling)
-                # 读取配置: 如果没配置，默认 False
+                # # ================= [插入在这里] =================
+                # # B. 天花板引导 (Low Ceiling)
+                # # 读取配置: 如果没配置，默认 False
+                # if conf.get('CEILING_MODE', False):
+                #     # 处理 t 维度 (同上)
+                #     if t.dim() == 0: t_input = t.unsqueeze(0).repeat(ctx['bsz'])
+                #     else: t_input = t
+                    
+                #     # 获取参数
+                #     c_height = conf.get('CEILING_HEIGHT', 1.4)
+                #     c_strength = conf.get('CEILING_STRENGTH', 1000.0)
+                    
+                #     # 读取安全距离，默认为 0.1m
+                #     c_margin = conf.get('SAFETY_MARGIN', 0.1)
+
+                #     loss_ceil = self._compute_ceiling_loss(
+                #         current_latents, 
+                #         t_input, 
+                #         c_height,
+                #         c_margin, # <--- 传入这个新参数
+                #         ctx['cond_embeddings'], 
+                #         ctx['lengths']
+                #     )
+                #     total_loss += loss_ceil * c_strength
+                # # ===============================================
+                # ================= [B. 天花板引导 (改)] =================
                 if conf.get('CEILING_MODE', False):
-                    # 处理 t 维度 (同上)
-                    if t.dim() == 0: t_input = t.unsqueeze(0).repeat(ctx['bsz'])
+                    # 处理 timestep 维度
+                    if t.dim() == 0: t_input = t.unsqueeze(0).repeat(bsz)
                     else: t_input = t
                     
-                    # 获取参数
-                    c_height = conf.get('CEILING_HEIGHT', 1.4)
-                    c_strength = conf.get('CEILING_STRENGTH', 1000.0)
+                    # 1. 读取参数
+                    default_h = conf.get('CEILING_HEIGHT', 2.0)
+                    timeline = conf.get('CEILING_TIMELINE', []) # 读取列表
                     
-                    # 读取安全距离，默认为 0.1m
+                    # 2. 构建每一帧的高度 Tensor [Batch, Length]
+                    c_height_tensor = build_timeline_tensor(bsz, max_len, default_h, timeline)
+                    
+                    c_strength = conf.get('CEILING_STRENGTH', 1000.0)
                     c_margin = conf.get('SAFETY_MARGIN', 0.1)
 
+                    # 3. 传入 Tensor 计算 Loss
                     loss_ceil = self._compute_ceiling_loss(
                         current_latents, 
                         t_input, 
-                        c_height,
-                        c_margin, # <--- 传入这个新参数
+                        c_height_tensor, # <--- 传入构建好的 Tensor
+                        c_margin, 
                         ctx['cond_embeddings'], 
                         ctx['lengths']
                     )
                     total_loss += loss_ceil * c_strength
-                # ===============================================
-                
+                # =======================================================
                 # ================= [C. 缝隙引导 (Narrow Gap)] =================
                 if conf.get('GAP_MODE', False):
                     # 处理 t 维度 (同上)
@@ -972,50 +972,7 @@ class MLD(BaseModel):
             return joints, attn_weights
         return joints
     
-    
-    # def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None):
-    #     # init latents
-    #     # 注意：encoder_hidden_states[0] 已经是翻倍后的 batch (2B)，如果开了 CFG
-    #     bsz = encoder_hidden_states[0].shape[0] # Batch dimension is 1 for content [S, B, D]
-    #     if self.do_classifier_free_guidance:
-    #         bsz = bsz // 2
-
-    #     latents = torch.randn(
-    #         (bsz, self.latent_dim[0], self.latent_dim[-1]),
-    #         device=encoder_hidden_states[0].device,
-    #         dtype=torch.float,
-    #     )  # torch.Size([1, 7, 256])
-
-    #     latents = latents * self.scheduler.init_noise_sigma
-    #     self.scheduler.set_timesteps(self.cfg.model.scheduler.num_inference_timesteps)
-    #     timesteps = self.scheduler.timesteps.to(encoder_hidden_states[0].device)
-        
-    #     extra_step_kwargs = {}
-    #     if "eta" in set(inspect.signature(self.scheduler.step).parameters.keys()):
-    #         extra_step_kwargs["eta"] = self.cfg.model.scheduler.eta
-        
-    #     # reverse
-    #     for i, t in enumerate(timesteps):
-    #         latent_model_input = (torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents)
-    #         lengths_reverse = (lengths * 2 if self.do_classifier_free_guidance else lengths)
-            
-    #         # [重要] Denoiser Forward
-    #         noise_pred = self.denoiser(
-    #             sample=latent_model_input,
-    #             timestep=t,
-    #             encoder_hidden_states=encoder_hidden_states,
-    #             lengths=lengths_reverse,
-    #         )[0]  # torch.Size([2, 7, 256])
-            
-    #         if self.do_classifier_free_guidance:
-    #             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-    #             noise_pred = noise_pred_uncond + scale * (noise_pred_text - noise_pred_uncond) # torch.Size([1, 7, 256])
-            
-    #         latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-
-    #     latents = latents.permute(1, 0, 2) # torch.Size([7, 1, 256])
-    #     return latents
-    
+  
     # 包含直线生成的 Reverse 函数
     def _diffusion_reverse(self, encoder_hidden_states, lengths=None, scale=None):
         
@@ -1529,77 +1486,7 @@ class MLD(BaseModel):
                 raise ValueError(
                     "Loss is None, this happend with torchmetrics > 0.7")
 
-        # # Compute the metrics - currently evaluate results from text to motion
-        # if split in ["val", "test"]:
-        #     # use t2m evaluators
-        #     rs_set = self.t2m_eval(batch)
-
-        #     # MultiModality evaluation sperately
-        #     if self.trainer.datamodule.is_mm:
-        #         metrics_dicts = ['MMMetrics']
-        #     else:
-        #         metrics_dicts = self.metrics_dict
-        #     # metric = 'TemosMetric' 'TM2TMetrics'
-        #     for metric in metrics_dicts:
-        #         if metric == "TemosMetric":
-        #             phase = split if split != "val" else "eval"
-        #             if eval(f"self.cfg.{phase.upper()}.DATASETS")[0].lower(
-        #             ) not in [
-        #                     "humanml3d",
-        #                     "kit",
-        #             ]:
-        #                 raise TypeError(
-        #                     "APE and AVE metrics only support humanml3d and kit datasets now"
-        #                 )
-
-        #             getattr(self, metric).update(rs_set["joints_rst"],
-        #                                          rs_set["joints_ref"],
-        #                                          batch["length"])
-        #         elif metric == "TM2TMetrics":
-        #             getattr(self, metric).update(
-        #                 # lat_t, latent encoded from diffusion-based text
-        #                 # lat_rm, latent encoded from reconstructed motion
-        #                 # lat_m, latent encoded from gt motion
-        #                 # rs_set['lat_t'], rs_set['lat_rm'], rs_set['lat_m'], batch["length"])
-        #                 rs_set["lat_t"],
-        #                 rs_set["lat_rm"],
-        #                 rs_set["lat_m"],
-        #                 batch["length"],
-        #             )
-        #         elif metric == "UncondMetrics":
-        #             getattr(self, metric).update(
-        #                 recmotion_embeddings=rs_set["lat_rm"],
-        #                 gtmotion_embeddings=rs_set["lat_m"],
-        #                 lengths=batch["length"],
-        #             )
-        #         elif metric == "MRMetrics":
-        #             getattr(self, metric).update(rs_set["joints_rst"],
-        #                                          rs_set["joints_ref"],
-        #                                          batch["length"])
-        #         elif metric == "MMMetrics":
-        #             getattr(self, metric).update(rs_set["lat_rm"].unsqueeze(0),
-        #                                          batch["length"])
-        #         elif metric == "HUMANACTMetrics":
-        #             getattr(self, metric).update(rs_set["m_action"],
-        #                                          rs_set["joints_eval_rst"],
-        #                                          rs_set["joints_eval_ref"],
-        #                                          rs_set["m_lens"])
-        #         elif metric == "UESTCMetrics":
-        #             # the stgcn model expects rotations only
-        #             getattr(self, metric).update(
-        #                 rs_set["m_action"],
-        #                 rs_set["m_rst"].view(*rs_set["m_rst"].shape[:-1], 6,
-        #                                      25).permute(0, 3, 2, 1)[:, :-1],
-        #                 rs_set["m_ref"].view(*rs_set["m_ref"].shape[:-1], 6,
-        #                                      25).permute(0, 3, 2, 1)[:, :-1],
-        #                 rs_set["m_lens"])
-        #         else:
-        #             raise TypeError(f"Not support this metric {metric}")
-
-        # # return forward output rather than loss during test
-        # if split in ["test"]:
-        #     return rs_set["joints_rst"], batch["length"]
-            
+      
         # ==============================================
         # [PhysiMoS 修复] 显式记录日志到 TensorBoard
         # ==============================================

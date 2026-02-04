@@ -302,6 +302,11 @@ def main():
     else:
         print(">>> [ERROR] Still cannot find DEMO in the yaml file!")
     # =======================================================
+
+     # 2. [新增] 补全 TRAJECTORY (为了读取最新的 TIMELINE)
+    if "TRAJECTORY" in my_cfg:
+        cfg.TRAJECTORY = my_cfg.TRAJECTORY
+        print(f">>> [DEBUG] Force loaded TRAJECTORY config.")
     
     cfg.TRAIN.BATCH_SIZE = 1 # 推理时 Batch Size 设为 1
     
@@ -521,20 +526,48 @@ def main():
             # 注意：要从 TRAJECTORY 配置里读，而不是从 json 文件读，因为引导用的是配置值
             traj_cfg = cfg.get("TRAJECTORY", {}).get("GUIDANCE", {})
             
-            # 只有当开启了天花板引导，且有高度值时，才画线
-            ceil_h = None
-            if traj_cfg.get("CEILING_MODE", False):
-                ceil_h = traj_cfg.get("CEILING_HEIGHT", None)
+            # # 只有当开启了天花板引导，且有高度值时，才画线
+            # ceil_h = None
+            # if traj_cfg.get("CEILING_MODE", False):
+            #     ceil_h = traj_cfg.get("CEILING_HEIGHT", None)
             
-            # 3. 定义保存路径 (例如 jump_side.mp4)
+            # # 3. 定义保存路径 (例如 jump_side.mp4)
+            # side_mp4_path = output_dir / f"{content_name}_side.mp4"
+            
+            # # 4. 调用独立脚本渲染
+            # # motion_output 是 numpy array
+            # render_side_view(
+            #     motion_data=motion_output, 
+            #     save_path=str(side_mp4_path), 
+            #     ceiling_height=ceil_h
+            # )
+            # === [修改后] ===
+            ceil_info = None
+            if traj_cfg.get("CEILING_MODE", False):
+                # 优先读取 Timeline
+                timeline = traj_cfg.get("CEILING_TIMELINE", None)
+
+                # [核心修复] 将 OmegaConf 对象转为 Python 原生 List
+                # 这样 render_side_view 里的 isinstance(x, list) 才会是 True
+                if timeline is not None:
+                    # to_container 会把 ListConfig 变成 [ [0,80,0.8], ... ]
+                    timeline = OmegaConf.to_container(timeline, resolve=True)
+
+                # 如果 timeline 存在且不为空，就用它
+                if timeline and len(timeline) > 0:
+                    ceil_info = timeline
+                else:
+                    # 否则读取固定高度
+                    ceil_info = traj_cfg.get("CEILING_HEIGHT", None)
+            
+            # 3. 定义保存路径
             side_mp4_path = output_dir / f"{content_name}_side.mp4"
             
-            # 4. 调用独立脚本渲染
-            # motion_output 是 numpy array
+            # 4. 调用
             render_side_view(
                 motion_data=motion_output, 
                 save_path=str(side_mp4_path), 
-                ceiling_height=ceil_h
+                ceiling_info=ceil_info  # <--- 注意参数名变了 (或者你保持 ceiling_height 也可以，python不强类型)
             )
         # ========================================        
         
