@@ -153,12 +153,12 @@ TRAJECTORY:
     ENABLED: True   
     GUIDANCE_START: 1000      # 开始引导的时间步 (t)
     GUIDACE_END: 0            # 结束引导的时间步
-    WAYPOINTS_MODE: False          # 是否开启路径点引导
-    WAYPOINTS_GUIDE_STRENGTH: 20000.0 # 引导强度
-    WAYPOINTS_INTERVAL: 8    # 关键帧间隔
+    WAYPOINTS_MODE: True          # 是否开启路径点引导
+    WAYPOINTS_GUIDE_STRENGTH: 500000.0 # 引导强度
+    WAYPOINTS_INTERVAL: 2    # 关键帧间隔 8
     OBSTACLE_MODE: False      # 避障模式 (暂关)
     OBSTACLE_GUIDE_STRENGTH: 100.0
-    MAX_NORM: 0.5             # 梯度裁剪阈值
+    MAX_NORM: 2            # 梯度裁剪阈值 0.5  
     
     # 轨迹形状参数
     SHAPE: 'straight'         # 可选: straight, left, right, s_curve, 'straight_then_left', 'straight_then_right','backward' ,backward_left
@@ -168,15 +168,15 @@ TRAJECTORY:
 
 
     # === 新增天花板配置 ===
-    CEILING_MODE: True        # 开关
+    CEILING_MODE: False        # 开关
     # CEILING_HEIGHT: 1.3    # 限制高度 
     # [新增] 时序天花板: [开始帧, 结束帧, 高度]
     # 这里的 9999 代表“直到最后”
     CEILING_TIMELINE:
-        - [0, 80, 0.8]      # 0-60帧: 高度0.9米 (强制蹲下/爬行)
-        - [80, 9999, 2.5]   # 60帧-结束: 高度2.5米 (解除限制，可以站起来)
+        - [0, 80, 2.5]      # 0-60帧: 高度0.9米 (强制蹲下/爬行)
+        - [80, 9999, 0.8]   # 60帧-结束: 高度2.5米 (解除限制，可以站起来)
                              
-    CEILING_STRENGTH: 5000.0  # 惩罚力度
+    CEILING_STRENGTH: 10.0  # 惩罚力度
     
     # === [新增] 安全距离 (皮肤厚度 + 缓冲) ===
     # 建议 0.10 ~ 0.15 米 (10cm - 15cm)
@@ -184,16 +184,45 @@ TRAJECTORY:
 
     # === [新增] 狭窄缝隙配置 ===
     GAP_MODE:  False    
-    GAP_WIDTH: 0.5          # 缝隙宽度 (米)。正常人肩宽约 0.45-0.5m。
-                              # 设为 0.5 意味着左右只有 0.25 的空间，非常极限，必须夹着手走。
+    # GAP_WIDTH: 0.5          # 缝隙宽度 (米)。正常人肩宽约 0.45-0.5m。
+    #                           # 设为 0.5 意味着左右只有 0.25 的空间，非常极限，必须夹着手走。
+    # [新增] 时序缝隙: [开始帧, 结束帧, 宽度(米)]
+    # 假设人肩宽 0.45m。设为 0.5m 非常极限，必须侧身。
+    # 时序缝隙: [Start, End, Width]
+    # GAP_TIMELINE:
+    #     - [0, 60, 2.0]     # 宽敞
+    #     - [60, 140, 0.5]   # 变窄
+    #     - [140, 9999, 2.0] # 恢复
+    GAP_TIMELINE:
+        # - [0, 60, 5.5]     # 宽敞
+        # - [60, 9999, 0.5]   # 变窄
+        # # - [140, 9999, 2.0] # 恢复
+        
+        # - [0, 40, 5.5]     # 宽敞
+        # - [40, 80, 0.5]     # 宽敞
+        # - [80, 9999, 5.5]   # 只有中间这段强制侧身
+
+        - [0, 60, 5.5]     # 宽敞
+        - [60, 80, 0.5]     # 宽敞
+        - [80, 9999, 5.5]   # 只有中间这段强制侧身
+
     GAP_STRENGTH: 40000.0      # 惩罚力度
-    SAFETY_MARGIN_GAP: 0.00
+    SAFETY_MARGIN_GAP: 0.5
 
     # === [新增] 侧身引导 ===
-    SIDE_STEP_MODE: False  
+    SIDE_STEP_MODE: True 
+
+    # [核心新增] 时序侧身: [Start, End, 1.0] 
+    # 第三位写 1.0 代表开启侧身，写 0.0 代表关闭
+    SIDE_STEP_TIMELINE:
+        - [0, 60, 0.0]     # 宽敞
+        - [60, 80, 1.0]     # 宽敞
+        - [80, 9999, 0.0]   # 只有中间这段强制侧身
+        # - [100, 9999, 5.5]     # 宽敞
+
     # 当 GAP_WIDTH 小于此阈值时，强制开启侧身引导
     SIDE_STEP_THRESHOLD: 2.5  # 暂时让它无论如何都开启）
-    SIDE_STEP_STRENGTH: 20000.0 # 旋转惩罚力度
+    SIDE_STEP_STRENGTH: 500000.0 # 旋转惩罚力度
 
     
 
@@ -201,6 +230,6 @@ TRAJECTORY:
 # Visualization Settings
 #####################################
 VISUALIZATION:
-  SIDE_VIEW_EXPORT: True  # 开关：是否生成侧视图调试视频
-  # TOP_VIEW_EXPORT: True   # 开关：是否生成顶视图调试视频
+  SIDE_VIEW_EXPORT: False  # 开关：是否生成侧视图调试视频
+  TOP_VIEW_EXPORT: False   # 开关：是否生成顶视图调试视频
   # FRONT_VIEW_EXPORT: True # 开关：是否生成前视图调试视频

@@ -501,18 +501,105 @@ class MLD(BaseModel):
         return loss
 
     
+    # def _compute_gap_loss(self, latents, t, gap_width, safety_margin, encoder_hidden_states, lengths):
+    #     """
+    #     [修正版] 世界坐标系缝隙 Loss (World-Space Gap Loss)。
+        
+    #     原理：
+    #     1. 恢复 Root 的世界位置和朝向角度。
+    #     2. 将 Local Joints 旋转并平移到世界坐标系。
+    #     3. 限制 World X 的范围 (模拟固定的直走廊)。
+    #     这样当角色侧身 (旋转90度) 时，原本宽的肩膀 (Local X) 会变成 World Z，
+    #     而较窄的胸背厚度变成 World X，从而通过缝隙。
+    #     """
+    #     # 1. 预测 & 反推 x0 (标准流程)
+    #     noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+        
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     pred_motion = pred_motion_norm * d_std + d_mean # [Batch, Length, 263]
+
+    #     # ================= [步骤 A: 计算 Root 的世界状态] =================
+    #     # 提取特征
+    #     rot_vel = pred_motion[..., 0]      # Y轴角速度
+    #     local_vel_x = pred_motion[..., 1]  # 局部线速度 X
+    #     local_vel_z = pred_motion[..., 2]  # 局部线速度 Z
+        
+    #     # 1. 积分得到绝对朝向角度 (Heading Angle)
+    #     # cumsum dim=1
+    #     rot_ang = torch.cumsum(rot_vel, dim=1) 
+    #     # 如果 Dataset 预处理有缩放，这里可能需要 * scale，通常 HumanML3D 不需要
+        
+    #     # 计算旋转矩阵所需的 sin/cos
+    #     c = torch.cos(rot_ang) # [Batch, Length]
+    #     s = torch.sin(rot_ang)
+        
+    #     # 2. 计算 Root 的世界坐标 (为了确定人走到哪了)
+    #     # 投影速度到世界系
+    #     global_vel_x = local_vel_x * c - local_vel_z * s
+    #     # 积分得到 Root World X
+    #     root_world_x = torch.cumsum(global_vel_x, dim=1)
+    #     # 归零起点 (假设走廊中心线从起点开始)
+    #     root_world_x = root_world_x - root_world_x[:, 0:1]
+        
+    #     # ================= [步骤 B: 将关节转到世界坐标] =================
+    #     bs, seq_len = pred_motion.shape[:2]
+    #     # Index 4~66: 局部关节位置 (相对于 Root，且对齐 Root 朝向)
+    #     local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
+        
+    #     # 提取局部坐标
+    #     # local_j_x: 左右 (Right)
+    #     # local_j_z: 前后 (Forward)
+    #     local_j_x = local_joints[..., 0] # [Batch, Length, 21]
+    #     local_j_z = local_joints[..., 2] # [Batch, Length, 21]
+        
+    #     # 扩展 c, s 维度以便广播: [B, L] -> [B, L, 1]
+    #     c_exp = c.unsqueeze(-1)
+    #     s_exp = s.unsqueeze(-1)
+        
+    #     # 3. 旋转变换 (2D Rotation)
+    #     # 公式: World_X_Offset = Local_X * cos - Local_Z * sin
+    #     # (注意：HumanML3D 是逆时针旋转定义)
+    #     joint_offset_world_x = local_j_x * c_exp - local_j_z * s_exp
+        
+    #     # 4. 加上 Root 的世界坐标
+    #     # Root_World_X 广播到 [B, L, 1]
+    #     root_world_x_exp = root_world_x.unsqueeze(-1)
+        
+    #     # 得到全身 21 个关节的 World X
+    #     joints_world_x = root_world_x_exp + joint_offset_world_x
+        
+    #     # 把 Root 自己也拼进去 (Root 的 Offset 是 0)
+    #     all_joints_world_x = torch.cat([root_world_x_exp, joints_world_x], dim=2) # [B, L, 22]
+
+    #     # ================= [步骤 C: 计算墙壁碰撞 Loss] =================
+    #     # 定义世界坐标系下的墙： X = ± (Width/2 - Margin)
+    #     half_width = gap_width / 2.0
+    #     effective_limit = half_width - safety_margin
+        
+    #     limit_tensor = torch.tensor(effective_limit, device=latents.device)
+        
+    #     # 计算绝对值超出部分 (不管是偏左还是偏右撞墙)
+    #     excess = torch.nn.functional.relu(all_joints_world_x.abs() - limit_tensor)
+        
+    #     # 策略：重罚最宽的部位
+    #     loss_max = (excess.max(dim=2)[0].max(dim=1)[0] ** 2).mean() 
+    #     loss_mean = (excess ** 2).mean()
+        
+    #     loss = loss_mean + 10.0 * loss_max
+        
+    #     return loss
     def _compute_gap_loss(self, latents, t, gap_width, safety_margin, encoder_hidden_states, lengths):
         """
-        [修正版] 世界坐标系缝隙 Loss (World-Space Gap Loss)。
-        
-        原理：
-        1. 恢复 Root 的世界位置和朝向角度。
-        2. 将 Local Joints 旋转并平移到世界坐标系。
-        3. 限制 World X 的范围 (模拟固定的直走廊)。
-        这样当角色侧身 (旋转90度) 时，原本宽的肩膀 (Local X) 会变成 World Z，
-        而较窄的胸背厚度变成 World X，从而通过缝隙。
+        [修正版] 世界坐标系缝隙 Loss，支持时序宽度 Tensor。
         """
-        # 1. 预测 & 反推 x0 (标准流程)
+        # 1. 预测 & 反推 x0
         noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
         alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
         beta_prod_t = 1 - alpha_prod_t
@@ -523,85 +610,130 @@ class MLD(BaseModel):
         
         d_mean = self.mean.to(latents.device)
         d_std = self.std.to(latents.device)
-        pred_motion = pred_motion_norm * d_std + d_mean # [Batch, Length, 263]
+        pred_motion = pred_motion_norm * d_std + d_mean 
 
         # ================= [步骤 A: 计算 Root 的世界状态] =================
-        # 提取特征
-        rot_vel = pred_motion[..., 0]      # Y轴角速度
-        local_vel_x = pred_motion[..., 1]  # 局部线速度 X
-        local_vel_z = pred_motion[..., 2]  # 局部线速度 Z
+        rot_vel = pred_motion[..., 0]      
+        local_vel_x = pred_motion[..., 1]  
+        local_vel_z = pred_motion[..., 2]  
         
-        # 1. 积分得到绝对朝向角度 (Heading Angle)
-        # cumsum dim=1
         rot_ang = torch.cumsum(rot_vel, dim=1) 
-        # 如果 Dataset 预处理有缩放，这里可能需要 * scale，通常 HumanML3D 不需要
-        
-        # 计算旋转矩阵所需的 sin/cos
-        c = torch.cos(rot_ang) # [Batch, Length]
+        c = torch.cos(rot_ang) 
         s = torch.sin(rot_ang)
         
-        # 2. 计算 Root 的世界坐标 (为了确定人走到哪了)
-        # 投影速度到世界系
         global_vel_x = local_vel_x * c - local_vel_z * s
-        # 积分得到 Root World X
         root_world_x = torch.cumsum(global_vel_x, dim=1)
-        # 归零起点 (假设走廊中心线从起点开始)
         root_world_x = root_world_x - root_world_x[:, 0:1]
         
         # ================= [步骤 B: 将关节转到世界坐标] =================
         bs, seq_len = pred_motion.shape[:2]
-        # Index 4~66: 局部关节位置 (相对于 Root，且对齐 Root 朝向)
         local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
         
-        # 提取局部坐标
-        # local_j_x: 左右 (Right)
-        # local_j_z: 前后 (Forward)
-        local_j_x = local_joints[..., 0] # [Batch, Length, 21]
-        local_j_z = local_joints[..., 2] # [Batch, Length, 21]
+        local_j_x = local_joints[..., 0] 
+        local_j_z = local_joints[..., 2] 
         
-        # 扩展 c, s 维度以便广播: [B, L] -> [B, L, 1]
         c_exp = c.unsqueeze(-1)
         s_exp = s.unsqueeze(-1)
         
-        # 3. 旋转变换 (2D Rotation)
-        # 公式: World_X_Offset = Local_X * cos - Local_Z * sin
-        # (注意：HumanML3D 是逆时针旋转定义)
         joint_offset_world_x = local_j_x * c_exp - local_j_z * s_exp
-        
-        # 4. 加上 Root 的世界坐标
-        # Root_World_X 广播到 [B, L, 1]
         root_world_x_exp = root_world_x.unsqueeze(-1)
         
-        # 得到全身 21 个关节的 World X
         joints_world_x = root_world_x_exp + joint_offset_world_x
-        
-        # 把 Root 自己也拼进去 (Root 的 Offset 是 0)
         all_joints_world_x = torch.cat([root_world_x_exp, joints_world_x], dim=2) # [B, L, 22]
 
-        # ================= [步骤 C: 计算墙壁碰撞 Loss] =================
-        # 定义世界坐标系下的墙： X = ± (Width/2 - Margin)
-        half_width = gap_width / 2.0
-        effective_limit = half_width - safety_margin
+        # ================= [步骤 C: 计算墙壁碰撞 Loss (修复点)] =================
         
-        limit_tensor = torch.tensor(effective_limit, device=latents.device)
+        # 1. 判断 gap_width 是 Tensor 还是 标量
+        if isinstance(gap_width, torch.Tensor):
+            # gap_width: [Batch, Length]
+            half_width = gap_width / 2.0
+            effective_limit = half_width - safety_margin
+            
+            # [核心修复] 必须扩展维度到 [Batch, Length, 1]
+            # 否则 [B, L, 22] - [B, L] 会报错！
+            if effective_limit.dim() == 2:
+                limit_tensor = effective_limit.unsqueeze(-1).to(latents.device)
+            else:
+                # 防御性编程：万一已经是3维了
+                limit_tensor = effective_limit.to(latents.device)
+                
+        else:
+            # 标量情况
+            half_width = gap_width / 2.0
+            effective_limit = half_width - safety_margin
+            limit_tensor = torch.tensor(effective_limit, device=latents.device)
         
-        # 计算绝对值超出部分 (不管是偏左还是偏右撞墙)
+        # 2. 计算超出部分
+        # all_joints_world_x.abs(): [B, L, 22]
+        # limit_tensor:             [B, L, 1] (广播到 22)
         excess = torch.nn.functional.relu(all_joints_world_x.abs() - limit_tensor)
         
-        # 策略：重罚最宽的部位
+        # 3. 聚合 Loss
         loss_max = (excess.max(dim=2)[0].max(dim=1)[0] ** 2).mean() 
         loss_mean = (excess ** 2).mean()
         
         loss = loss_mean + 10.0 * loss_max
         
         return loss
-
-    def _compute_side_step_loss(self, latents, t, encoder_hidden_states, lengths):
+    # def _compute_side_step_loss(self, latents, t, encoder_hidden_states, lengths):
+    #     """
+    #     [新增] 侧身引导 Loss。
+    #     强迫角色旋转 90 度 (Side-Stepping)。
+    #     """
+    #     # 1. 预测 & 反推 (标准流程)
+    #     noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+        
+    #     # 2. Decode
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     # 3. 提取旋转速度 (Index 0)
+    #     # 注意：这里不需要反归一化，因为我们只需要趋势，或者假设 std 接近 1。
+    #     # 为了严谨，最好反归一化，但直接用归一化数据的正负号通常也够用。
+    #     # 这里我们做完整的反归一化以防万一。
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     pred_motion = pred_motion_norm * d_std + d_mean
+        
+    #     rot_vel = pred_motion[..., 0] # [Batch, Length] Y轴角速度
+        
+    #     # 4. 积分得到绝对朝向角度 (Heading Angle)
+    #     # 假设初始朝向是 0 (面朝 Z 轴/前方)
+    #     rot_ang = torch.cumsum(rot_vel, dim=1)
+       
+    #     # 5. [修改] 强迫朝向特定的角度 (比如 +90度 = PI/2)
+    #     # 这样模型就不用纠结是左转还是右转了
+    #     # target_angle = torch.tensor(1.57, device=latents.device) # 1.57 ≈ 90度
+    #     # [修改] 不要在代码里硬编码 1.57，直接写角度让它自己算
+    #     target_degree = 45.0  # 如果你想试 30度，改成 30.0 即可
+    #     target_radian = float(target_degree * np.pi / 180.0)
+        
+    #     target_angle = torch.tensor(target_radian, device=latents.device)
+    #     # print(f"[Side-Step Loss] Target Angle (radian): {target_radian:.4f}")
+        
+    #     # 计算当前角度与目标角度的距离 (MSE)
+    #     # 注意：这里可能需要处理周期性 (比如 360度 = 0度)，但简单场景下直接 MSE 够用
+    #     loss = ((rot_ang - target_angle) ** 2).mean()
+        
+    #     # 5. 计算 Loss: 逼近 +/- 90 度
+    #     # 正常直走: 角度 ≈ 0, cos(0) = 1 -> Loss 大
+    #     # 侧身行走: 角度 ≈ 90, cos(90) = 0 -> Loss 小
+        
+    #     # cos_ang = torch.cos(rot_ang)
+        
+    #     # 目标是让 cos_ang 接近 0
+    #     # loss = (cos_ang ** 2).mean()
+        
+    #     return loss
+    def _compute_side_step_loss(self, latents, t, encoder_hidden_states, lengths, mask=None):
         """
-        [新增] 侧身引导 Loss。
-        强迫角色旋转 90 度 (Side-Stepping)。
+        mask: [Batch, Length] 的布尔张量或 0/1 张量。
+              如果传入了 mask，只计算 mask 为 True 部分的 Loss。
         """
-        # 1. 预测 & 反推 (标准流程)
+        # 1. 预测 & 反推 (保持不变)
         noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
         alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
         beta_prod_t = 1 - alpha_prod_t
@@ -611,44 +743,36 @@ class MLD(BaseModel):
         pred_z0_input = pred_z0.permute(1, 0, 2)
         pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
         
-        # 3. 提取旋转速度 (Index 0)
-        # 注意：这里不需要反归一化，因为我们只需要趋势，或者假设 std 接近 1。
-        # 为了严谨，最好反归一化，但直接用归一化数据的正负号通常也够用。
-        # 这里我们做完整的反归一化以防万一。
         d_mean = self.mean.to(latents.device)
         d_std = self.std.to(latents.device)
         pred_motion = pred_motion_norm * d_std + d_mean
         
-        rot_vel = pred_motion[..., 0] # [Batch, Length] Y轴角速度
-        
-        # 4. 积分得到绝对朝向角度 (Heading Angle)
-        # 假设初始朝向是 0 (面朝 Z 轴/前方)
+        rot_vel = pred_motion[..., 0] # [Batch, Length]
         rot_ang = torch.cumsum(rot_vel, dim=1)
        
-        # 5. [修改] 强迫朝向特定的角度 (比如 +90度 = PI/2)
-        # 这样模型就不用纠结是左转还是右转了
-        # target_angle = torch.tensor(1.57, device=latents.device) # 1.57 ≈ 90度
-        # [修改] 不要在代码里硬编码 1.57，直接写角度让它自己算
-        target_degree = 45.0  # 如果你想试 30度，改成 30.0 即可
+        # 目标：90度 (1.57弧度)
+        target_degree = 45.0  
         target_radian = float(target_degree * np.pi / 180.0)
-        
         target_angle = torch.tensor(target_radian, device=latents.device)
-        # print(f"[Side-Step Loss] Target Angle (radian): {target_radian:.4f}")
         
-        # 计算当前角度与目标角度的距离 (MSE)
-        # 注意：这里可能需要处理周期性 (比如 360度 = 0度)，但简单场景下直接 MSE 够用
-        loss = ((rot_ang - target_angle) ** 2).mean()
+        # 计算每一帧的平方误差 [Batch, Length]
+        loss_per_frame = (rot_ang - target_angle) ** 2
         
-        # 5. 计算 Loss: 逼近 +/- 90 度
-        # 正常直走: 角度 ≈ 0, cos(0) = 1 -> Loss 大
-        # 侧身行走: 角度 ≈ 90, cos(90) = 0 -> Loss 小
-        
-        # cos_ang = torch.cos(rot_ang)
-        
-        # 目标是让 cos_ang 接近 0
-        # loss = (cos_ang ** 2).mean()
+        # === [关键修改] 应用 Mask ===
+        if mask is not None:
+            # 确保 mask 和 loss 维度一致
+            if mask.shape != loss_per_frame.shape:
+                # 简单广播保护，视情况而定
+                mask = mask.to(loss_per_frame.device)
+            
+            # 只取 mask 为 1 的部分的平均值
+            # 加上 1e-6 防止除以 0
+            loss = (loss_per_frame * mask).sum() / (mask.sum() + 1e-6)
+        else:
+            loss = loss_per_frame.mean()
         
         return loss
+
 
     # 基于你提供的原始代码修改，添加了 Config Mock 和 t 的处理
     def _apply_spatial_guidance(self, latents, t, ctx):
@@ -716,6 +840,18 @@ class MLD(BaseModel):
                         tensor[:, s:e] = float(val)
             return tensor
         # ========================================
+        # 新增一个辅助函数：构建 Mask Tensor (用于 Side Step)
+        def build_mask_tensor(bs, length, timeline_cfg):
+            # 默认全 False (不侧身)
+            mask = torch.zeros((bs, length), device=device)
+            if timeline_cfg is not None:
+                for segment in timeline_cfg:
+                    # [Start, End, 1.0/True]
+                    s, e, val = segment
+                    s, e = max(0, int(s)), min(length, int(e))
+                    if s < e and float(val) > 0.5: # 只要大于 0.5 就算开启
+                        mask[:, s:e] = 1.0
+            return mask
 
         #===========
 
@@ -793,54 +929,107 @@ class MLD(BaseModel):
                         ctx['lengths']
                     )
                     total_loss += loss_ceil * c_strength
+                # # =======================================================
+                # # ================= [C. 缝隙引导 (Narrow Gap)] =================
+                # if conf.get('GAP_MODE', False):
+                #     # 处理 t 维度 (同上)
+                #     if t.dim() == 0: t_input = t.unsqueeze(0).repeat(ctx['bsz'])
+                #     else: t_input = t
+                    
+                    
+                #     g_width = conf.get('GAP_WIDTH', 0.5)
+                #     g_strength = conf.get('GAP_STRENGTH', 2000.0)
+                #     g_margin = conf.get('SAFETY_MARGIN_GAP', 0.05) # 默认 5cm 缓冲
+
+                #     loss_gap = self._compute_gap_loss(
+                #         current_latents, 
+                #         t_input, 
+                #         g_width,
+                #         g_margin,
+                #         ctx['cond_embeddings'], 
+                #         ctx['lengths']
+                #     )
+                #     total_loss += loss_gap * g_strength
+                #     # =========================================================
+                # # ================= [D. 侧身引导 (Side-Stepping)] =================
+                # if conf.get('SIDE_STEP_MODE', False):
+                #     # 2. [核心新增] 自动侧身触发器
+                #     # 读取阈值，如果没配默认 0.6m
+                #     # 只有当缝隙小于 0.6m 时，才强制侧身
+                #     # 处理 t 维度 (同上)
+                #     if t.dim() == 0: t_input = t.unsqueeze(0).repeat(ctx['bsz'])
+                #     else: t_input = t
+                    
+                    
+                #     side_thresh = conf.get('SIDE_STEP_THRESHOLD', 0.6)
+                #     g_width = conf.get('GAP_WIDTH', 0.5)
+                #     if g_width < side_thresh:
+                #         side_strength = conf.get('SIDE_STEP_STRENGTH', 1500.0)
+                        
+                #         loss_side = self._compute_side_step_loss(
+                #             current_latents, t_input,
+                #             ctx['cond_embeddings'], ctx['lengths']
+                #         )
+                #         total_loss += loss_side * side_strength
+                        
+                #         # Debug 打印 (只打印一次防止刷屏)
+                #         if _ == 0 and t_val % 100 == 0:
+                #             print(f" [SideStep] Gap={g_width} < {side_thresh}, Loss={loss_side.item():.4f}")
                 # =======================================================
-                # ================= [C. 缝隙引导 (Narrow Gap)] =================
+                # ================= [C. 独立缝隙引导 (Wall)] =================
+                # 这里的 g_width_tensor 仅用于计算墙壁碰撞 Loss
+                g_width_tensor = None # 初始化变量
+                
                 if conf.get('GAP_MODE', False):
-                    # 处理 t 维度 (同上)
-                    if t.dim() == 0: t_input = t.unsqueeze(0).repeat(ctx['bsz'])
+                    # 1. 构建宽度 Tensor
+                    default_w = conf.get('GAP_WIDTH', 2.0)
+                    gap_timeline = conf.get('GAP_TIMELINE', [])
+                    g_width_tensor = build_timeline_tensor(bsz, max_len, default_w, gap_timeline)
+                    
+                    # 2. 计算碰撞 Loss
+                    if t.dim() == 0: t_input = t.unsqueeze(0).repeat(bsz)
                     else: t_input = t
                     
-                    
-                    g_width = conf.get('GAP_WIDTH', 0.5)
                     g_strength = conf.get('GAP_STRENGTH', 2000.0)
-                    g_margin = conf.get('SAFETY_MARGIN_GAP', 0.05) # 默认 5cm 缓冲
-
+                    g_margin = conf.get('SAFETY_MARGIN_GAP', 0.05)
+                    
                     loss_gap = self._compute_gap_loss(
-                        current_latents, 
-                        t_input, 
-                        g_width,
-                        g_margin,
-                        ctx['cond_embeddings'], 
-                        ctx['lengths']
+                        current_latents, t_input, g_width_tensor, g_margin,
+                        ctx['cond_embeddings'], ctx['lengths']
                     )
                     total_loss += loss_gap * g_strength
-                    # =========================================================
-                # ================= [D. 侧身引导 (Side-Stepping)] =================
+
+                # ================= [D. 独立侧身引导 (Side Step)] =================
                 if conf.get('SIDE_STEP_MODE', False):
-                    # 2. [核心新增] 自动侧身触发器
-                    # 读取阈值，如果没配默认 0.6m
-                    # 只有当缝隙小于 0.6m 时，才强制侧身
-                    # 处理 t 维度 (同上)
-                    if t.dim() == 0: t_input = t.unsqueeze(0).repeat(ctx['bsz'])
-                    else: t_input = t
+                    # 1. 确定哪些帧需要侧身 (Mask)
+                    side_mask = None
                     
+                    # 优先读取 SIDE_STEP_TIMELINE
+                    side_timeline = conf.get('SIDE_STEP_TIMELINE', None)
                     
-                    side_thresh = conf.get('SIDE_STEP_THRESHOLD', 0.6)
-                    g_width = conf.get('GAP_WIDTH', 0.5)
-                    if g_width < side_thresh:
+                    if side_timeline is not None and len(side_timeline) > 0:
+                        # 策略 A: 显式 Timeline 控制
+                        side_mask = build_mask_tensor(bsz, max_len, side_timeline)
+                    
+                    elif g_width_tensor is not None:
+                        # 策略 B: 自动回退 (Fallback)
+                        # 如果没写侧身 Timeline，但开了 Gap Mode，则根据缝隙宽度自动判断
+                        side_thresh = conf.get('SIDE_STEP_THRESHOLD', 0.6)
+                        side_mask = (g_width_tensor < side_thresh).float() # [B, L] 0.0 or 1.0
+                    
+                    # 2. 如果确定了 mask 且不全为 0，计算 Loss
+                    if side_mask is not None and side_mask.sum() > 0:
+                        if t.dim() == 0: t_input = t.unsqueeze(0).repeat(bsz)
+                        else: t_input = t
+                        
                         side_strength = conf.get('SIDE_STEP_STRENGTH', 1500.0)
                         
                         loss_side = self._compute_side_step_loss(
                             current_latents, t_input,
-                            ctx['cond_embeddings'], ctx['lengths']
+                            ctx['cond_embeddings'], ctx['lengths'],
+                            mask=side_mask # <--- 传入 Mask
                         )
                         total_loss += loss_side * side_strength
-                        
-                        # Debug 打印 (只打印一次防止刷屏)
-                        if _ == 0 and t_val % 100 == 0:
-                            print(f" [SideStep] Gap={g_width} < {side_thresh}, Loss={loss_side.item():.4f}")
-                # =======================================================
-                
                 
                 # 如果没有 Loss，直接退出
                 if isinstance(total_loss, float) and total_loss == 0.0:

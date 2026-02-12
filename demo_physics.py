@@ -573,18 +573,44 @@ def main():
         
         do_top_view = vis_cfg.get("TOP_VIEW_EXPORT", False)
         # === [新增] 俯视图可视化 ===
-        if do_top_view: # 复用开关
+        # if do_top_view: # 复用开关
+        #     traj_cfg = cfg.get("TRAJECTORY", {}).get("GUIDANCE", {})
+        #     gap_w = None
+        #     if traj_cfg.get("GAP_MODE", False):
+        #         gap_w = traj_cfg.get("GAP_WIDTH", None)
+            
+        #     top_mp4_path = output_dir / f"{content_name}_top.mp4"
+            
+        #     render_top_view(
+        #         motion_data=motion_output, # 注意检查是否需要转置
+        #         save_path=str(top_mp4_path),
+        #         gap_width=gap_w
+        #     )
+        if do_top_view: 
             traj_cfg = cfg.get("TRAJECTORY", {}).get("GUIDANCE", {})
-            gap_w = None
+            
+            # 读取 Gap Info (可以是 Timeline 或 float)
+            gap_info = None
             if traj_cfg.get("GAP_MODE", False):
-                gap_w = traj_cfg.get("GAP_WIDTH", None)
+                timeline = traj_cfg.get("GAP_TIMELINE", None)
+                if timeline is not None:
+                        # 确保转换类型 (假设你已经在 main 里删除了多余的 import OmegaConf)
+                        # 并且在文件头 import 了
+                    
+                    timeline = OmegaConf.to_container(timeline, resolve=True)
+
+                if timeline and len(timeline) > 0:
+                    gap_info = timeline
+                else:
+                    gap_info = traj_cfg.get("GAP_WIDTH", None)
             
             top_mp4_path = output_dir / f"{content_name}_top.mp4"
             
+            # 调用
             render_top_view(
-                motion_data=motion_output, # 注意检查是否需要转置
+                motion_data=motion_output, 
                 save_path=str(top_mp4_path),
-                gap_width=gap_w
+                gap_info=gap_info # 参数名改为 gap_info 以支持列表
             )
             
         # === [新增] 正视图 (Front View) 可视化 ===
