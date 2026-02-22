@@ -1,4 +1,4 @@
-NAME: scenemoDiff_0101_with_scene # 输出到experiments/mld下面
+NAME: scenemoDiff_0101_without_scene # 输出到experiments/mld下面
 DEBUG: False
 ACCELERATOR: 'gpu'
 DEVICE: [0,1,2]
@@ -59,7 +59,7 @@ TEST:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 50
+  SACE_CHECKPOINT_EPOCH: 100
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True

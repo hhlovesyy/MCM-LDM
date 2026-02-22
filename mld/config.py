@@ -77,6 +77,23 @@ def parse_args(phase="train"):
         group.add_argument("--render_video",
                            action="store_true",
                            help="render mp4 Video")
+        
+        # 新加一些可以解析的参数：0101
+        group.add_argument("--film_scalar", type=float, required=False,
+            default=1.0,
+            help="FiLM Scalar param")
+        group.add_argument("--trajectory_path", type=str, required=False,
+                            default="/root/autodl-tmp/MyRepository/MCM-LDM/task_config_baseline.json", help="scene config json file path")
+        group.add_argument("--demo_out_dir", type=str, required=False, 
+                           default="/root/autodl-tmp/MyRepository/MCM-LDM/results/mld", help="产出demo的输出路径")
+        
+        group.add_argument("--exp_name", type=str, required=False,
+                           default="SceneMoDiff", help="实验的文件名，方便产出demo的时候好找对应关系")
+        group.add_argument("--use_scene",
+                           action="store_true",
+                           help="渲染demo的时候是否包含场景")
+
+
         group.add_argument("--render_mode", type=str, help="video or sequence")
         group.add_argument(
             "--frame_rate",
@@ -263,6 +280,11 @@ def parse_args(phase="train"):
         else:
             cfg.DEMO.SAVE_PATH_FOR_EVAL = None
         cfg.DEMO.render_video = params.render_video
+        cfg.DEMO.film_scalar = params.film_scalar
+        cfg.DEMO.trajectory_path = params.trajectory_path
+        cfg.DEMO.demo_out_dir = params.demo_out_dir
+        cfg.DEMO.exp_name = params.exp_name
+        cfg.DEMO.use_scene = params.use_scene
 
     if phase == "render":
         if params.npy:

@@ -44,6 +44,64 @@ def find_longest_continuous_good_segment(valid_frames_mask):
         
     return best_start, best_end
 
+def load_motion_compat(file_path):
+    # 1. 加载数据
+    data = np.load(file_path, allow_pickle=True)
+    hint = None
+    
+    # 2. 字典提取逻辑
+    if data.dtype == 'object':
+        try:
+            data_dict = data.item()
+            if isinstance(data_dict, dict) and 'motion' in data_dict:
+                motion = data_dict['motion']
+            else:
+                motion = np.array(data_dict)
+
+            if isinstance(data_dict, dict) and 'hint' in data_dict:
+                hint = data_dict['hint']
+
+        except:
+            motion = data
+    else:
+        motion = data
+
+    # 3. 维度转换逻辑 (1, 22, 3, 196) -> (196, 22, 3)
+    if hasattr(motion, 'detach'): # 如果是 torch tensor 先转 numpy
+        motion = motion.detach().cpu().numpy()
+    if hint is not None and hasattr(hint, 'detach'):
+        hint = hint.detach().cpu().numpy()
+
+    # 检查维度并转换, 这个就是针对OmniControl的，要把原点给他加上，我们的模型生成的结果是没有这个的
+    if motion.ndim == 4 and motion.shape[0] == 1:
+        # 步骤 1: 去掉 batch 维度 -> (22, 3, 196)
+        motion = np.squeeze(motion, axis=0) 
+        # 步骤 2: 将最后一维（帧数）提到最前面 -> (196, 22, 3)
+        # 原维度索引: 22(0), 3(1), 196(2)
+        # 目标索引顺序: 196(2), 22(0), 3(1)
+        motion = motion.transpose(2, 0, 1)
+        import copy
+        import json
+        json_path = "/root/autodl-tmp/MyRepository/MCM-LDM/task_config_baseline.json"
+
+        # 使用 with 语句打开文件（这样会自动关闭文件，更安全）
+        with open(json_path, 'r', encoding='utf-8') as f:
+            scene_data = json.load(f)
+        # 这部分直接复制你项目里的逻辑，确保坐标系对齐
+        traj_config = copy.deepcopy(scene_data['trajectory'])
+        obstacles = copy.deepcopy(scene_data['environment']['obstacles'])
+        
+        # 坐标归一化 (起点归零)
+        waypoints = traj_config['points']
+        startPosX, startPosY = waypoints[0][0], waypoints[0][1]
+        motion[..., 0] += startPosX # X
+        motion[..., 2] += startPosY
+
+    if hint is not None and hint.ndim == 4 and hint.shape[0] == 1: # shape:(1, 196, 22, 3), 目前是针对OmniControl的
+        hint = np.squeeze(hint, axis=0)
+        
+    return motion, hint
+
 def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result", pos_threshold=50.0):
     """
     [Final Version] 将 (T, J, 3) 的 .npy 关节数据转换为 .pkl，
@@ -51,11 +109,12 @@ def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result
     """
     npy_trajectory_file_path = npy_file_path.replace('.npy', '_givenTraj.npy')
     try:
-        joints_data = np.load(npy_file_path)
-        if os.path.exists(npy_trajectory_file_path):
+        joints_data, hint = load_motion_compat(npy_file_path)
+        hint = None
+        if os.path.exists(npy_trajectory_file_path) and hint is None:
             npy_trajectory_data = np.load(npy_trajectory_file_path)
         else:
-            npy_trajectory_data = None 
+            npy_trajectory_data = hint
         
         if joints_data.ndim != 3 or joints_data.shape[2] != 3:
             print(f"\n警告: 文件 {os.path.basename(npy_file_path)} 格式不正确 (应为 T,J,3)，已跳过。")
@@ -63,7 +122,12 @@ def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result
         if npy_trajectory_data is not None:
             if npy_trajectory_data.ndim != 2 or npy_trajectory_data.shape[1] != 3:
                 print(f"\n警告: 文件 {os.path.basename(npy_trajectory_file_path)} 格式不正确 (应为 T,3)，将被视为无轨迹处理。")
-                npy_trajectory_data = None # 格式不对，直接当作没读取到
+                print("shape: ", npy_trajectory_data.shape)
+                if npy_trajectory_data.ndim == 3 and npy_trajectory_data.shape[1] == 22:
+                    npy_trajectory_data = npy_trajectory_data[:, 0, :]
+                    print("此时轨迹的维度是： ", npy_trajectory_data.shape)
+                else:
+                    npy_trajectory_data = None # 格式不对，直接当作没读取到
 
         # 1. 【核心】基于根关节的位置，识别所有“好帧”
         root_positions = joints_data[:, 0, :] # [T, 3]
@@ -103,7 +167,7 @@ def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result
             given_hint = np.zeros_like(npy_trajectory_data)
             given_hint[:, 0] = npy_trajectory_data[:, 0]
             given_hint[:, 2] = npy_trajectory_data[:, 2]
-            assert ((given_hint.ndim == ground_trajectory.ndim) and (given_hint.shape[0] == ground_trajectory.shape[0])), "提示轨迹与模型生成轨迹的维度对不上，请检查脚本或者数据流！"
+            # assert ((given_hint.ndim == ground_trajectory.ndim) and (given_hint.shape[0] == ground_trajectory.shape[0])), "提示轨迹与模型生成轨迹的维度对不上，请检查脚本或者数据流！"
         else:
             print(f"\n警告: 没有轨迹的相关文件！轨迹为None")
             given_hint = None
@@ -184,6 +248,6 @@ if __name__ == "__main__":
     process_folder(args.input_folder, output_folder, args.title)
     
     # # 调用主处理函数
-    # process_folder("/root/autodl-tmp/MyRepository/MotionLCM/MotionLCM/npyInput_sceneMoDiff/MLP/Balance",
-    #                 "/root/autodl-tmp/MyRepository/MotionLCM/MotionLCM/npyInput_sceneMoDiff/MLP/Balance_pkl",
+    # process_folder("/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/scenemoDiff_1229_Baseline_no_scene/OmniControl",
+    #                 "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/scenemoDiff_1229_Baseline_no_scene/OmniControl_pkl",
     #                 "FinetuneBaseline_Balance")

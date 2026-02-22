@@ -1,0 +1,226 @@
+NAME: scenemoDiff_1230_Baseline_no_scene_MCM-LDM
+DEBUG: False
+ACCELERATOR: 'gpu'
+# DEVICE: [0]
+DEVICE: [0,1,2]
+
+SCENE_MODIFF_ABLATION:
+  FUSION_MODE: "film"  # 消融的话是“mlp”
+  USE_SCENE_CLS: True      # 是否使用场景分类 Loss，消融掉的话是False
+  LAMBDA_SCENE: 0.2       # 场景分类 Loss 的权重，如果测试消融FiLM的话，这个值不要改；如果要尝试炼丹，估计先试试改这个值
+  DIFFUSION_PENALTY: 0.5  # 这个值先别炼丹了，估计没什么用，这个指的是有场景的样本会把 diffsion loss往下压一点点，让模型更关注场景
+  UPDATE_BASELINE: True  # 保持这个就挺好，这个是论文里面写的那个涨点模块，没崩了就一直开着吧
+
+  JUST_FINETUNE_BASELINE: True # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
+
+TRAIN:
+  STAGE: diffusion
+  # DATASETS: ['stylescenedataset']
+  DATASETS: ['humanml3d']
+  # Number of dataloader workers
+  NUM_WORKERS: 16
+  # Size of batches
+  BATCH_SIZE: 170
+  # Total epochs for training
+  END_EPOCH: 1200
+
+  # /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=249.ckpt
+  RESUME: '' # Resume training from this path
+  PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
+  PRETRAINED: ''
+  # PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1210_TrainAll/checkpoints/epoch=69.ckpt'
+  OPTIM:
+    TYPE: AdamW # Optimizer type
+    # LR: 2e-5 # Learning rate
+    LR: 1.0e-4
+    # 【关键】为 Denoiser 设置一个很小的学习率，进行微调
+    LR_DENOISER: 1.0e-5
+    # 【关键】可以适当降低新模块的学习率，因为它们已经 warm-up 过了
+    LR_ADAPTER: 1.0e-4
+  # Ablation study configurations.
+  ABLATION:
+    SKIP_CONNECT: True
+    PE_TYPE: mld
+    DIFF_PE_TYPE: mld
+    FUSION_MODE: "film"
+
+#####################################
+# The following are validation settings
+#####################################
+EVAL:
+  DATASETS: ['humanml3d'] # Evaluating datasets
+  BATCH_SIZE: 32 # Evaluating Batch size
+  SPLIT: test
+
+#####################################
+# The following are testing settings
+#####################################
+TEST:
+  # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/testWithScene_1203_scenetext_addImage/checkpoints/epoch=149.ckpt'
+  CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt'
+  #CHECKPOINTS: ./models/mld_humanml3d_checkpoint/1222_mld_humanml3d_FID041.ckpt # Pretrained model path
+  DATASETS: ['humanml3d'] # training datasets
+  SPLIT: test
+  BATCH_SIZE: 128 # training Batch size
+  MEAN: False
+  NUM_SAMPLES: 1
+  FACT: 1
+  MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
+  # MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
+  MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
+  MULTI_MODAL_IMAGE_PATH: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene/scene_images/Dumuqiao/01.jpg'
+  CFG_STYLE : 10.0
+  CFG_SCENE : 10.0
+
+#####################################
+# The following are basic datasets settings
+#####################################
+DATASET:
+  JOINT_TYPE: 'humanml3d' # join type
+
+#####################################
+# The following are metric settings
+#####################################
+METRIC:
+  TYPE: ['TemosMetric', 'TM2TMetrics']
+
+#####################################
+# The following are training losses settings
+#####################################
+LOSS:
+  TYPE: mld # Losses type
+  LAMBDA_LATENT: 1.0e-5 # Lambda for latent Losses
+  LAMBDA_KL: 1.0e-4 # Lambda for kl Losses
+  LAMBDA_REC: 1.0 # Lambda for reconstruction Losses
+  LAMBDA_GEN: 1.0 # Lambda for text-motion generation losses
+  LAMBDA_CROSS: 1.0 # Lambda for reconstruction Losses
+  LAMBDA_CYCLE: 0.0 # Lambda for cycle Losses
+  LAMBDA_PRIOR: 0.0
+  DIST_SYNC_ON_STEP: False # Sync Losses on step when distributed trained
+
+  USE_SCENE_CLS: False      # 【总开关】是否使用场景分类 Loss
+  LAMBDA_SCENE: 0.2       # 【权重】分类 Loss 的权重
+  CORRUPTION_PROB: 0.7      # 【策略】训练时有多大概率破坏 Style，强迫模型学 Scene
+
+#####################################`
+# The following are basic model settings
+#####################################
+model:
+  vae: true # whether vae model
+  model_type: mld # model type
+  condition: 'text'
+  latent_dim: [7, 256] # latent dimension
+  ff_size: 1024 #
+  num_layers: 9 # number of layers
+  num_head: 4 # number of head layers
+  droupout: 0.1 # dropout rate
+  activation: gelu # activation type
+  guidance_scale: 5 #7.5 5
+  guidance_uncondp: 0.25 # 0.1 0.25
+
+#####################################
+# The following are loggers settings
+#####################################
+LOGGER:
+  SACE_CHECKPOINT_EPOCH: 100
+  LOG_EVERY_STEPS: 1
+  VAL_EVERY_STEPS: 100
+  TENSORBOARD: True
+  WANDB:
+    PROJECT: null
+    OFFLINE: False
+    RESUME_ID: null
+  
+TRAIN_STRTEGY:
+  MULTI_MODAL_FUSION: "text"  # 会使用图像/文本的一侧，概率各50%, 也可以设置为 "text" 或 "image"(表示为纯文本或者纯图像)
+
+TRAJECTORY:
+  ENABLED: True  # 是False的话会用content的轨迹
+  # ================= 架构相关 =================
+  # 是否启用强力注入 (Concat 方式)
+  # 如果 False，则回退到原始的 AdaLN 弱注入
+  INJECTION_MODE: 'adaln'  # options: 'concat', 'adaln'
+  
+  # 轨迹编码器类型
+  # 'seq': 输出序列 (我们改的那版)
+  # 'pool': 输出单个 Token (MCM-LDM 原版)
+  ENCODER_TYPE: 'pool'
+
+  # ================= 训练策略 =================
+  # 旋转增强 (解决解耦的核心)
+  AUGMENTATION:
+    ENABLED: False
+    ROTATION_RANGE: 90.0  # 角度范围 +/- 90度
+  
+  # 根节点屏蔽 (双重保险,屏蔽263维特征向量的前4维)
+  ROOT_MASKING_DIM4: False
+  
+  # Content Dropout (逼迫模型看轨迹)
+  USE_CONTENT_DROPOUT: True
+  CONTENT_DROPOUT_PROB: 0.15
+
+  # ================= 推理引导 (默认值) =================
+  # 这些可以在推理脚本中覆盖，但这里设个默认值
+  GUIDANCE:
+    ENABLED: False
+    STRENGTH: 2.0
+    GUIDANCE_START : 1000  # 去噪开启引导的开始step和结束step
+    GUIDACE_END: 0
+
+    WAYPOINTS_MODE: True # 是否启用关键路点追踪功能
+    WAYPOINTS_GUIDE_STRENGTH: 200.0
+    WAYPOINTS_INTERVAL: 8
+
+    OBSTACLE_MODE: False  # 是否启用避障功能
+    OBSTACLE_GUIDE_STRENGTH: 2.0
+
+    STRICT_TRACK_MODE: False  # 是否要严格按照轨迹来走（效果比较差，不建议启用）
+    STRICT_TRACK_STRENGTH: 2.0
+
+
+
+
+
+
+
+
+
+SCENEMODIFF_GLOBAL_CONFIG:
+  JUST_FINETUNE_BASELINE: False # 是否仅仅是继续Finetune MCM-LDM（注意，没有任何新东西，只是全量Finetune MCM-LDM的全部代码）
+  ROOT_MASKING_DIM4: False
+  STEP1_DROP_STYLE_PROB: 0.1  # 在解耦轨迹的第一阶段，style随机dropout的概率是多少
+
+SCENEMODIFF_DENOISER_GLOBAL_CONFIG:
+  INJECTION_MODE: 'adaln'  # options: 'concat', 'adaln'
+  ENCODER_TYPE: 'pool' # pool
+
+SCENEMODIFF_GLOBAL_CONFIG_TRAIN:
+  MULTI_MODAL_FUSION: 'text' # 训练的时候如何融合场景多模态？text：只有文本；image：只有图像； mixed：两者混合训练
+  USE_SCENE_CLS: False
+
+SCENEMODIFF_GLOBAL_CONFIG_INFERENCE:
+
+CURRICULUM:
+  ENABLED: True
+  DEFAULT_STAGE: "stage0_force_alignment"
+  STAGES:
+    # =======================================================
+    # Stage 0: 快速对齐 (50 Epochs)
+    # 就像教新兵转体，先别让他负重，先教会听口令转方向。
+    # =======================================================
+    - NAME: "stage0_force_alignment"
+      EPOCH_START: 0
+      EPOCH_END: 1200
+      TRAJECTORY:
+        ROTATION_AUG: True
+        ROTATION_RANGE: 45.0
+        CONTENT_DROPOUT_PROB: 0.1
+        CONTENT_SPARSITY:
+          ENABLED: False # 不稀疏，全给
+          MODE: "first_frame" 
+          NUM_KEY_FRAMES: 5 
+      MASKING:
+        STRATEGY: "keep_style_only"  # 没有场景
+      LOSS:
+        LAMBDA_SCENE: 0.0

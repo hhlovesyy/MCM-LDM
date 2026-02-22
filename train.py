@@ -136,11 +136,19 @@ def main():
     ]
     logger.info("Callbacks initialized")
 
+    # 如果真的是多卡训练，打开下面这段注释
+    # if len(cfg.DEVICE) > 1:
+    #     # 【修改这里】
+    #     # 原来的 ddp 会导致含有 frozen layers 的模型报错
+    #     # 必须显式指定 find_unused_parameters_true
+    #     ddp_strategy = "ddp_find_unused_parameters_true"
+    # else:
+    #     ddp_strategy = "None"
+
+    # 以下是单卡训练的版本
     if len(cfg.DEVICE) > 1:
-        # 【修改这里】
-        # 原来的 ddp 会导致含有 frozen layers 的模型报错
-        # 必须显式指定 find_unused_parameters_true
-        ddp_strategy = "ddp_find_unused_parameters_true"
+        # ddp_strategy = DDPStrategy(find_unused_parameters=False)
+        ddp_strategy = "ddp"
     else:
         ddp_strategy = None
 
@@ -150,7 +158,7 @@ def main():
         max_epochs=cfg.TRAIN.END_EPOCH,
         accelerator=cfg.ACCELERATOR,
         devices=cfg.DEVICE,
-        strategy=ddp_strategy,
+        # strategy=ddp_strategy,  # 单卡注释到这句，多卡打开这句
         # move_metrics_to_cpu=True,
         default_root_dir=cfg.FOLDER_EXP,
         log_every_n_steps=cfg.LOGGER.VAL_EVERY_STEPS,

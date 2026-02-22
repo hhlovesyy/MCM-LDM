@@ -1,7 +1,7 @@
-NAME: scenemoDiff_0101_with_scene # 输出到experiments/mld下面
+NAME: scenemoDiff_0222_Stage1 # 输出到experiments/mld下面
 DEBUG: False
 ACCELERATOR: 'gpu'
-DEVICE: [0,1,2]
+DEVICE: [0]
 
 SCENE_MODIFF_ABLATION: # 必要字段，训练或者推理的时候使用的与场景相关的逻辑
   FUSION_MODE: "film"  # 消融的话是“mlp”
@@ -13,8 +13,8 @@ SCENE_MODIFF_ABLATION: # 必要字段，训练或者推理的时候使用的与�
 
 TRAIN:
   STAGE: diffusion
-  DATASETS: ['stylescenedataset']
-  # DATASETS: ['humanml3d']  # 如果是第一阶段轨迹解耦，是humanml3d数据集，但是应该没法再train了，第二阶段都是stylescenedataset
+  # DATASETS: ['stylescenedataset']
+  DATASETS: ['humanml3d']  # 如果是第一阶段轨迹解耦，是humanml3d数据集，但是应该没法再train了，第二阶段都是stylescenedataset
   # Number of dataloader workers
   NUM_WORKERS: 16
   # Size of batches
@@ -24,7 +24,7 @@ TRAIN:
 
   RESUME: '' # Resume training from this path，如果是同一个训练任务恢复权重用这个，否则用PRETRAINED这个权重
   PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
-  PRETRAINED: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=599.ckpt'
+  PRETRAINED: ''
 
   OPTIM:
     TYPE: AdamW # Optimizer type
@@ -42,7 +42,8 @@ TRAIN:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=499.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_0222_Stage1/checkpoints/epoch=249.ckpt'
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=449.ckpt'
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
   MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
 
@@ -59,7 +60,7 @@ TEST:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 50
+  SACE_CHECKPOINT_EPOCH: 25
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True
@@ -79,7 +80,7 @@ TRAJECTORY:
   # 轨迹编码器类型
   # 'seq': 输出序列 (我们改的那版)
   # 'pool': 输出单个 Token (MCM-LDM 原版)
-  ENCODER_TYPE: 'seq'
+  ENCODER_TYPE: 'dynamic_query'
   
   # 根节点屏蔽 (双重保险,屏蔽263维特征向量的前4维)
   ROOT_MASKING_DIM4: True
@@ -104,25 +105,25 @@ TRAJECTORY:
 
 # 应该是训练的时候会使用，推理用不到
 SCENEMODIFF_GLOBAL_CONFIG: 
-  JUST_FINETUNE_BASELINE: False # 是否仅仅是继续Finetune MCM-LDM（注意，没有任何新东西，只是全量Finetune MCM-LDM的全部代码）
-  ROOT_MASKING_DIM4: True
+  JUST_FINETUNE_BASELINE: False # [REBUTTAL]是否仅仅是继续Finetune MCM-LDM（注意，没有任何新东西，只是全量Finetune MCM-LDM的全部代码）
+  ROOT_MASKING_DIM4: True  # [REBUTTAL] 是否屏蔽掉根节点的前四维
   STEP1_DROP_STYLE_PROB: 0.1  # 在解耦轨迹的第一阶段，style随机dropout的概率是多少
 
 SCENEMODIFF_DENOISER_GLOBAL_CONFIG:
   INJECTION_MODE: 'concat'  # options: 'concat', 'adaln'
-  ENCODER_TYPE: 'seq'
+  ENCODER_TYPE: 'dynamic_query'  # 'seq'
 
 SCENEMODIFF_GLOBAL_CONFIG_TRAIN:
   MULTI_MODAL_FUSION: 'text' # 训练的时候如何融合场景多模态？text：只有文本；image：只有图像； mixed：两者混合训练
-  USE_SCENE_CLS: True
+  USE_SCENE_CLS: False
 
 # todo：现在的yaml文件太乱了，后面回来记得优化一下，暂时是没有时间了
 
 CURRICULUM:
   ENABLED: True
-  DEFAULT_STAGE: "stage_finetuneWith_sceneDataset"
+  DEFAULT_STAGE: "stage_1_Geometry_Scene"
   STAGES:
-    - NAME: "stage_finetuneWith_sceneDataset"
+    - NAME: "stage_1_Geometry_Scene"
       EPOCH_START: 0
       EPOCH_END: 400
       TRAJECTORY:
@@ -134,9 +135,9 @@ CURRICULUM:
           MODE: "first_frame" 
           NUM_KEY_FRAMES: 5 
       MASKING:
-        STRATEGY: "probabilistic_mix"  # 没有场景
+        STRATEGY: "keep_style_only"  # 没有场景
       LOSS:
-        LAMBDA_SCENE: 0.2
+        LAMBDA_SCENE: 0.0
 
 #####################################
 # The following are validation settings

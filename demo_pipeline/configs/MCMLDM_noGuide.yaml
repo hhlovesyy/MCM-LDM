@@ -1,4 +1,4 @@
-NAME: scenemoDiff_0101_with_scene # 输出到experiments/mld下面
+NAME: MCM_LDM_0101_NOGUIDE # 输出到experiments/mld下面
 DEBUG: False
 ACCELERATOR: 'gpu'
 DEVICE: [0,1,2]
@@ -41,8 +41,7 @@ TRAIN:
 # The following are testing settings
 #####################################
 TEST:
-  # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=499.ckpt'
+  CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
   MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
 
@@ -59,7 +58,7 @@ TEST:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 50
+  SACE_CHECKPOINT_EPOCH: 100
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True
@@ -74,20 +73,20 @@ TRAJECTORY:
   # ================= 架构相关 =================
   # 是否启用强力注入 (Concat 方式)
   # 如果 False，则回退到原始的 AdaLN 弱注入
-  INJECTION_MODE: 'concat'  # options: 'concat', 'adaln'
+  INJECTION_MODE: 'adaln'  # options: 'concat', 'adaln'
   
   # 轨迹编码器类型
   # 'seq': 输出序列 (我们改的那版)
   # 'pool': 输出单个 Token (MCM-LDM 原版)
-  ENCODER_TYPE: 'seq'
+  ENCODER_TYPE: 'pool'
   
   # 根节点屏蔽 (双重保险,屏蔽263维特征向量的前4维)
-  ROOT_MASKING_DIM4: True
+  ROOT_MASKING_DIM4: False
   
   # ================= 推理引导 (默认值) =================
   # 这些可以在推理脚本中覆盖，但这里设个默认值
   GUIDANCE:
-    ENABLED: True
+    ENABLED: False
     STRENGTH: 2.0
     GUIDANCE_START : 1000  # 去噪开启引导的开始step和结束step
     GUIDACE_END: 0
@@ -105,12 +104,12 @@ TRAJECTORY:
 # 应该是训练的时候会使用，推理用不到
 SCENEMODIFF_GLOBAL_CONFIG: 
   JUST_FINETUNE_BASELINE: False # 是否仅仅是继续Finetune MCM-LDM（注意，没有任何新东西，只是全量Finetune MCM-LDM的全部代码）
-  ROOT_MASKING_DIM4: True
+  ROOT_MASKING_DIM4: False
   STEP1_DROP_STYLE_PROB: 0.1  # 在解耦轨迹的第一阶段，style随机dropout的概率是多少
 
 SCENEMODIFF_DENOISER_GLOBAL_CONFIG:
-  INJECTION_MODE: 'concat'  # options: 'concat', 'adaln'
-  ENCODER_TYPE: 'seq'
+  INJECTION_MODE: 'adaln'  # options: 'concat', 'adaln'
+  ENCODER_TYPE: 'pool'
 
 SCENEMODIFF_GLOBAL_CONFIG_TRAIN:
   MULTI_MODAL_FUSION: 'text' # 训练的时候如何融合场景多模态？text：只有文本；image：只有图像； mixed：两者混合训练

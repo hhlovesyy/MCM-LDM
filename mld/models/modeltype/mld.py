@@ -533,12 +533,12 @@ class MLD(BaseModel):
             
         return mask_style, mask_scene
     
-    def _apply_film_fusion(self, style_emb, scene_feat, mask_scene):
+    def _apply_film_fusion(self, style_emb, scene_feat, mask_scene, scene_scale_factor = 1.0):
         """
         处理 FiLM 融合逻辑，包含对 mask_scene 的特殊处理
         """
         scene_feat_norm = self.scene_norm(scene_feat)
-        film_params = self.film_mlp(scene_feat_norm)
+        film_params = self.film_mlp(scene_feat_norm * scene_scale_factor)
         
         # 核心逻辑：确保 Mask 掉 Scene 时，FiLM 参数失效 (退化为 Identity)
         mask_scene_expanded = mask_scene.unsqueeze(1).unsqueeze(2).float()
@@ -604,7 +604,9 @@ class MLD(BaseModel):
         # 但不需要传回 VAE 或 MotionCLIP。根据你的需求决定是否加 detach。
         # 原代码没加，这里保持原样。
         pred_motion = self.vae.decode(pred_original_sample.permute(1,0,2), lengths)
-        pred_motion_denorm = pred_motion * self.std + self.mean
+        std = self.std.to(pred_motion.device)
+        mean = self.mean.to(pred_motion.device)
+        pred_motion_denorm = pred_motion * std + mean
         pred_motion_denorm[..., :3] = 0.0 # 去根位置
         
         pred_input = pred_motion_denorm.permute(0,2,1).unsqueeze(2) # [B, 263, 1, T]
@@ -794,72 +796,6 @@ class MLD(BaseModel):
         
         return features
 
-    def generate_custom_trajectory(self, batch_size, length, estimated_speed, estimated_height,  shape_type='circle', device='cuda'):
-        """
-        生成两样东西：
-        1. trans_cond: [B, L, 4] -> (RotVel, VelX, VelZ, PosY)，这是喂给 DiT 的条件
-        2. target_global_pos: [B, L, 3] -> (GlobalX, GlobalY, GlobalZ)，这是计算 Loss 的目标
-        """
-        estimated_speed = estimated_speed
-        speed = estimated_speed.view(-1, 1) # [B, 1]
-        radius = 2.5
-        # 初始化
-        trans_cond = torch.zeros((batch_size, length, 4), device=device)
-        target_global_pos = torch.zeros((batch_size, length, 3), device=device)
-        
-        
-        if shape_type == 'circle':
-            # 这里的 RotVel 是 Y轴角速度
-            # omega = v / r
-            angular_velocity = speed / radius # [B, 1]
-            
-            # 广播赋值: trans_cond[..., 0] 是 [B, L]，angular_velocity 是 [B, 1]
-            trans_cond[..., 0] = angular_velocity
-            trans_cond[..., 2] = speed.squeeze(1).unsqueeze(1).expand(-1, length) # 确保维度正确
-            trans_cond[..., 3] = estimated_height  # 0.95
-              
-        elif shape_type == 'line':
-            # ... (直线逻辑同理修改) ...
-            trans_cond[..., 0] = 0.0
-            trans_cond[..., 2] = speed.squeeze(1).unsqueeze(1).expand(-1, length)
-            trans_cond[..., 3] = estimated_height
-        elif shape_type == 'line_left':
-            # 1. 计算角速度
-            angular_velocity = speed / radius # 结果通常为 [B, 1]
-            
-            # 2. 定义转弯的转折点（例如前 30 帧）
-            turn_len = min(30, length) 
-            
-            # --- 处理前 turn_len 帧：圆周运动 (左转) ---
-            # 索引 0: 角速度 (Angular Velocity)
-            trans_cond[:, :turn_len, 0] = angular_velocity.expand(-1, turn_len)
-            # 索引 2: 线速度 (Forward Speed)
-            trans_cond[:, :turn_len, 2] = speed.expand(-1, turn_len)
-            
-            # --- 处理剩余帧：直线运动 ---
-            if length > turn_len:
-                # 索引 0: 角速度归零
-                trans_cond[:, turn_len:, 0] = 0.0
-                # 索引 2: 保持线速度
-                trans_cond[:, turn_len:, 2] = speed.expand(-1, length - turn_len)
-            
-            # 3. 设置高度 (通常是索引 3)
-            trans_cond[..., 3] = estimated_height
-
-        
-        target_global_pos = calculate_trajectory_correct(trans_cond)
-        
-        # 归一化处理
-        mean = self.mean.to(device)
-        std = self.std.to(device)
-        
-        mean_cond = mean[..., :4]
-        std_cond = std[..., :4]
-        
-        trans_cond_norm = (trans_cond - mean_cond) / std_cond
-
-        return trans_cond_norm, target_global_pos
-    
     def _compute_waypoint_loss(self, latents, t, target_global_pos, encoder_hidden_states, lengths, interval=20):
             
         # 1. 预测 & 反推 (保持不变)
@@ -934,49 +870,7 @@ class MLD(BaseModel):
         
         # return grad
         return loss
-    
 
-    # def configure_optimizers(self):
-    #     # 从配置文件中读取两组学习率，并提供默认值以防万一
-    #     lr_denoiser = self.cfg.TRAIN.OPTIM.get("LR_DENOISER", 1e-5)
-    #     lr_adapter = self.cfg.TRAIN.OPTIM.get("LR_ADAPTER", 5e-4)
-
-    #     print(f"Optimizer Config --> LR for Denoiser: {lr_denoiser}, LR for Adapter: {lr_adapter}")
-
-    #     # 1. Denoiser 参数组
-    #     denoiser_params = list(self.denoiser.parameters())
-        
-    #     # 2. Adapter (新模块) 参数组
-    #     adapter_params = []
-    #     # (这部分代码保持不变)
-    #     if hasattr(self, "scene_projector"):
-    #         adapter_params.extend(list(self.scene_projector.parameters()))
-    #     if hasattr(self, "scene_image_projector"):
-    #         adapter_params.extend(list(self.scene_image_projector.parameters()))
-    #     if hasattr(self, "film_mlp"):
-    #         adapter_params.extend(list(self.film_mlp.parameters()))
-    #     if hasattr(self, "scene_norm"):
-    #         adapter_params.extend(list(self.scene_norm.parameters()))
-    #     if hasattr(self, "style_norm"):
-    #         adapter_params.extend(list(self.style_norm.parameters()))
-
-    #     # 3. 构造参数组列表
-    #     param_groups = [
-    #         {"params": denoiser_params, "lr": lr_denoiser},
-    #         {"params": adapter_params, "lr": lr_adapter},
-    #     ]
-
-    #     # 4. 实例化优化器
-    #     optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0)
-        
-    #     print(f"Optimizer initialized. Denoiser Group Size: {len(denoiser_params)}, Adapter Group Size: {len(adapter_params)}")
-        
-    #     return {"optimizer": optimizer}
-        
-    # def configure_optimizers(self):
-    #     # 只训练 Denoiser，学习率设得很小
-    #     optimizer = torch.optim.AdamW(self.denoiser.parameters(), lr=1e-6)
-    #     return {"optimizer": optimizer}
 
     def _get_t2m_evaluator(self, cfg):
         """
@@ -1218,8 +1112,10 @@ class MLD(BaseModel):
         # 伪造 mask (推理时全 False)
         dummy_mask = torch.zeros(bsz, dtype=torch.bool, device=device)
         
+        scene_cfg_scale = self.cfg.DEMO.film_scalar
+
         if self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "film":
-            adapted_style = self._apply_film_fusion(motion_emb_cond, scene_feat, dummy_mask)
+            adapted_style = self._apply_film_fusion(motion_emb_cond, scene_feat, dummy_mask, scene_scale_factor=scene_cfg_scale)
         else:
             adapted_style = self._apply_mlp_fusion(motion_emb_cond, scene_feat)
             
@@ -1275,7 +1171,7 @@ class MLD(BaseModel):
              target_global_pos[..., 0] += startPosX
              target_global_pos[..., 2] += startPosY
         
-        if True and False: 
+        if True: 
             try:
                 # 0. 准备工作
                 batch_size = joints.shape[0]
@@ -1685,14 +1581,14 @@ class MLD(BaseModel):
         else:
             # 执行融合 (FiLM / MLP)
             if self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "film":
-                adapted_style_emb = self._apply_film_fusion(motion_emb, curr_scene_feat, mask_scene)
+                adapted_style_emb = self._apply_film_fusion(motion_emb, curr_scene_feat, mask_scene, 1.0)
             elif self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "mlp":
                 adapted_style_emb = self._apply_mlp_fusion(motion_emb, curr_scene_feat)
             else:
                 raise ValueError("Unknown fusion mode")
             
         adapted_style_emb = self.style_norm(adapted_style_emb)
-        trans_cond = batch["motion"][..., :dims_to_mask]
+        trans_cond = batch["motion"][..., :dims_to_mask]  # traj_cond
         multi_cond_emb = [cond_emb, adapted_style_emb, trans_cond]
         n_set = self._diffusion_process(z, multi_cond_emb, lengths)
 
@@ -1711,6 +1607,7 @@ class MLD(BaseModel):
         feats_content = batch["motion"].clone()
         feats_content[...,:3] = 0.0
         lengths = batch["length"]
+        device = feats_content.device
         
         # content condition
         with torch.no_grad():
@@ -1718,6 +1615,8 @@ class MLD(BaseModel):
             z_content, dist = self.vae.encode(feats_content, lengths)
             cond_emb = z_content.permute(1,0,2)            
         # style condition
+        self.mean = self.mean.to(device)
+        self.std = self.std.to(device)
         motion_seq = feats_ref*self.std + self.mean
         motion_seq[...,:3]=0.0
         motion_seq = motion_seq.unsqueeze(-1).permute(0,2,3,1)

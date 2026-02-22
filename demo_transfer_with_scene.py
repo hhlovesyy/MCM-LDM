@@ -205,6 +205,12 @@ def main():
     cfg.Name = "demo--" + cfg.NAME
     logger = create_logger(cfg, phase="demo")
 
+    demo_trajectory_path = cfg.DEMO.trajectory_path
+    demo_out_dir = cfg.DEMO.demo_out_dir
+    demo_exp_name = cfg.DEMO.exp_name
+    use_scene = cfg.DEMO.use_scene
+    print("是否使用场景？？", use_scene)  # [TODO:看看是不是只有渲染的时候用]
+
     path2 = '/root/autodl-tmp/MyRepository/MCM-LDM/vis_debug'
     import shutil
     for filename in os.listdir(path2):
@@ -227,10 +233,16 @@ def main():
     print("render video ? ", render_video)
     # 
     cfg.DEMO.TIME = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
-    output_dir = Path(
-        os.path.join(cfg.FOLDER, str(cfg.model.model_type), str(cfg.NAME),
-                    'style_transfer' + cfg.DEMO.TIME))
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if demo_out_dir == "":
+        output_dir = Path(
+            os.path.join(cfg.FOLDER, str(cfg.model.model_type), str(cfg.NAME),
+                        'style_transfer' + cfg.DEMO.TIME))
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = Path(os.path.join(demo_out_dir, demo_exp_name))
+        print(f"checkout output_dir: {output_dir}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
 
     # cuda options
     if cfg.ACCELERATOR == "gpu":
@@ -253,7 +265,7 @@ def main():
     model.to(device)
     model.eval()
 
-    json_path = "/root/autodl-tmp/MyRepository/MCM-LDM/task_config.json"
+    json_path = demo_trajectory_path
 
     # 使用 with 语句打开文件（这样会自动关闭文件，更安全）
     with open(json_path, 'r', encoding='utf-8') as f:
@@ -300,8 +312,6 @@ def main():
     if not has_image.item(): # 如果是文本，则把txt文件放到output_dir的路径下面
         with open(output_dir / "inference_text_prompt.txt", "w") as text_file:
             text_file.write(scene_prompt)
-            text_file.write("\nstyle cfg: {}".format(cfg.TEST.CFG_STYLE))
-            text_file.write("\nscene cfg: {}".format(cfg.TEST.CFG_SCENE))
             print(f"File saved to: {output_dir / 'inference_text_prompt.txt'}") # "w" 模式的含义是 "write"，覆盖写入，没有的话会创建
         
     # -------------------------------------------------------
@@ -401,7 +411,7 @@ def main():
             "scene_image": scene_image_batch,
             "scene_id": scene_id_batch,
             "has_image": has_image,
-            "ablation_no_scene": True  # 如果需要场景的话，把这一项改成False就可以了
+            "ablation_no_scene": use_scene  # 如果需要场景的话，把这一项改成False就可以了
         }
 
         # F. 推理
@@ -447,7 +457,7 @@ def main():
             # with open(scene_info_path, 'w') as f_json:
             #     json.dump(scene_data, f_json)
             mp4path = npypath.replace('.npy', '.mp4')
-            if render_video or True:
+            if render_video:
                 visual_pos(npypath, mp4path)
             traj_npypath = str(output_dir / f"{save_name}_givenTraj.npy")
             np.save(traj_npypath, hint_trajectory)

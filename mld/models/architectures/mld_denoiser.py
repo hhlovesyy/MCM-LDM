@@ -15,7 +15,8 @@ from mld.models.operator.cross_attention import (SkipTransformerEncoder_concat,
 from mld.models.operator.position_encoding import build_position_encoding
 from mld.utils.temos_utils import lengths_to_mask
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
-
+from torch.nn import MultiheadAttention
+import math
 
 
 # trans encoder
@@ -132,9 +133,80 @@ class TrajectoryEncoderV2(nn.Module):
         return x
 
 
+class DynamicQueryTrajectoryEncoder(nn.Module):
+    """
+    顶会级轨迹编码器：彻底抛弃 Average Pooling，使用 Cross-Attention 保留高频拐点信息
+    """
+    def __init__(self, input_dim=4, hidden_dim=256, num_layers=2):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        
+        # 1. 局部特征提取
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # 2. 原始高帧率序列的自注意力 (提取连续性轨迹特征)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, nhead=4, dim_feedforward=512, batch_first=True
+        )
+        self.raw_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # 3. 基于 Cross-Attention 的信息压缩 (代替 avg_pool)
+        self.cross_attn = MultiheadAttention(embed_dim=hidden_dim, num_heads=4, batch_first=True)
+        
+        # 4. 零初始化映射层 (解决问题一)
+        self.zero_out = nn.Linear(hidden_dim, hidden_dim)
+        nn.init.zeros_(self.zero_out.weight)
+        nn.init.zeros_(self.zero_out.bias)
 
+    def _get_sinusoidal_pe(self, length, dim, device):
+        """生成动态长度的位置编码作为 Query"""
+        pe = torch.zeros(length, dim, device=device)
+        position = torch.arange(0, length, dtype=torch.float, device=device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, dim, 2, dtype=torch.float, device=device) * (-math.log(10000.0) / dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        return pe.unsqueeze(0) # [1, L, Dim]
 
+    def forward(self, trajectory, lengths=None, target_len=None):
+        # trajectory: [B, T_raw, 4]
+        B, T_raw, _ = trajectory.shape
+        device = trajectory.device
+        
+        # === 阶段 1: 编码高分辨率原始轨迹 ===
+        x_raw = self.input_proj(trajectory) # [B, T_raw, 256]
+        raw_pe = self._get_sinusoidal_pe(T_raw, self.hidden_dim, device).expand(B, -1, -1)
+        x_raw = x_raw + raw_pe
+        
+        mask = lengths_to_mask(lengths, device) if lengths is not None else None
+        # key_padding_mask 在 nn.Transformer 里 True 代表要忽略
+        padding_mask = ~mask if mask is not None else None 
+        
+        memory = self.raw_transformer(x_raw, src_key_padding_mask=padding_mask) # [B, T_raw, 256]
 
+        # === 阶段 2: 动态 Query 交叉注意力压缩 ===
+        if target_len is not None:
+            # 根据隐空间的目标长度，生成动态的 Query
+            # Query 不包含具体特征，只包含时间位置先验，让它自己去 memory 里"寻找"这个时间段附近的高频拐点
+            queries = self._get_sinusoidal_pe(target_len, self.hidden_dim, device).expand(B, -1, -1)
+            
+            # Cross-Attention: Q是目标低帧率，K,V是原始高帧率
+            # 这样就能保留关键点信息，而不是被平均掉
+            x_pooled, attn_weights = self.cross_attn(
+                query=queries,
+                key=memory,
+                value=memory,
+                key_padding_mask=padding_mask
+            ) # x_pooled: [B, target_len, 256]
+        else:
+            x_pooled = memory
+
+        # === 阶段 3: Zero-Initialization 输出 ===
+        out = self.zero_out(x_pooled)
+        return out
 
 
 
@@ -300,6 +372,10 @@ class MldDenoiser(nn.Module):
         if self.train_denoiser_config.ENCODER_TYPE == 'seq': # 新的版本，升级轨迹编码器
             self.trans_Encoder = TrajectoryEncoderV2(input_dim=4, hidden_dim=256, num_layers=2)
             self.fusion_layer = nn.Linear(self.latent_dim + 256, self.latent_dim)
+        elif self.train_denoiser_config.ENCODER_TYPE == 'dynamic_query':
+            # === 新增：顶会级交叉注意力轨迹编码器 ===
+            self.trans_Encoder = DynamicQueryTrajectoryEncoder(input_dim=4, hidden_dim=self.latent_dim, num_layers=2)
+            # 因为也是输出 [B, 7, 256]，所以后面的 concat 逻辑完全兼容
         else:
             self.trans_Encoder = TransEncoder(d_model=256, num_heads=4)
         

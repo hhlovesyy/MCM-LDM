@@ -42,7 +42,8 @@ TRAIN:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=499.ckpt'
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_0101_with_scene/checkpoints/epoch=399.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_0101_with_scene_noAug/checkpoints/epoch=149.ckpt'
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
   MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
 
@@ -59,7 +60,7 @@ TEST:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 50
+  SACE_CHECKPOINT_EPOCH: 100
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True

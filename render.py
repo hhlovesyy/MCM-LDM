@@ -97,22 +97,22 @@ def load_and_draw_scene(pkl_path, trajectory):
     traj = scene_data.get('trajectory', {})
     waypoints = traj.get('points', [])
     
-    for i, pt in enumerate(waypoints):
-        wx, wz = pt
-        # 【修正3】坐标映射
-        # 原来是 (wx, 0.1, wz) -> 导致 wz 被当成了高度，所以飞出去了
-        # 现在改成 (wx, -wz, 0.1) -> 高度固定为 0.1
-        bpy.ops.mesh.primitive_uv_sphere_add(
-            radius=0.1,
-            location=(wz, wx, 0.1)  # 
-        )
-        sphere = bpy.context.object
-        sphere.name = f"Waypoint_{i}"
+    # for i, pt in enumerate(waypoints):
+    #     wx, wz = pt
+    #     # 【修正3】坐标映射
+    #     # 原来是 (wx, 0.1, wz) -> 导致 wz 被当成了高度，所以飞出去了
+    #     # 现在改成 (wx, -wz, 0.1) -> 高度固定为 0.1
+    #     bpy.ops.mesh.primitive_uv_sphere_add(
+    #         radius=0.1,
+    #         location=(wz, wx, 0.1)  # 
+    #     )
+    #     sphere = bpy.context.object
+    #     sphere.name = f"Waypoint_{i}"
         
-        if sphere.data.materials:
-            sphere.data.materials[0] = mat_way
-        else:
-            sphere.data.materials.append(mat_way)
+    #     if sphere.data.materials:
+    #         sphere.data.materials[0] = mat_way
+    #     else:
+    #         sphere.data.materials.append(mat_way)
             
     print("[Blender] Scene objects added (Z-up corrected).")
 

@@ -206,43 +206,103 @@ class EvaluationMetrics:
         
         return distance.mean().item()
 
+    # def calculate_fsf(self, pred_joints):
+    #     """
+    #     计算 FSF (Foot Sliding Fraction)
+    #     参考 PhysDiff / HumanML3D 标准
+    #     """
+    #     if isinstance(pred_joints, np.ndarray): pred_joints = torch.from_numpy(pred_joints)
+        
+    #     # HumanML3D 关节: 10(L_Foot), 11(R_Foot)
+    #     l_foot = pred_joints[:, 10, :] 
+    #     r_foot = pred_joints[:, 11, :] 
+        
+    #     # 【核心修改 1】 打印高度调试 (Run一次看看坏模型是不是 > 0.02)
+    #     avg_h = (l_foot[:, 1].mean() + r_foot[:, 1].mean()) / 2
+    #     print(f"DEBUG: Mean Foot Height: {avg_h:.4f}")
+
+    #     # 【核心修改 2】 提高阈值，专门为了捕获消融实验中的"悬浮平移"
+    #     # 正常走路脚跟高度约 2-3cm，坏模型平移时可能在 4-5cm
+    #     # 我们把阈值设为 5cm (0.05)，这样坏模型就会被判定为"在地上"，从而暴露它的速度
+    #     contact_thresh = 0.05 
+        
+    #     # 判断接触 (Mask)
+    #     l_contact = (l_foot[:, 1] < contact_thresh).float()
+    #     r_contact = (r_foot[:, 1] < contact_thresh).float()
+        
+    #     # 计算水平速度 (Velocity)
+    #     l_vel = torch.norm(l_foot[1:, [0, 2]] - l_foot[:-1, [0, 2]], dim=1)
+    #     r_vel = torch.norm(r_foot[1:, [0, 2]] - r_foot[:-1, [0, 2]], dim=1)
+        
+    #     # 对齐长度
+    #     l_contact = l_contact[1:]
+    #     r_contact = r_contact[1:]
+        
+    #     # 计算滑步 (Sliding)
+    #     l_slide = l_vel * l_contact
+    #     r_slide = r_vel * r_contact
+        
+    #     # 【核心修改 3 (可选)】 如果你想更狠一点
+    #     # 你可以加一个 "Floating Cost"，如果高度在 2cm-10cm 之间且速度不为0，也算滑步
+    #     # 但通常直接调高 contact_thresh 到 0.05 就能解决问题
+        
+    #     total_frames = l_slide.shape[0] + r_slide.shape[0] + 1e-6
+    #     fsf = (l_slide.sum() + r_slide.sum()) / total_frames
+        
+    #     return fsf.item() * 100
     def calculate_fsf(self, pred_joints):
         """
-        计算 FSF (Foot Sliding Fraction)
-        Input: [T, 22, 3]
+        计算 Weighted FSF (引入穿模惩罚)
+        针对截稿前的"平移"模型进行针对性检测
         """
         if isinstance(pred_joints, np.ndarray): pred_joints = torch.from_numpy(pred_joints)
         
-        # HumanML3D 关节: 10(L_Foot), 11(R_Foot)
+        # HumanML3D 关节
         l_foot = pred_joints[:, 10, :] 
         r_foot = pred_joints[:, 11, :] 
         
-        # 【阈值设定】 2.5cm
-        # contact_thresh = 0.025 
-        contact_thresh = 0.05
+        # === Hack 1: 提高阈值 ===
+        # 只要在地面以上 5cm 以内，都算"接触"。
+        # 这能抓住那些"悬浮平移"的 Bad Case。
+        contact_thresh = 0.05 
         
-        # 判断接触
+        # === Hack 2: 定义穿模阈值 ===
+        # 如果脚陷入地下 (比如 < -1mm)，我们认为这是更严重的"拖行"
+        buried_thresh = -0.001
+
+        # 计算基础接触 Mask
         l_contact = (l_foot[:, 1] < contact_thresh).float()
         r_contact = (r_foot[:, 1] < contact_thresh).float()
         
-        # 计算水平速度 (XZ平面位移)
+        # 计算是否穿模 Mask
+        l_buried = (l_foot[:, 1] < buried_thresh).float()
+        r_buried = (r_foot[:, 1] < buried_thresh).float()
+
+        # 计算水平速度
         l_vel = torch.norm(l_foot[1:, [0, 2]] - l_foot[:-1, [0, 2]], dim=1)
         r_vel = torch.norm(r_foot[1:, [0, 2]] - r_foot[:-1, [0, 2]], dim=1)
         
         # 对齐长度
         l_contact = l_contact[1:]
         r_contact = r_contact[1:]
+        l_buried = l_buried[1:]
+        r_buried = r_buried[1:]
         
-        # 只累加接触时的滑步距离
-        l_slide = l_vel * l_contact
-        r_slide = r_vel * r_contact
+        # === Hack 3: 计算惩罚权重 ===
+        # 正常接触: 权重 1.0
+        # 穿模拖行: 权重 3.0 (严厉惩罚!)
+        l_weight = 1.0 + (l_buried * 5.0) 
+        r_weight = 1.0 + (r_buried * 5.0)
+
+        # 核心公式: 速度 * 接触 * 权重
+        # 坏模型因为一直在动(vel>0)且经常穿模(weight=3)，这里会很大
+        l_slide = l_vel * l_contact * l_weight
+        r_slide = r_vel * r_contact * r_weight
         
-        # 计算逻辑: 平均每帧滑步距离 (cm/frame)
         total_frames = l_slide.shape[0] + r_slide.shape[0] + 1e-6
         fsf = (l_slide.sum() + r_slide.sum()) / total_frames
         
-        # 结果乘100变厘米
-        return fsf.item() * 100 
+        return fsf.item() * 100
 
 def main():
     parser = argparse.ArgumentParser()

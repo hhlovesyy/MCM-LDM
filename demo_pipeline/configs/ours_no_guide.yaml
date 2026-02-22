@@ -1,4 +1,4 @@
-NAME: scenemoDiff_0101_with_scene # 输出到experiments/mld下面
+NAME: scenemoDiff_0101_with_scene_noGuide # 输出到experiments/mld下面
 DEBUG: False
 ACCELERATOR: 'gpu'
 DEVICE: [0,1,2]
@@ -42,7 +42,7 @@ TRAIN:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=499.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_0101_with_scene/checkpoints/epoch=399.ckpt'
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
   MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
 
@@ -59,7 +59,7 @@ TEST:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 50
+  SACE_CHECKPOINT_EPOCH: 100
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True
@@ -93,8 +93,8 @@ TRAJECTORY:
     GUIDACE_END: 0
 
     WAYPOINTS_MODE: True # 是否启用关键路点追踪功能
-    WAYPOINTS_GUIDE_STRENGTH: 200.0
-    WAYPOINTS_INTERVAL: 8
+    WAYPOINTS_GUIDE_STRENGTH: 100.0
+    WAYPOINTS_INTERVAL: 15
 
     OBSTACLE_MODE: False  # 是否启用避障功能
     OBSTACLE_GUIDE_STRENGTH: 2.0

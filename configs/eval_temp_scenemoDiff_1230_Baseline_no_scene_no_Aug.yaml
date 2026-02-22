@@ -38,7 +38,7 @@ EVAL:
   BATCH_SIZE: 32
   SPLIT: test
 TEST:
-  CHECKPOINTS: /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1230_Baseline_no_scene_no_Aug/checkpoints/epoch=399.ckpt
+  CHECKPOINTS: /root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1230_Baseline_no_scene_no_Aug/checkpoints/epoch=499.ckpt
   DATASETS:
   - humanml3d
   SPLIT: test

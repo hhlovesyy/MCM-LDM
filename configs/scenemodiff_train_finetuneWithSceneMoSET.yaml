@@ -9,7 +9,7 @@ SCENE_MODIFF_ABLATION: # 必要字段，训练或者推理的时候使用的与�
   LAMBDA_SCENE: 0.2       # 场景分类 Loss 的权重，如果测试消融FiLM的话，这个值不要改；如果要尝试炼丹，估计先试试改这个值
   UPDATE_BASELINE: True  # 保持这个就挺好，这个是论文里面写的那个涨点模块，没崩了就一直开着吧
 
-  JUST_FINETUNE_BASELINE: True # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
+  JUST_FINETUNE_BASELINE: False # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
 
 TRAIN:
   STAGE: diffusion
@@ -59,7 +59,7 @@ TEST:
 # The following are loggers settings
 #####################################
 LOGGER:
-  SACE_CHECKPOINT_EPOCH: 50
+  SACE_CHECKPOINT_EPOCH: 100
   LOG_EVERY_STEPS: 1
   VAL_EVERY_STEPS: 100
   TENSORBOARD: True

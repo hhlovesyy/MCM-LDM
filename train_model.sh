@@ -7,13 +7,13 @@
 TRAIN_SCRIPT="/root/autodl-tmp/MyRepository/MCM-LDM/train.py"
 
 # 定义参数
-CONFIG_FILE="configs/scenemodiff_train_LiandanBase_stage1_wo_seq2seq_Trajectory.yaml"
+CONFIG_FILE="/root/autodl-tmp/MyRepository/MCM-LDM/configs/scenemodiff_train_finetuneWithSceneMoSET_noAug.yaml"
 # CONFIG_FILE="configs/scenemodiff_train_all.yaml"
 # CONFIG_FILE="configs/scenemodiff_train_onlyFiLM.yaml"
 # CONFIG_FILE="configs/scenemodiff_train_mlp_and_Loss.yaml"
 # CONFIG_FILE="configs/scenemodiff_train_onlyMLP.yaml"
 ASSETS_FILE="configs/assets.yaml"
-BATCH_SIZE="170"
+BATCH_SIZE="32"
 DEBUG_MODE="--nodebug"
 
 # 执行命令

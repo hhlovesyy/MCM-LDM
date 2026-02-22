@@ -1,0 +1,26 @@
+{
+    "project_name": "Demo_Task_01",
+    "map_config": {
+        "size": 20.0
+    },
+    "environment": {
+        "obstacles": []
+    },
+    "trajectory": {
+        "type": "bezier_control_points",
+        "points": [
+            [
+                -0.1,
+                0.1
+            ],
+            [
+                2.3,
+                1.67
+            ],
+            [
+                0.57,
+                4.0
+            ]
+        ]
+    }
+}

@@ -38,6 +38,7 @@ env/
 /deps/
 /results/
 /experiments/
+/demo_results/
 
 # 非本分支的文件
 AddingCodes/
