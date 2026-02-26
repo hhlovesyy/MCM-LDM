@@ -414,8 +414,93 @@ class MLD(BaseModel):
 
 
     #     return loss
+    # def _compute_ceiling_loss(self, latents, t, ceiling_height, safety_margin, encoder_hidden_states, lengths):
+    #     # 1. 预测 & 反推 x0 (保持不变)
+    #     noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
+    #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
+    #     beta_prod_t = 1 - alpha_prod_t
+    #     pred_z0 = (latents - beta_prod_t ** 0.5 * noise_pred) / (alpha_prod_t ** 0.5)
+        
+    #     # 2. Decode & 反归一化
+    #     pred_z0_input = pred_z0.permute(1, 0, 2)
+    #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
+        
+    #     d_mean = self.mean.to(latents.device)
+    #     d_std = self.std.to(latents.device)
+    #     pred_motion = pred_motion_norm * d_std + d_mean
+
+    #     # 3. 组装全身高度
+    #     root_y = pred_motion[..., 3:4] # [B, L, 1]
+    #     bs, seq_len = pred_motion.shape[:2]
+        
+    #     local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
+    #     local_joints_y = local_joints[..., 1] # [B, L, 21]
+        
+    #     # 绝对高度 = Root + Local
+    #     joints_y_abs = root_y + local_joints_y
+        
+    #     # 拼合 Root 和其他关节 -> [B, L, 22]
+    #     all_joints_y = torch.cat([root_y, joints_y_abs], dim=2)
+
+    #     # ================= [核心修正：全局地面校准] =================
+    #     # 你的逻辑是对的：要找所有帧、所有关节里的最低点作为地面参考
+        
+    #     # 1. 先找每一帧的最低点 [B, L]
+    #     frame_min_y, _ = all_joints_y.min(dim=2)
+        
+    #     # 2. 再找整个序列的最低点 [B]
+    #     # 这就是这个动作的"地面水平面"
+    #     sequence_min_y, _ = frame_min_y.min(dim=1)
+        
+    #     # 3. 广播维度以匹配 [B, L, 22]
+    #     floor_level = sequence_min_y.view(bs, 1, 1)
+        
+    #     # 4. 校准：所有高度减去地面高度
+    #     # 这样如果 Frame 10 跳起来了，它的高度 = (AbsHeight - Floor) 就会包含跳跃高度
+    #     grounded_joints_y = all_joints_y - floor_level
+        
+
+    #     # ================= [修改重点] =================
+    #     # 判断传入的 ceiling_height 是一个数字 还是 一个 [B, L] 的 Tensor
+    #     if isinstance(ceiling_height, torch.Tensor):
+    #         # 如果是 Tensor: [Batch, Length]
+    #         # 我们需要把它扩展成 [Batch, Length, 1]，这样才能和关节数据 [B, L, 22] 进行计算
+    #         limit_tensor = ceiling_height.unsqueeze(-1).to(latents.device)
+    #         # 减去安全距离
+    #         limit_tensor = limit_tensor - safety_margin
+    #     else:
+    #         # 如果是纯数字 (旧逻辑兼容)
+    #         effective_limit = ceiling_height - safety_margin
+    #         limit_tensor = torch.tensor(effective_limit, device=latents.device)
+        
+    #     # ============================================
+    #     # ================= [计算 Loss] =================
+    #     # limit_tensor = torch.tensor(ceiling_height, device=latents.device)
+        
+        
+    #     # ================= [修改点：应用安全距离] =================
+    #     # 实际限制 = 物理天花板高度 - 安全缓冲
+    #     # 比如天花板 1.5m，缓冲 0.1m -> 关节不能超过 1.4m
+    #     # effective_limit = ceiling_height - safety_margin
+        
+    #     # limit_tensor = torch.tensor(effective_limit, device=latents.device)
+        
+        
+    #     # 计算超出部分
+    #     excess = torch.nn.functional.relu(grounded_joints_y - limit_tensor)
+        
+    #     # 策略：
+    #     # 最高点惩罚 (Loss Max): 只要有任何一帧、任何一个关节撞了，就重罚
+    #     # 整体惩罚 (Loss Mean): 压低整体趋势
+    #     loss_max = (excess.max(dim=2)[0].max(dim=1)[0] ** 2).mean() # [B] -> scalar
+    #     loss_mean = (excess ** 2).mean()
+        
+    #     # 组合 (给最高点更高权重，逼它把头缩回去)
+    #     loss = loss_mean + 4.0 * loss_max
+        
+    #     return loss
     def _compute_ceiling_loss(self, latents, t, ceiling_height, safety_margin, encoder_hidden_states, lengths):
-        # 1. 预测 & 反推 x0 (保持不变)
+        # 1. 预测 & 反推 x0
         noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
         alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
         beta_prod_t = 1 - alpha_prod_t
@@ -435,67 +520,77 @@ class MLD(BaseModel):
         
         local_joints = pred_motion[..., 4:67].view(bs, seq_len, 21, 3)
         local_joints_y = local_joints[..., 1] # [B, L, 21]
-        
-        # 绝对高度 = Root + Local
         joints_y_abs = root_y + local_joints_y
-        
-        # 拼合 Root 和其他关节 -> [B, L, 22]
         all_joints_y = torch.cat([root_y, joints_y_abs], dim=2)
 
-        # ================= [核心修正：全局地面校准] =================
-        # 你的逻辑是对的：要找所有帧、所有关节里的最低点作为地面参考
-        
-        # 1. 先找每一帧的最低点 [B, L]
+        # 全局地面校准
         frame_min_y, _ = all_joints_y.min(dim=2)
-        
-        # 2. 再找整个序列的最低点 [B]
-        # 这就是这个动作的"地面水平面"
         sequence_min_y, _ = frame_min_y.min(dim=1)
-        
-        # 3. 广播维度以匹配 [B, L, 22]
         floor_level = sequence_min_y.view(bs, 1, 1)
-        
-        # 4. 校准：所有高度减去地面高度
-        # 这样如果 Frame 10 跳起来了，它的高度 = (AbsHeight - Floor) 就会包含跳跃高度
         grounded_joints_y = all_joints_y - floor_level
-        
 
-        # ================= [修改重点] =================
-        # 判断传入的 ceiling_height 是一个数字 还是 一个 [B, L] 的 Tensor
-        if isinstance(ceiling_height, torch.Tensor):
-            # 如果是 Tensor: [Batch, Length]
-            # 我们需要把它扩展成 [Batch, Length, 1]，这样才能和关节数据 [B, L, 22] 进行计算
-            limit_tensor = ceiling_height.unsqueeze(-1).to(latents.device)
-            # 减去安全距离
-            limit_tensor = limit_tensor - safety_margin
+        # 引入 ListConfig 保护
+        from omegaconf import ListConfig
+
+        # ================= [★★★ 核心修改：时空兼容的 Mask 生成 ★★★] =================
+        if isinstance(ceiling_height, (list, ListConfig)):
+            if isinstance(ceiling_height, ListConfig):
+                ceiling_height = list(ceiling_height) # 保护性转换
+                
+            # --- a. 积分计算小人当前的 Z 轴绝对坐标 ---
+            rot_vel = pred_motion[..., 0]
+            local_vel_x = pred_motion[..., 1]
+            local_vel_z = pred_motion[..., 2]
+            
+            r_rot_ang = torch.zeros_like(rot_vel)
+            r_rot_ang[..., 1:] = rot_vel[..., :-1]
+            r_rot_ang = torch.cumsum(r_rot_ang, dim=-1)
+            real_angle = r_rot_ang * 2.0 
+            
+            c = torch.cos(real_angle)
+            s = torch.sin(real_angle)
+            
+            vel_x_shifted = torch.zeros_like(local_vel_x)
+            vel_z_shifted = torch.zeros_like(local_vel_z)
+            vel_x_shifted[..., 1:] = local_vel_x[..., :-1]
+            vel_z_shifted[..., 1:] = local_vel_z[..., :-1]
+            
+            # 投影得到全局 Z 轴速度并积分
+            global_vel_z = vel_x_shifted * s + vel_z_shifted * c
+            root_world_z = torch.cumsum(global_vel_z, dim=-1)
+            root_world_z = root_world_z - root_world_z[:, 0:1] # 归零起点 [B, L]
+            
+            # --- b. 动态构建 Limit Tensor ---
+            default_h = 2.5 # 默认安全高度
+            spatial_limit = torch.full((bs, seq_len), default_h, device=latents.device)
+            
+            for segment in ceiling_height:
+                z_start, z_end, val = segment
+                mask = (root_world_z.detach() >= z_start) & (root_world_z.detach() <= z_end)
+                spatial_limit[mask] = float(val)
+                
+            limit_tensor = spatial_limit.unsqueeze(-1) - safety_margin
+
+            # 👉 【透视打印】每隔 200 步打印一次，让你知道空间发生什么了
+            t_val = t[0].item() if isinstance(t, torch.Tensor) else t
+            if t_val % 200 == 0:
+                max_z = root_world_z[0, -1].item() # 小人最终走到了几米
+                active_frames = (spatial_limit[0] < 2.0).sum().item() # 有多少帧处于低头区
+                print(f"\n[Spatial Debug] 扩散步数 t={t_val:04d} | 小人本次走过区间: 0.00m -> {max_z:.2f}m")
+                print(f"[Spatial Debug] 有 {active_frames}/{seq_len} 帧被判定落入矮天花板约束区！")
+
+        elif isinstance(ceiling_height, torch.Tensor):
+            limit_tensor = ceiling_height.unsqueeze(-1).to(latents.device) - safety_margin
         else:
-            # 如果是纯数字 (旧逻辑兼容)
-            effective_limit = ceiling_height - safety_margin
+            effective_limit = float(ceiling_height) - safety_margin
             limit_tensor = torch.tensor(effective_limit, device=latents.device)
-        
-        # ============================================
-        # ================= [计算 Loss] =================
-        # limit_tensor = torch.tensor(ceiling_height, device=latents.device)
-        
-        
-        # ================= [修改点：应用安全距离] =================
-        # 实际限制 = 物理天花板高度 - 安全缓冲
-        # 比如天花板 1.5m，缓冲 0.1m -> 关节不能超过 1.4m
-        # effective_limit = ceiling_height - safety_margin
-        
-        # limit_tensor = torch.tensor(effective_limit, device=latents.device)
-        
-        
-        # 计算超出部分
+        # ==============================================================================
+
+        # 计算 Loss
         excess = torch.nn.functional.relu(grounded_joints_y - limit_tensor)
-        
-        # 策略：
-        # 最高点惩罚 (Loss Max): 只要有任何一帧、任何一个关节撞了，就重罚
-        # 整体惩罚 (Loss Mean): 压低整体趋势
-        loss_max = (excess.max(dim=2)[0].max(dim=1)[0] ** 2).mean() # [B] -> scalar
+        loss_max = (excess.max(dim=2)[0].max(dim=1)[0] ** 2).mean() 
         loss_mean = (excess ** 2).mean()
         
-        # 组合 (给最高点更高权重，逼它把头缩回去)
         loss = loss_mean + 4.0 * loss_max
         
         return loss
@@ -903,6 +998,8 @@ class MLD(BaseModel):
                 #     )
                 #     total_loss += loss_ceil * c_strength
                 # # ===============================================
+                
+                
                 # ================= [B. 天花板引导 (改)] =================
                 if conf.get('CEILING_MODE', False):
                     # 处理 timestep 维度
@@ -910,26 +1007,66 @@ class MLD(BaseModel):
                     else: t_input = t
                     
                     # 1. 读取参数
-                    default_h = conf.get('CEILING_HEIGHT', 2.0)
-                    timeline = conf.get('CEILING_TIMELINE', []) # 读取列表
+                    # default_h = conf.get('CEILING_HEIGHT', 2.0)
+                    # timeline = conf.get('CEILING_TIMELINE', []) # 读取列表
                     
-                    # 2. 构建每一帧的高度 Tensor [Batch, Length]
-                    c_height_tensor = build_timeline_tensor(bsz, max_len, default_h, timeline)
+                    # # 2. 构建每一帧的高度 Tensor [Batch, Length]
+                    # c_height_tensor = build_timeline_tensor(bsz, max_len, default_h, timeline)
+                    
+                    # c_strength = conf.get('CEILING_STRENGTH', 1000.0)
+                    # c_margin = conf.get('SAFETY_MARGIN', 0.1)
+
+                    # # 3. 传入 Tensor 计算 Loss
+                    # loss_ceil = self._compute_ceiling_loss(
+                    #     current_latents, 
+                    #     t_input, 
+                    #     c_height_tensor, # <--- 传入构建好的 Tensor
+                    #     c_margin, 
+                    #     ctx['cond_embeddings'], 
+                    #     ctx['lengths']
+                    # )
+                    # total_loss += loss_ceil * c_strength
+                    # === [兼容物理空间与时序的调用] ===
+                    # === [兼容物理空间与时序的调用] ===
+                    from omegaconf import OmegaConf, ListConfig # 确保导入
                     
                     c_strength = conf.get('CEILING_STRENGTH', 1000.0)
                     c_margin = conf.get('SAFETY_MARGIN', 0.1)
-
-                    # 3. 传入 Tensor 计算 Loss
+                    
+                    spatial_cfg = conf.get('CEILING_SPATIAL', None)
+                    
+                    if spatial_cfg is not None and len(spatial_cfg) > 0:
+                        # 1. 触发物理空间模式！将 ListConfig 转为 Python 原生 list
+                        if isinstance(spatial_cfg, ListConfig):
+                            spatial_cfg = OmegaConf.to_container(spatial_cfg, resolve=True)
+                        c_height_input = spatial_cfg
+                        # [调试打印]
+                        # print(f">>> [DEBUG] 采用【空间物理约束】 CEILING_SPATIAL: {c_height_input}")
+                    else:
+                        # 2. 退回原有的 Timeline 模式
+                        default_h = conf.get('CEILING_HEIGHT', 2.0)
+                        timeline = conf.get('CEILING_TIMELINE', [])
+                        c_height_input = build_timeline_tensor(bsz, max_len, default_h, timeline)
+                        # print(">>> [DEBUG] 采用【时序约束】 CEILING_TIMELINE")
+                        
+                    # 3. 传入计算 Loss
                     loss_ceil = self._compute_ceiling_loss(
                         current_latents, 
                         t_input, 
-                        c_height_tensor, # <--- 传入构建好的 Tensor
+                        c_height_input, 
                         c_margin, 
                         ctx['cond_embeddings'], 
                         ctx['lengths']
                     )
+                    # 【★★★ 之前就是漏了这一行！把梯度加回去！ ★★★】
                     total_loss += loss_ceil * c_strength
+
                 # # =======================================================
+
+
+
+
+                
                 # # ================= [C. 缝隙引导 (Narrow Gap)] =================
                 # if conf.get('GAP_MODE', False):
                 #     # 处理 t 维度 (同上)

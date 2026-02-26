@@ -515,6 +515,33 @@ def main():
             print(f"  -> Video saved: {mp4path}")
         except Exception as e:
             print(f"  -> Video render failed (Skipping): {e}")
+
+        # ================= [环境可视化渲染] =================
+        vis_env = cfg.get("VISUALIZATION", {}).get("RENDER_ENVIRONMENT", False)
+        if vis_env:
+            traj_cfg = cfg.get("TRAJECTORY", {}).get("GUIDANCE", {})
+            spatial_cfg = traj_cfg.get("CEILING_SPATIAL", None)
+            
+            from omegaconf import  ListConfig
+            if spatial_cfg is not None and isinstance(spatial_cfg, ListConfig):
+                spatial_cfg = OmegaConf.to_container(spatial_cfg, resolve=True)
+            
+            if spatial_cfg is not None and len(spatial_cfg) > 0:
+                try:
+                    env_mp4path = output_dir / f"{content_name}_env.mp4"
+                    print(f"  -> Rendering Environment video (Side View) for SPATIAL constraint...")
+                    
+                    # [核心修改] 传入 view_angles=(15, -45) 形成绝佳的侧前方立体视角
+                    # (elev=15表示略微抬高相机，azim=-45表示侧前方45度)
+                    # 如果你想要纯正侧面，可以改成 (10, 0)
+                    from visual import visual_pos
+                    # visual_pos(str(npypath), str(env_mp4path), ceiling_spatial=spatial_cfg, view_angles=(15, -45))
+                    # 【修改点】：传 (120, -45) 获得侧前方的完美视角！
+                    visual_pos(str(npypath), str(env_mp4path), ceiling_spatial=spatial_cfg, view_angles=(180, -90))
+
+                    print(f"  -> Environment video saved: {env_mp4path}")
+                except Exception as e:
+                    print(f"  -> Environment render failed: {e}")
             
         # === [新增] 侧视图 + 天花板可视化 ===
         # 1. 读取开关

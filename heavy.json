@@ -5,8 +5,8 @@
         "x": 0.0,  
         "y": 0.0
       },
-      "ceiling_height": 220.0,
-      "gap_width": 130,
+      "ceiling_height": 150.0,
+      "gap_width": 100,
       "gap_offset": 0.0
     }
 }
