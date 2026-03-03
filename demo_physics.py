@@ -537,7 +537,9 @@ def main():
                     from visual import visual_pos
                     # visual_pos(str(npypath), str(env_mp4path), ceiling_spatial=spatial_cfg, view_angles=(15, -45))
                     # 【修改点】：传 (120, -45) 获得侧前方的完美视角！
-                    visual_pos(str(npypath), str(env_mp4path), ceiling_spatial=spatial_cfg, view_angles=(180, -90))
+                    # visual_pos(str(npypath), str(env_mp4path), ceiling_spatial=spatial_cfg, view_angles=(180, -90))
+                    # 【核心魔法】：保持漂亮的 105 度正面微俯视，同时把小人和天花板向左转90度看侧面！
+                    visual_pos(str(npypath), str(env_mp4path), ceiling_spatial=spatial_cfg, view_angles=(105, -90), is_side_view=True)
 
                     print(f"  -> Environment video saved: {env_mp4path}")
                 except Exception as e:

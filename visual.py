@@ -17,21 +17,26 @@ parser.add_argument('--motion_path', type=str, default=
 
 
 
-def visual_pos(motion_path, save_path = './motion_output/59.mp4', caption = ' ', ceiling_spatial=None,  view_angles=(120, -90)):
+# def visual_pos(motion_path, save_path = './motion_output/59.mp4', caption = ' ', ceiling_spatial=None,  view_angles=(120, -90)):
 
-#    motion_path = './datasets/cmu_new/test_file/000059.npy'
+# #    motion_path = './datasets/cmu_new/test_file/000059.npy'
+#     skeleton = paramUtil.t2m_kinematic_chain
+#     #(F,22,3)
+#     motion = np.load(motion_path)[:, :22]
+
+#     print('generate video for', save_path)
+#     # plot_3d_motion(save_path, skeleton, motion, caption, fps=20)
+#     # [修改点] 将参数传给 plot_3d_motion
+#     # 把 view_angles 传给底层
+#     plot_3d_motion(save_path, skeleton, motion, caption, fps=20, ceiling_spatial=ceiling_spatial, view_angles=view_angles)
+
+def visual_pos(motion_path, save_path = './motion_output/59.mp4', caption = ' ', ceiling_spatial=None, view_angles=(120, -90), is_side_view=False):
     skeleton = paramUtil.t2m_kinematic_chain
-    #(F,22,3)
     motion = np.load(motion_path)[:, :22]
 
-
-
-
     print('generate video for', save_path)
-    # plot_3d_motion(save_path, skeleton, motion, caption, fps=20)
-    # [修改点] 将参数传给 plot_3d_motion
-    # 把 view_angles 传给底层
-    plot_3d_motion(save_path, skeleton, motion, caption, fps=20, ceiling_spatial=ceiling_spatial, view_angles=view_angles)
+    # 传递给底部函数
+    plot_3d_motion(save_path, skeleton, motion, caption, fps=20, ceiling_spatial=ceiling_spatial, view_angles=view_angles, is_side_view=is_side_view)
 
 
 
