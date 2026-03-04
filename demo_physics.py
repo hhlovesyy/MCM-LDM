@@ -21,6 +21,8 @@ from visual_side_view import render_side_view # <--- 新增这行
 from visual_top_view import render_top_view
 from visual_front_view import render_front_view
 
+from omegaconf import OmegaConf,ListConfig # 确保引入了这个
+
 # [新增] 硬编码场景列表，必须与训练时的 Dataset 一致
 SCENE_CATEGORIES = [
     "Front", "Back", "Left", "Right", 
@@ -282,7 +284,7 @@ def load_pretrained_weights(model, vae_path, denoiser_path):
     model.load_state_dict(new_denoiser_dict, strict=False)
     print("  -> Backbone loaded successfully (Strict=False).")
 
-from omegaconf import OmegaConf # 确保引入了这个
+
 import datetime # <--- 【新增】引入时间模块
 def main():
     # 1. 配置与环境
@@ -489,6 +491,47 @@ def main():
         attpath = npypath.with_suffix('.png') # 图片路径
         
         np.save(npypath, motion_output)
+        
+        # =================[新增：配套生成场景 JSON 文件] =================
+        import json
+        
+        scene_data = {}
+        traj_cfg = cfg.get("TRAJECTORY", {}).get("GUIDANCE", {})
+        
+        # 1. 获取天花板空间参数
+        if traj_cfg.get("CEILING_MODE", False):
+            c_spatial = traj_cfg.get("CEILING_SPATIAL", None)
+            if c_spatial is not None:
+                # 转换 ListConfig 为标准 Python 列表
+                if isinstance(c_spatial, ListConfig):
+                    c_spatial = OmegaConf.to_container(c_spatial, resolve=True)
+                
+                # YAML 里格式是 [[2.0, 5.0, 0.7]]，为了对齐你的 Blender (单列表)，提取第一项
+                if isinstance(c_spatial, list) and len(c_spatial) > 0:
+                    scene_data["ceiling_spatial"] = c_spatial[0]
+        
+        # 2. 获取狭窄缝隙空间参数 (如果你后续需要渲染缝隙的话)
+        if traj_cfg.get("GAP_MODE", False):
+            g_spatial = traj_cfg.get("GAP_SPATIAL", None)
+            if g_spatial is not None:
+                if isinstance(g_spatial, ListConfig):
+                    g_spatial = OmegaConf.to_container(g_spatial, resolve=True)
+                if isinstance(g_spatial, list) and len(g_spatial) > 0:
+                    scene_data["gap_spatial"] = g_spatial[0]
+        
+        # 3. 只有当确实存在空间约束时，才保存 JSON
+        if scene_data:
+            # 命名为：原动作名_scene.json (完美匹配你 Blender 脚本的最高优先级)
+            json_path = output_dir / f"{content_name}_scene.json"
+            try:
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(scene_data, f, indent=4)
+                print(f"  -> Scene JSON saved: {json_path}")
+            except Exception as e:
+                print(f"  -> Failed to save Scene JSON: {e}")
+        # =================================================================
+        
+        
         if isinstance(attn_weights, list):
             final_attn = attn_weights[-1]
         else:
@@ -522,7 +565,7 @@ def main():
             traj_cfg = cfg.get("TRAJECTORY", {}).get("GUIDANCE", {})
             spatial_cfg = traj_cfg.get("CEILING_SPATIAL", None)
             
-            from omegaconf import  ListConfig
+            
             if spatial_cfg is not None and isinstance(spatial_cfg, ListConfig):
                 spatial_cfg = OmegaConf.to_container(spatial_cfg, resolve=True)
             
