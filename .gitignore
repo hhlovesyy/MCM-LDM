@@ -62,3 +62,14 @@ evaluation*.txt
 /human_body_prior
 /tests
 /logs
+
+
+ANew113MotionPhy/
+ar2026Edit/
+dataset_multi_part_v1/
+dataset_toptier_final/
+verify_toptier_results_*/
+vis_dataset_debug/
+zero_wind_videos_v2/
+zero_wind_videos_v3/
+

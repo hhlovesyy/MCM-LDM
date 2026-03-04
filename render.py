@@ -116,7 +116,93 @@ def load_and_draw_scene(pkl_path, trajectory):
             
     print("[Blender] Scene objects added (Z-up corrected).")
 
+# def load_and_draw_scene_ceil(pkl_path, trajectory):
+#     # 【新增】智能寻找同名 JSON（比如 walk_mesh.pkl 找 walk_scene.json）
+#     # json_path = pkl_path.replace("_mesh.pkl", "_scene.json").replace(".pkl", "_scene.json")
+#     # if not os.path.exists(json_path):
+#     #     # 如果没有同名的，就退回队友写死的固定路径
+#     #     json_path = "/root/autodl-tmp/MyRepository/MCM-LDM/task_config.json"
+#     json_path = "/root/autodl-tmp/MyRepository/MCM-LDM/results/mld/AMCMLDMRES/03031724TestCeilP/walk_test_scene.json" #暂时
 
+#     if not os.path.exists(json_path):
+#         print(f"[Blender] No scene json found at {json_path}")
+#         return {} # <--- 【修改这里】找不到就返回空字典
+
+#     print(f"[Blender] Loading scene from {json_path}")
+#     try:
+#         with open(json_path, 'r') as f:
+#             scene_data = json.load(f)
+#     except Exception as e:
+#         print(f"[Error] Failed to load json: {e}")
+#         return {} # <--- 【修改这里】报错也返回空字典
+
+            
+#     print("[Blender] Scene objects added (Z-up corrected).")
+#     return scene_data # <--- 【修改这里】在函数最后一行把读到的字典返回出去
+
+
+
+"""
+这段代码现在的表现：
+如果你正在渲染的文件是：
+...A_pkl/B.pkl
+
+它会聪明地识别出：它的目标不在当前 _pkl 文件夹里。
+它会定位到：...A/。
+
+它会按顺序搜索：
+B_scene.json (首选)
+B.json (备选)
+scene.json (保底)
+
+"""
+def load_and_draw_scene_ceil(pkl_path, trajectory=None):  # <--- 【修复关键】加了 trajectory 参数来接住它
+    """
+    智能读取与原始 npy 同级的定制化 JSON 文件。
+    """
+    # 1. 获取当前 pkl 所在的文件夹和文件名
+    dir_name = os.path.dirname(pkl_path)       
+    base_name = os.path.basename(pkl_path)     
+    
+    # 2. 核心逻辑：回溯到原始的 npy 文件夹
+    if dir_name.endswith("_pkl"):
+        original_dir = dir_name[:-4]  # 截掉最后的 "_pkl"
+    else:
+        original_dir = dir_name
+        
+    # 3. 剥离后缀，提取纯动作名
+    name_without_ext = base_name.replace('_mesh.pkl', '').replace('.pkl', '')
+    
+    # 4. 构造可能存在的 JSON 文件名列表 (按优先级查找)
+    json_candidates =[
+        os.path.join(original_dir, f"{name_without_ext}_scene.json"), # 首选: 比如 000118_scene.json
+        os.path.join(original_dir, f"{name_without_ext}.json"),       # 备选: 比如 000118.json
+        os.path.join(original_dir, "scene.json")                      # 保底: 比如 scene.json
+    ]
+    
+    # 5. 遍历寻找真正的文件
+    json_path = None
+    for candidate in json_candidates:
+        if os.path.exists(candidate):
+            json_path = candidate
+            break
+            
+    # 6. 如果全都没找到，返回空字典 (平滑降级)
+    if not json_path:
+        print(f"[Blender - Ceil] No specific json found in {original_dir}, using auto-ceiling.")
+        return {}
+        
+    # 7. 读取并返回数据
+    print(f"[Blender - Ceil] Bingo! Loading custom scene from {json_path}")
+    try:
+        with open(json_path, 'r') as f:
+            scene_data = json.load(f)
+        return scene_data
+    except Exception as e:
+        print(f"[Error] Failed to load json {json_path}: {e}")
+        return {}
+    
+    
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--pkl", type=str, default=None, help="pkl motion file")
@@ -207,6 +293,8 @@ def render_cli() -> None:
             continue
 
         load_and_draw_scene(path, trajectory)
+        scene_data = load_and_draw_scene_ceil(path, trajectory) # 
+        
         render(
             data,
             trajectory,
@@ -223,8 +311,9 @@ def render_cli() -> None:
             device=cfg.device,
             fps=cfg.fps,
             hint=hint,
-            cfg=cfg)
-
+            cfg=cfg,
+            scene_data=scene_data  # <--- 【新增这一行】把数据传给核心渲染器
+        )
 
 if __name__ == "__main__":
     render_cli()

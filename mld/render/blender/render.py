@@ -45,22 +45,76 @@ class BalanceStrategy(BaseSceneStrategy):
 
 
 # --- 具体策略：低矮天花板 ---
+# class CeilingStrategy(BaseSceneStrategy):
+#     def execute(self, trajectory_points, body_data):
+#         print("🏗️ Executing Ceiling Strategy...")
+#         # 1. 生成天花板
+#         self.ctx.create_low_ceiling(body_data, padding=0.2)
+        
+#         # 2. 画指引线 (调用基类逻辑或自己画)
+#         super().execute(trajectory_points, body_data)
+        
+#         # 3. 地面光泽感
+#         floor_obj = bpy.data.objects.get("SmallPlane") or bpy.data.objects.get("BigPlane")
+#         if floor_obj:
+#             mat_floor = self.ctx.get_material("GlossyFloor", (0.3, 0.3, 0.3), alpha=1.0)
+#             # 增加反光
+#             if mat_floor.node_tree.nodes.get('Principled BSDF'):
+#                 mat_floor.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value = 0.2
+#             if floor_obj.data.materials: floor_obj.data.materials[0] = mat_floor
+#             else: floor_obj.data.materials.append(mat_floor)
 class CeilingStrategy(BaseSceneStrategy):
     def execute(self, trajectory_points, body_data):
         print("🏗️ Executing Ceiling Strategy...")
-        # 1. 生成天花板
-        self.ctx.create_low_ceiling(body_data, padding=0.2)
         
-        # 2. 画指引线 (调用基类逻辑或自己画)
+        # 1. 尝试从 JSON 中读取你定义的空间天花板参数
+        ceiling_spatial = self.ctx.scene_data.get("ceiling_spatial", None)
+        
+        if ceiling_spatial is not None:
+            # 读取到了！例如 [1.0, 5.0, 0.7]
+            z_start, z_end, height = ceiling_spatial
+            print(f"📦 Found custom spatial ceiling: {z_start}m to {z_end}m, height {height}m")
+            
+            # 【坐标映射计算】
+            # 在你队友的代码里，数据的 Z轴 映射成了 Blender的 X轴 (前进方向)
+            # 数据的 X轴 映射成了 Blender的 Y轴 (左右方向)
+            center_x = (z_start + z_end) / 2.0
+            length_x = abs(z_end - z_start)
+            width_y = 4.0 # 宽度设为4米，足够覆盖左右了
+            thickness = 0.05 # 天花板厚度
+            
+            # 创建定制方块
+            bpy.ops.mesh.primitive_cube_add(
+                size=1, 
+                location=(center_x, 0, height + thickness/2) 
+            )
+            ceiling = bpy.context.object
+            ceiling.name = f"CustomCeiling_{z_start}_{z_end}"
+            ceiling.scale = (length_x, width_y, thickness)
+            
+            # 赋予你之前的科技感玻璃材质
+            mat = self.ctx.get_material("CeilingGlass", (0.6, 0.8, 1.0), alpha=0.15, emission=0.0)
+            mat_wire = self.ctx.get_material("CeilingWire", (0.1, 0.1, 0.1), alpha=1.0)
+            ceiling.data.materials.append(mat)
+            ceiling.data.materials.append(mat_wire)
+            
+            mod = ceiling.modifiers.new(name="Wireframe", type='WIREFRAME')
+            mod.use_replace = False  
+            mod.thickness = 0.02     
+            mod.material_offset = 1  
+            
+        else:
+            print("🤖 No spatial data in JSON, using auto-ceiling (body height).")
+            # 兼容老逻辑：如果 JSON 里没写这行数据，就依然按人头顶生成一整块天花板
+            self.ctx.create_low_ceiling(body_data, padding=0.2)
+        
+        # 2. 画指引线
         super().execute(trajectory_points, body_data)
         
         # 3. 地面光泽感
         floor_obj = bpy.data.objects.get("SmallPlane") or bpy.data.objects.get("BigPlane")
         if floor_obj:
             mat_floor = self.ctx.get_material("GlossyFloor", (0.3, 0.3, 0.3), alpha=1.0)
-            # 增加反光
-            if mat_floor.node_tree.nodes.get('Principled BSDF'):
-                mat_floor.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value = 0.2
             if floor_obj.data.materials: floor_obj.data.materials[0] = mat_floor
             else: floor_obj.data.materials.append(mat_floor)
     
@@ -453,11 +507,11 @@ class DarkStrategy(BaseSceneStrategy):
 #         bpy.context.view_layer.update()
 
 class SceneDecorator:
-    def __init__(self, scene_cfg=None):
+    def __init__(self, scene_cfg=None,scene_data=None):
         self.scene_cfg = scene_cfg
         self.scene_name = self.scene_cfg.scene_name
         self.use_guide_hint = (str(self.scene_cfg.use_guide_hint) == 'True') # 防御性转换
-        
+        self.scene_data = scene_data # <--- 存下来备用
         self.materials = {}
 
         # ================= [注册表] =================
@@ -830,6 +884,12 @@ class SceneDecorator:
         """
         【优化需求1】把指引轨迹画成半透明的带子/箭头，而不是 Zigzag 的线条
         """
+        
+        # 【新增保护】：如果完全没有轨迹点，或者点太少，就直接不画指引线，安全退出
+        if points is None or len(points) < 2:
+            print("⚠️ No valid points for guidance ribbon, skipping.")
+            return
+        
         # 创建一个 Curve
         curve_data = bpy.data.curves.new(name='GuideRibbon', type='CURVE')
         curve_data.dimensions = '3D'
@@ -923,7 +983,7 @@ def render_current_frame(path):
 
 def render(npydata, trajectory, path, mode, faces_path, gt=False,
            exact_frame=None, num=8, always_on_floor=False, denoising=True,
-           oldrender=True, res="high", accelerator='gpu', device=[0], fps=20, hint=None, cfg=None):
+           oldrender=True, res="high", accelerator='gpu', device=[0], fps=20, hint=None, cfg=None, scene_data={}): # 新增参数
 
     if mode == 'video':
         if always_on_floor:
@@ -1006,12 +1066,34 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
     scn.cycles.max_bounces = 4
     scn.cycles.volume_bounces = 2 
 
-    # scene_name = "DiAiTianhuaban"
+    # # scene_name = "DiAiTianhuaban"
+    # if hint is not None:
+    #     print("hint is not None!")
+    #     hint = hint[..., [2, 0, 1]]
+    #     decorator = SceneDecorator(scene_cfg = cfg)
+    #     decorator.enhance_scene(hint, data)
+    # else 
+    #     print("hint is None!!!!!!!")
+    
+    # ================= [修复：解绑 hint 与场景生成的强依赖] =================
+    print(f"🎬 Initializing SceneDecorator with scene_name: {cfg.scene_name}")
+    decorator = SceneDecorator(scene_cfg = cfg, scene_data=scene_data)
+    
+    # 决定用什么来做场景参照（比如独木桥要顺着路建，指引线要顺着路画）
+    scene_traj_points = None
     if hint is not None:
-        print("hint is not None!")
-        hint = hint[..., [2, 0, 1]]
-        decorator = SceneDecorator(scene_cfg = cfg)
-        decorator.enhance_scene(hint, data)
+        print("💡 Using 'hint' for scene trajectory.")
+        scene_traj_points = hint[..., [2, 0, 1]]
+    elif trajectory is not None:
+        print("💡 'hint' is None, falling back to 'trajectory' (ground_trajectory).")
+        # 如果没有用户指引，就用实际轨迹兜底
+        scene_traj_points = trajectory 
+    
+    # 【关键】无论有没有轨迹，都强制执行场景装饰！
+    # 因为天花板、暴雪等只依赖人体的 data，不依赖轨迹。
+    decorator.enhance_scene(scene_traj_points, data)
+    # =========================================================================
+        
 
     # Number of frames possible to render
     nframes = len(data)
