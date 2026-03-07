@@ -42,7 +42,8 @@ from datasets.utils.paramUtil import *
 
 from mld.models.architectures.scpa_encoder import SCPAEncoder, SCPAEncoderSimple
 
-
+# 引入 ListConfig 保护
+from omegaconf import OmegaConf, ListConfig # 确保导入
 
 from .base import BaseModel
 
@@ -529,8 +530,7 @@ class MLD(BaseModel):
         floor_level = sequence_min_y.view(bs, 1, 1)
         grounded_joints_y = all_joints_y - floor_level
 
-        # 引入 ListConfig 保护
-        from omegaconf import ListConfig
+        
 
         # ================= [★★★ 核心修改：时空兼容的 Mask 生成 ★★★] =================
         if isinstance(ceiling_height, (list, ListConfig)):
@@ -770,12 +770,13 @@ class MLD(BaseModel):
         loss = loss_mean + 10.0 * loss_max
         
         return loss
-    # def _compute_side_step_loss(self, latents, t, encoder_hidden_states, lengths):
+  
+    # def _compute_side_step_loss(self, latents, t, encoder_hidden_states, lengths, mask=None):
     #     """
-    #     [新增] 侧身引导 Loss。
-    #     强迫角色旋转 90 度 (Side-Stepping)。
+    #     mask: [Batch, Length] 的布尔张量或 0/1 张量。
+    #           如果传入了 mask，只计算 mask 为 True 部分的 Loss。
     #     """
-    #     # 1. 预测 & 反推 (标准流程)
+    #     # 1. 预测 & 反推 (保持不变)
     #     noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
     #     alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
     #     beta_prod_t = 1 - alpha_prod_t
@@ -785,50 +786,43 @@ class MLD(BaseModel):
     #     pred_z0_input = pred_z0.permute(1, 0, 2)
     #     pred_motion_norm = self.vae.decode(pred_z0_input, lengths)
         
-    #     # 3. 提取旋转速度 (Index 0)
-    #     # 注意：这里不需要反归一化，因为我们只需要趋势，或者假设 std 接近 1。
-    #     # 为了严谨，最好反归一化，但直接用归一化数据的正负号通常也够用。
-    #     # 这里我们做完整的反归一化以防万一。
     #     d_mean = self.mean.to(latents.device)
     #     d_std = self.std.to(latents.device)
     #     pred_motion = pred_motion_norm * d_std + d_mean
         
-    #     rot_vel = pred_motion[..., 0] # [Batch, Length] Y轴角速度
-        
-    #     # 4. 积分得到绝对朝向角度 (Heading Angle)
-    #     # 假设初始朝向是 0 (面朝 Z 轴/前方)
+    #     rot_vel = pred_motion[..., 0] # [Batch, Length]
     #     rot_ang = torch.cumsum(rot_vel, dim=1)
        
-    #     # 5. [修改] 强迫朝向特定的角度 (比如 +90度 = PI/2)
-    #     # 这样模型就不用纠结是左转还是右转了
-    #     # target_angle = torch.tensor(1.57, device=latents.device) # 1.57 ≈ 90度
-    #     # [修改] 不要在代码里硬编码 1.57，直接写角度让它自己算
-    #     target_degree = 45.0  # 如果你想试 30度，改成 30.0 即可
+    #     # 目标：90度 (1.57弧度)
+    #     target_degree = 45.0  
     #     target_radian = float(target_degree * np.pi / 180.0)
-        
     #     target_angle = torch.tensor(target_radian, device=latents.device)
-    #     # print(f"[Side-Step Loss] Target Angle (radian): {target_radian:.4f}")
         
-    #     # 计算当前角度与目标角度的距离 (MSE)
-    #     # 注意：这里可能需要处理周期性 (比如 360度 = 0度)，但简单场景下直接 MSE 够用
-    #     loss = ((rot_ang - target_angle) ** 2).mean()
+    #     # 计算每一帧的平方误差 [Batch, Length]
+    #     loss_per_frame = (rot_ang - target_angle) ** 2
         
-    #     # 5. 计算 Loss: 逼近 +/- 90 度
-    #     # 正常直走: 角度 ≈ 0, cos(0) = 1 -> Loss 大
-    #     # 侧身行走: 角度 ≈ 90, cos(90) = 0 -> Loss 小
-        
-    #     # cos_ang = torch.cos(rot_ang)
-        
-    #     # 目标是让 cos_ang 接近 0
-    #     # loss = (cos_ang ** 2).mean()
+    #     # === [关键修改] 应用 Mask ===
+    #     if mask is not None:
+    #         # 确保 mask 和 loss 维度一致
+    #         if mask.shape != loss_per_frame.shape:
+    #             # 简单广播保护，视情况而定
+    #             mask = mask.to(loss_per_frame.device)
+            
+    #         # 只取 mask 为 1 的部分的平均值
+    #         # 加上 1e-6 防止除以 0
+    #         loss = (loss_per_frame * mask).sum() / (mask.sum() + 1e-6)
+    #     else:
+    #         loss = loss_per_frame.mean()
         
     #     return loss
+    
     def _compute_side_step_loss(self, latents, t, encoder_hidden_states, lengths, mask=None):
         """
-        mask: [Batch, Length] 的布尔张量或 0/1 张量。
-              如果传入了 mask，只计算 mask 为 True 部分的 Loss。
+        mask: 
+            1. [Batch, Length] 的 Tensor (时序模式)
+            2. List 格式: [[z_start, z_end, val], ...] (物理空间模式)
         """
-        # 1. 预测 & 反推 (保持不变)
+        # 1. 预测 & 反推 
         noise_pred = self.denoiser(sample=latents, timestep=t, encoder_hidden_states=encoder_hidden_states, lengths=lengths)[0]
         alpha_prod_t = self.scheduler.alphas_cumprod[t[0].item()]
         beta_prod_t = 1 - alpha_prod_t
@@ -842,7 +836,7 @@ class MLD(BaseModel):
         d_std = self.std.to(latents.device)
         pred_motion = pred_motion_norm * d_std + d_mean
         
-        rot_vel = pred_motion[..., 0] # [Batch, Length]
+        rot_vel = pred_motion[..., 0] # [B, L]
         rot_ang = torch.cumsum(rot_vel, dim=1)
        
         # 目标：90度 (1.57弧度)
@@ -850,19 +844,58 @@ class MLD(BaseModel):
         target_radian = float(target_degree * np.pi / 180.0)
         target_angle = torch.tensor(target_radian, device=latents.device)
         
-        # 计算每一帧的平方误差 [Batch, Length]
         loss_per_frame = (rot_ang - target_angle) ** 2
         
-        # === [关键修改] 应用 Mask ===
+        # ================= [核心修改：处理空间 Mask] =================
+        # from omegaconf import ListConfig
+        if isinstance(mask, (list, ListConfig)):
+            # 这是空间模式：我们需要根据小人走到哪，动态计算出一个 Tensor mask
+            if isinstance(mask, ListConfig): mask = list(mask)
+            
+            # 算一遍 Z 轴积分 (和天花板一样)
+            local_vel_x = pred_motion[..., 1] 
+            local_vel_z = pred_motion[..., 2] 
+            
+            r_rot_ang = torch.zeros_like(rot_vel)
+            r_rot_ang[..., 1:] = rot_vel[..., :-1]
+            r_rot_ang = torch.cumsum(r_rot_ang, dim=-1)
+            real_angle = r_rot_ang * 2.0 
+            
+            c = torch.cos(real_angle)
+            s = torch.sin(real_angle)
+            
+            vel_x_shifted = torch.zeros_like(local_vel_x)
+            vel_z_shifted = torch.zeros_like(local_vel_z)
+            vel_x_shifted[..., 1:] = local_vel_x[..., :-1]
+            vel_z_shifted[..., 1:] = local_vel_z[..., :-1]
+            
+            global_vel_z = vel_x_shifted * s + vel_z_shifted * c
+            root_world_z = torch.cumsum(global_vel_z, dim=-1)
+            root_world_z = root_world_z - root_world_z[:, 0:1]
+            
+            # 生成 Tensor mask
+            bs, seq_len = pred_motion.shape[:2]
+            tensor_mask = torch.zeros((bs, seq_len), device=latents.device)
+            
+            for segment in mask:
+                z_start, z_end, val = segment
+                if float(val) > 0.5: # 只有开启侧身的值才打 mask
+                    m = (root_world_z.detach() >= z_start) & (root_world_z.detach() <= z_end)
+                    tensor_mask[m] = 1.0
+            
+            mask = tensor_mask # 转换完成！退回到普通 Tensor 模式
+        # ==============================================================
+
+        # === [应用 Mask] ===
         if mask is not None:
-            # 确保 mask 和 loss 维度一致
             if mask.shape != loss_per_frame.shape:
-                # 简单广播保护，视情况而定
                 mask = mask.to(loss_per_frame.device)
             
-            # 只取 mask 为 1 的部分的平均值
-            # 加上 1e-6 防止除以 0
-            loss = (loss_per_frame * mask).sum() / (mask.sum() + 1e-6)
+            # 防御性判断：如果全场都没有触发侧身，这部分 Loss 直接给 0
+            if mask.sum() == 0:
+                loss = torch.tensor(0.0, device=latents.device, requires_grad=True)
+            else:
+                loss = (loss_per_frame * mask).sum() / (mask.sum() + 1e-6)
         else:
             loss = loss_per_frame.mean()
         
@@ -1028,7 +1061,7 @@ class MLD(BaseModel):
                     # total_loss += loss_ceil * c_strength
                     # === [兼容物理空间与时序的调用] ===
                     # === [兼容物理空间与时序的调用] ===
-                    from omegaconf import OmegaConf, ListConfig # 确保导入
+                    # from omegaconf import OmegaConf, ListConfig # 确保导入
                     
                     c_strength = conf.get('CEILING_STRENGTH', 1000.0)
                     c_margin = conf.get('SAFETY_MARGIN', 0.1)
@@ -1137,25 +1170,71 @@ class MLD(BaseModel):
                     total_loss += loss_gap * g_strength
 
                 # ================= [D. 独立侧身引导 (Side Step)] =================
+                # if conf.get('SIDE_STEP_MODE', False):
+                #     # 1. 确定哪些帧需要侧身 (Mask)
+                #     side_mask = None
+                    
+                #     # 优先读取 SIDE_STEP_TIMELINE
+                #     side_timeline = conf.get('SIDE_STEP_TIMELINE', None)
+                    
+                #     if side_timeline is not None and len(side_timeline) > 0:
+                #         # 策略 A: 显式 Timeline 控制
+                #         side_mask = build_mask_tensor(bsz, max_len, side_timeline)
+                    
+                #     elif g_width_tensor is not None:
+                #         # 策略 B: 自动回退 (Fallback)
+                #         # 如果没写侧身 Timeline，但开了 Gap Mode，则根据缝隙宽度自动判断
+                #         side_thresh = conf.get('SIDE_STEP_THRESHOLD', 0.6)
+                #         side_mask = (g_width_tensor < side_thresh).float() # [B, L] 0.0 or 1.0
+                    
+                #     # 2. 如果确定了 mask 且不全为 0，计算 Loss
+                #     if side_mask is not None and side_mask.sum() > 0:
+                #         if t.dim() == 0: t_input = t.unsqueeze(0).repeat(bsz)
+                #         else: t_input = t
+                        
+                #         side_strength = conf.get('SIDE_STEP_STRENGTH', 1500.0)
+                        
+                #         loss_side = self._compute_side_step_loss(
+                #             current_latents, t_input,
+                #             ctx['cond_embeddings'], ctx['lengths'],
+                #             mask=side_mask # <--- 传入 Mask
+                #         )
+                #         total_loss += loss_side * side_strength
+                
+                # ================= [D. 独立侧身引导 (Side Step)] =================
                 if conf.get('SIDE_STEP_MODE', False):
-                    # 1. 确定哪些帧需要侧身 (Mask)
                     side_mask = None
                     
-                    # 优先读取 SIDE_STEP_TIMELINE
-                    side_timeline = conf.get('SIDE_STEP_TIMELINE', None)
+                    # print(f">>> [DEBUG] 计算侧身引导，当前 t={t_val}, Batch Size={bsz}, Max Len={max_len}")
+                    # --- 优先读取空间配置 (新增) ---
+                    # from omegaconf import OmegaConf, ListConfig
+                    spatial_side_cfg = conf.get('SIDE_STEP_SPATIAL', None)
                     
-                    if side_timeline is not None and len(side_timeline) > 0:
-                        # 策略 A: 显式 Timeline 控制
-                        side_mask = build_mask_tensor(bsz, max_len, side_timeline)
+                    if spatial_side_cfg is not None and len(spatial_side_cfg) > 0:
+                        # 策略 A: 空间模式！把 List 传下去
+                        if isinstance(spatial_side_cfg, ListConfig):
+                            spatial_side_cfg = OmegaConf.to_container(spatial_side_cfg, resolve=True)
+                        side_mask = spatial_side_cfg
+                        
+                    else:
+                        # --- 回退读取时序配置 (旧有逻辑保持不变) ---
+                        side_timeline = conf.get('SIDE_STEP_TIMELINE', None)
+                        if side_timeline is not None and len(side_timeline) > 0:
+                            # 策略 B: 显式 Timeline 控制
+                            side_mask = build_mask_tensor(bsz, max_len, side_timeline)
+                        
+                        elif g_width_tensor is not None:
+                            # 策略 C: 自动回退 (Fallback)
+                            side_thresh = conf.get('SIDE_STEP_THRESHOLD', 0.6)
+                            side_mask = (g_width_tensor < side_thresh).float() # [B, L] 0.0 or 1.0
                     
-                    elif g_width_tensor is not None:
-                        # 策略 B: 自动回退 (Fallback)
-                        # 如果没写侧身 Timeline，但开了 Gap Mode，则根据缝隙宽度自动判断
-                        side_thresh = conf.get('SIDE_STEP_THRESHOLD', 0.6)
-                        side_mask = (g_width_tensor < side_thresh).float() # [B, L] 0.0 or 1.0
+                    # 2. 计算 Loss
+                    # 注意：如果 side_mask 是 List（空间模式），我们直接算！
+                    # 如果 side_mask 是 Tensor（时序模式），确保它 sum() > 0 再算！
+                    is_list_mask = isinstance(side_mask, list)
+                    is_tensor_active = isinstance(side_mask, torch.Tensor) and side_mask.sum() > 0
                     
-                    # 2. 如果确定了 mask 且不全为 0，计算 Loss
-                    if side_mask is not None and side_mask.sum() > 0:
+                    if is_list_mask or is_tensor_active:
                         if t.dim() == 0: t_input = t.unsqueeze(0).repeat(bsz)
                         else: t_input = t
                         
@@ -1164,8 +1243,9 @@ class MLD(BaseModel):
                         loss_side = self._compute_side_step_loss(
                             current_latents, t_input,
                             ctx['cond_embeddings'], ctx['lengths'],
-                            mask=side_mask # <--- 传入 Mask
+                            mask=side_mask # <--- 传入 Mask (可能为List，可能为Tensor)
                         )
+                        # print(f">>> [DEBUG] 侧身引导生效！Loss={loss_side.item():.4f}, Strength={side_strength}")
                         total_loss += loss_side * side_strength
                 
                 # 如果没有 Loss，直接退出

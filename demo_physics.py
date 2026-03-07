@@ -519,6 +519,17 @@ def main():
                 if isinstance(g_spatial, list) and len(g_spatial) > 0:
                     scene_data["gap_spatial"] = g_spatial[0]
         
+         # ==================== [此处为新增的第 3 步：侧身空间参数] ====================
+        # 3. 获取侧身引导空间参数
+        if traj_cfg.get("SIDE_STEP_MODE", False):
+            s_spatial = traj_cfg.get("SIDE_STEP_SPATIAL", None)
+            if s_spatial is not None:
+                if isinstance(s_spatial, ListConfig):
+                    s_spatial = OmegaConf.to_container(s_spatial, resolve=True)
+                if isinstance(s_spatial, list) and len(s_spatial) > 0:
+                    # 写入字典，Blender那边可以读这个 "side_step_spatial" 字段
+                    scene_data["side_step_spatial"] = s_spatial[0]
+                    
         # 3. 只有当确实存在空间约束时，才保存 JSON
         if scene_data:
             # 命名为：原动作名_scene.json (完美匹配你 Blender 脚本的最高优先级)
@@ -577,7 +588,6 @@ def main():
                     # [核心修改] 传入 view_angles=(15, -45) 形成绝佳的侧前方立体视角
                     # (elev=15表示略微抬高相机，azim=-45表示侧前方45度)
                     # 如果你想要纯正侧面，可以改成 (10, 0)
-                    from visual import visual_pos
                     # visual_pos(str(npypath), str(env_mp4path), ceiling_spatial=spatial_cfg, view_angles=(15, -45))
                     # 【修改点】：传 (120, -45) 获得侧前方的完美视角！
                     # visual_pos(str(npypath), str(env_mp4path), ceiling_spatial=spatial_cfg, view_angles=(180, -90))
