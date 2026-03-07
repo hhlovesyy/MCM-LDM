@@ -93,7 +93,21 @@ class CeilingStrategy(BaseSceneStrategy):
             ceiling.scale = (length_x, width_y, thickness)
             
             # 赋予你之前的科技感玻璃材质
-            mat = self.ctx.get_material("CeilingGlass", (0.6, 0.8, 1.0), alpha=0.15, emission=0.0)
+            # mat = self.ctx.get_material("CeilingGlass", (0.6, 0.8, 1.0), alpha=0.15, emission=0.0)
+             # 【修复 1：材质透光度与清晰度调整】
+            mat = self.ctx.get_material("CeilingGlass", (0.6, 0.8, 1.0), alpha=0.1, emission=0.0)
+            
+            if mat.node_tree.nodes.get('Principled BSDF'):
+                bsdf = mat.node_tree.nodes['Principled BSDF']
+                # 开启 100% 玻璃透射 (Transmission)
+                if 'Transmission Weight' in bsdf.inputs:
+                    bsdf.inputs['Transmission Weight'].default_value = 1.0
+                elif 'Transmission' in bsdf.inputs:
+                    bsdf.inputs['Transmission'].default_value = 1.0
+                
+                # 【关键】将粗糙度降近乎 0，去除磨砂模糊感，变成纯净透光玻璃
+                bsdf.inputs['Roughness'].default_value = 0.05
+            
             mat_wire = self.ctx.get_material("CeilingWire", (0.1, 0.1, 0.1), alpha=1.0)
             ceiling.data.materials.append(mat)
             ceiling.data.materials.append(mat_wire)
@@ -1035,6 +1049,63 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
     
     # Create a floor
     plot_floor(data.data, big_plane=False)
+    
+    # ====================================================================
+    
+    # ====================================================================
+    # === 【新增：只有打开开关才计算脚部悬浮补偿】 ===
+    cfg.fix_float = 'True' # 测试强制开启
+    
+    # float_offset = 0.0
+    # if str(cfg.fix_float) == 'True':
+    #     import numpy as np
+    #     feet_indices = list(range(3200, 3450)) + list(range(6600, 6890))
+        
+    #     overall_min = np.min(data.data[:, :, 2])
+    #     feet_min = np.min(data.data[:, feet_indices, 2])
+        
+    #     print(f"🕵️[Debug] 全身最低点 Z: {overall_min:.4f}m | 脚部最低点 Z: {feet_min:.4f}m")
+        
+    #     float_offset = feet_min
+        
+    #     # 限制在 0 ~ 0.5米之间，防止跳跃动作被误伤
+    #     if 0 < float_offset <= 0.5:
+    #         print(f"🦶 [Fix Float] Compensating! Shifting raw vertices down by {float_offset:.4f}m...")
+    #         # 【终极必杀】：直接在底层 NumPy 数组上把所有顶点的 Z 轴减去补偿值！
+    #         # 这样 Blender 加载网格的时候，小人就已经在地面上了，不需要任何位置更新！
+    #         data.data[:, :, 2] -= float_offset
+    #     else:
+    #         float_offset = 0.0
+    
+    # ====================================================================
+    # === 【终极版：自动防穿模 + 手动精准微调】 ===
+    auto_offset = 0.0
+    
+    # 1. 自动计算下降值
+    if str(cfg.fix_float) == 'True':
+        import numpy as np
+        feet_indices = list(range(3200, 3450)) + list(range(6600, 6890))
+        feet_min = np.min(data.data[:, feet_indices, 2])
+        
+        if 0 < feet_min <= 0.5:
+            auto_offset = feet_min
+            print(f"🤖 [Auto Fix] 自动检测到脚部悬空: {auto_offset:.4f}m")
+    
+    # 2. 获取 UI 传过来的手动微调值 (比如 -0.05)
+    # 用 getattr 防止旧代码没传这个参数报错
+    # manual_offset = getattr(cfg, 'z_offset', 0.0) 
+    manual_offset = 0
+    
+    # 3. 如果需要调整，直接降维打击
+    if auto_offset > 0 or manual_offset != 0.0:
+        print(f"📐 [Z-Shift] 自动下拉: {auto_offset:.4f}m | 手动微调: {manual_offset:.4f}m")
+        
+        # 【终极核心】：当前坐标 - 自动补偿值 + 手动微调值
+        # 举例：自动算出该降 0.1m，你觉得不够，手动输入 -0.05m。
+        # 最终效果：Z坐标 - 0.1 - 0.05，小人总共下降 0.15m，稳稳落地！
+        data.data[:, :, 2] = data.data[:, :, 2] - auto_offset + manual_offset
+    # ====================================================================
+    # ====================================================================
 
      # === [关键修复：提升渲染质量] ===
     scn = bpy.context.scene
@@ -1129,6 +1200,15 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
         obj_name = data.load_in_blender(frameidx, mat)
         name = f"{str(index).zfill(4)}"
 
+        #  # ====================================================================
+        # # === 【新增：应用补偿值】 ===
+        # if float_offset > 0:
+        #     for obj_id in obj_name:
+        #         obj = bpy.data.objects.get(obj_id)
+        #         if obj:
+        #             obj.location.z -= float_offset
+        # # ====================================================================
+
         if mode == "video":
             path = os.path.join(frames_folder, f"frame_{name}.png")
         else:
@@ -1140,6 +1220,39 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
             camera.update(data.get_root(frameidx))
 
         if mode != "sequence" or islast:
+            
+            # ==========================================================
+            # test
+            cfg.camera_view = "side" # "normal", "side", "front"
+            # 【新增：定制化摄像机机位 & 智能追踪】
+            if cfg.camera_view != "normal":
+                cam = bpy.context.scene.camera
+                if cam:
+                    import mathutils
+                    
+                    # 1. 获取中心点
+                    root_pos = data.get_mean_root() if mode == "sequence" else data.get_root(frameidx)
+                    
+                    # 2. 智能判断拍摄距离：序列帧需要退得更远！
+                    cam_dist = 9.0 if mode == "sequence" else 4.0
+                    
+                    # 3. 把镜头换成广角 (35mm)，让画面装下更多场景
+                    cam.data.lens = 35 
+                    
+                    if cfg.camera_view == "side":
+                        # 侧视图：退到侧面 cam_dist 米远
+                        cam.location = (root_pos[0], root_pos[1] - cam_dist, 0.8)
+                    elif cfg.camera_view == "front":
+                        # 正视图：退到前方 cam_dist 米远
+                        cam.location = (root_pos[0] + cam_dist, root_pos[1], 0.8)
+
+                    # 4. 强制旋转镜头死死盯住中心点
+                    # Z 轴加 0.8 米，平时看胸口，这样画面中心不偏下
+                    target_point = mathutils.Vector((root_pos[0], root_pos[1], root_pos[2] + 0.8))
+                    direction = target_point - cam.location
+                    cam.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+            # ==========================================================
+            
             render_current_frame(path)
             delete_objs(obj_name)
 
