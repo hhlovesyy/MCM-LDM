@@ -131,7 +131,38 @@ class CeilingStrategy(BaseSceneStrategy):
             mat_floor = self.ctx.get_material("GlossyFloor", (0.3, 0.3, 0.3), alpha=1.0)
             if floor_obj.data.materials: floor_obj.data.materials[0] = mat_floor
             else: floor_obj.data.materials.append(mat_floor)
-    
+  
+# --- 具体策略：狭窄缝隙 (侧身引导) ---
+class NarrowGapStrategy(BaseSceneStrategy):
+    def execute(self, trajectory_points, body_data):
+        print("🧱 Executing Narrow Gap Strategy...")
+        
+        # 1. 尝试从 JSON 中读取空间参数
+        gap_spatial = self.ctx.scene_data.get("side_step_spatial", None)
+        
+        if gap_spatial is not None:
+            # 读取到了！例如[3.0, 400.0, 1.0]
+            z_start = gap_spatial[0]
+            z_end = gap_spatial[1]
+            
+            # 这里的 gap_spatial[2] 是 1.0，但我们强制要求物理缝隙是 0.5 米
+            # 如果你想用 JSON 里的参数控制缝隙，可以写 gap_width = gap_spatial[2]
+            print(f"📦 Found custom narrow gap: {z_start}m to {z_end}m")
+            self.ctx.create_custom_gap(z_start, z_end, gap_width=0.5, height=2.5, thickness=0.2)
+        else:
+            print("🤖 No gap spatial data in JSON, using default demo gap.")
+            # 兜底测试逻辑：如果没配 JSON，默认在 2米 到 8米 之间建一堵墙
+            self.ctx.create_custom_gap(2.0, 8.0, gap_width=0.5, height=2.5, thickness=0.2)
+        
+        # 2. 画指引线
+        super().execute(trajectory_points, body_data)
+        
+        # 3. 增强地面光泽感（在玻璃走廊里反射会很好看）
+        floor_obj = bpy.data.objects.get("SmallPlane") or bpy.data.objects.get("BigPlane")
+        if floor_obj:
+            mat_floor = self.ctx.get_material("GlossyFloor", (0.2, 0.2, 0.2), alpha=1.0)
+            if floor_obj.data.materials: floor_obj.data.materials[0] = mat_floor
+            else: floor_obj.data.materials.append(mat_floor)  
 
 class StormStrategy(BaseSceneStrategy):
     def execute(self, trajectory_points, body_data):
@@ -542,7 +573,11 @@ class SceneDecorator:
             "Snow": StormStrategy,
             
             "Dark": DarkStrategy,       # [新场景]
-            "Darkness": DarkStrategy
+            "Darkness": DarkStrategy,
+            
+            # 【新增：狭窄缝隙注册】
+            "NarrowGap": NarrowGapStrategy,
+            "XiaZhaiFengXi": NarrowGapStrategy
         }
         # ===========================================
 
@@ -797,6 +832,72 @@ class SceneDecorator:
         mod.material_offset = 1  # 使用 Slot 1 (深色材质) 渲染线框
         
         return ceiling
+
+    def create_custom_gap(self, z_start, z_end, gap_width=0.5, height=2.5, thickness=0.2):
+            """
+            【新增：狭窄缝隙生成器】
+            根据前进方向 (Blender X轴) 生成两堵平行的半透明墙。
+            """
+            # 长度与中心点 (X 轴)
+            length_x = abs(z_end - z_start)
+            center_x = (z_start + z_end) / 2.0
+            
+            # 墙体中心的 Y 坐标 (左右方向)
+            left_y = -(gap_width / 2.0) - (thickness / 2.0)
+            right_y = (gap_width / 2.0) + (thickness / 2.0)
+            
+            # 墙体中心的 Z 坐标 (高度)
+            center_z = height / 2.0
+            
+            # 1. 材质设定：高透、浅蓝灰色的清澈玻璃
+            mat_glass = self.get_material("GapGlass", (0.5, 0.7, 0.9), alpha=0.25, emission=0.0)
+            
+            # ==================== [核心修改在这里！！！] ====================
+            # 强制告诉 Blender 引擎：这是一个透明材质，允许视线穿透！
+            mat_glass.blend_method = 'BLEND'       # 开启透明混合
+            mat_glass.shadow_method = 'NONE'       # 关闭阴影（否则两墙中间会黑）
+            mat_glass.show_transparent_back = False # 防止两层玻璃叠加导致看不清
+            # ==============================================================
+
+            if mat_glass.node_tree.nodes.get('Principled BSDF'):
+                bsdf = mat_glass.node_tree.nodes['Principled BSDF']
+                
+                # 【保险起见】：直接在这里强制把 BSDF 的 Alpha 压低到 0.15
+                bsdf.inputs['Alpha'].default_value = 0.15 
+                
+                if 'Transmission Weight' in bsdf.inputs:
+                    bsdf.inputs['Transmission Weight'].default_value = 1.0
+                elif 'Transmission' in bsdf.inputs:
+                    bsdf.inputs['Transmission'].default_value = 1.0
+                bsdf.inputs['Roughness'].default_value = 0.05 # 极低的粗糙度，保持通透
+                
+            # 边框材质，增强立体边界感
+            mat_wire = self.get_material("GapWire", (0.3, 0.4, 0.5), alpha=1.0)
+            
+            # 2. 批量生成两堵墙
+            wall_configs =[
+                ("LeftWall", left_y),
+                ("RightWall", right_y)
+            ]
+            
+            for name_prefix, y_pos in wall_configs:
+                bpy.ops.mesh.primitive_cube_add(
+                    size=1, 
+                    location=(center_x, y_pos, center_z)
+                )
+                wall = bpy.context.object
+                wall.name = f"{name_prefix}_{z_start}_{z_end}"
+                wall.scale = (length_x, thickness, height)
+                
+                # 赋予材质
+                wall.data.materials.append(mat_glass)
+                wall.data.materials.append(mat_wire)
+                
+                # 增加线框修改器 (你的这个设计简直绝了，效果极好)
+                mod = wall.modifiers.new(name="Wireframe", type='WIREFRAME')
+                mod.use_replace = False  
+                mod.thickness = 0.02     
+                mod.material_offset = 1
 
     def load_asset_obj(self, path, loc=(0,0,0), rot=(0,0,0), scale=(1,1,1)):
         """
@@ -1223,7 +1324,7 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
             
             # ==========================================================
             # test
-            cfg.camera_view = "side" # "normal", "side", "front"
+            cfg.camera_view = "normal" # "normal", "side", "front"
             # 【新增：定制化摄像机机位 & 智能追踪】
             if cfg.camera_view != "normal":
                 cam = bpy.context.scene.camera
@@ -1269,3 +1370,5 @@ def render(npydata, trajectory, path, mode, faces_path, gt=False,
 
     else:
         print(f"Frame generated at: {img_path}")
+
+
