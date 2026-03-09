@@ -148,7 +148,7 @@ class NarrowGapStrategy(BaseSceneStrategy):
             # 这里的 gap_spatial[2] 是 1.0，但我们强制要求物理缝隙是 0.5 米
             # 如果你想用 JSON 里的参数控制缝隙，可以写 gap_width = gap_spatial[2]
             print(f"📦 Found custom narrow gap: {z_start}m to {z_end}m")
-            self.ctx.create_custom_gap(z_start, z_end, gap_width=0.5, height=2.5, thickness=0.2)
+            self.ctx.create_custom_gap(z_start, z_end, gap_width=0.42, height=2.5, thickness=0.2)
         else:
             print("🤖 No gap spatial data in JSON, using default demo gap.")
             # 兜底测试逻辑：如果没配 JSON，默认在 2米 到 8米 之间建一堵墙
@@ -849,30 +849,51 @@ class SceneDecorator:
             # 墙体中心的 Z 坐标 (高度)
             center_z = height / 2.0
             
-            # 1. 材质设定：高透、浅蓝灰色的清澈玻璃
-            mat_glass = self.get_material("GapGlass", (0.5, 0.7, 0.9), alpha=0.25, emission=0.0)
+            # # 1. 材质设定：高透、浅蓝灰色的清澈玻璃
+            # mat_glass = self.get_material("GapGlass", (0.5, 0.7, 0.9), alpha=0.25, emission=0.0)
             
-            # ==================== [核心修改在这里！！！] ====================
-            # 强制告诉 Blender 引擎：这是一个透明材质，允许视线穿透！
-            mat_glass.blend_method = 'BLEND'       # 开启透明混合
-            mat_glass.shadow_method = 'NONE'       # 关闭阴影（否则两墙中间会黑）
-            mat_glass.show_transparent_back = False # 防止两层玻璃叠加导致看不清
-            # ==============================================================
+            # # ==================== [核心修改在这里！！！] ====================
+            # # 强制告诉 Blender 引擎：这是一个透明材质，允许视线穿透！
+            # mat_glass.blend_method = 'BLEND'       # 开启透明混合
+            # mat_glass.shadow_method = 'NONE'       # 关闭阴影（否则两墙中间会黑）
+            # mat_glass.show_transparent_back = False # 防止两层玻璃叠加导致看不清
+            # # ==============================================================
 
+            # if mat_glass.node_tree.nodes.get('Principled BSDF'):
+            #     bsdf = mat_glass.node_tree.nodes['Principled BSDF']
+                
+            #     # 【保险起见】：直接在这里强制把 BSDF 的 Alpha 压低到 0.15
+            #     bsdf.inputs['Alpha'].default_value = 0.15 
+                
+            #     if 'Transmission Weight' in bsdf.inputs:
+            #         bsdf.inputs['Transmission Weight'].default_value = 1.0
+            #     elif 'Transmission' in bsdf.inputs:
+            #         bsdf.inputs['Transmission'].default_value = 1.0
+            #     bsdf.inputs['Roughness'].default_value = 0.05 # 极低的粗糙度，保持通透
+                
+            # # 边框材质，增强立体边界感
+            # mat_wire = self.get_material("GapWire", (0.3, 0.4, 0.5), alpha=1.0)
+            # 1. 材质设定：物理级清澈玻璃（解决深度穿模 Bug）
+            # 【关键修复】：alpha 必须设为 1.0！把透明度交给 Transmission 物理透射处理，这样 Z轴深度计算就绝对不会出错！
+            mat_glass = self.get_material("GapGlass", (0.8, 0.9, 1.0), alpha=1.0, emission=0.0)
+            
             if mat_glass.node_tree.nodes.get('Principled BSDF'):
                 bsdf = mat_glass.node_tree.nodes['Principled BSDF']
-                
-                # 【保险起见】：直接在这里强制把 BSDF 的 Alpha 压低到 0.15
-                bsdf.inputs['Alpha'].default_value = 0.15 
-                
+                # 开启 95% 物理透射 (光线穿过实体)
                 if 'Transmission Weight' in bsdf.inputs:
-                    bsdf.inputs['Transmission Weight'].default_value = 1.0
+                    bsdf.inputs['Transmission Weight'].default_value = 0.95
                 elif 'Transmission' in bsdf.inputs:
-                    bsdf.inputs['Transmission'].default_value = 1.0
-                bsdf.inputs['Roughness'].default_value = 0.05 # 极低的粗糙度，保持通透
+                    bsdf.inputs['Transmission'].default_value = 0.95
                 
-            # 边框材质，增强立体边界感
-            mat_wire = self.get_material("GapWire", (0.3, 0.4, 0.5), alpha=1.0)
+                # 降低粗糙度，保持清澈
+                bsdf.inputs['Roughness'].default_value = 0.05 
+                
+            # 强制更新混合模式（防止缓存导致的问题）
+            mat_glass.blend_method = 'HASHED' # 或 'OPAQUE'，彻底根除 Alpha Blend 的穿插问题
+            mat_glass.shadow_method = 'NONE'
+            
+            # 边框材质（给一点发光感，更有科技感）
+            mat_wire = self.get_material("GapWire", (0.2, 0.5, 0.8), alpha=1.0, emission=0.5)
             
             # 2. 批量生成两堵墙
             wall_configs =[
