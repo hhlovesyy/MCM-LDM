@@ -17,6 +17,20 @@ except ImportError:
     def visual_pos(npy, mp4): pass
 
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from scipy.interpolate import splprep, splev
+import matplotlib.font_manager as fm
+from matplotlib.gridspec import GridSpec  # 引入 GridSpec 用于复杂排版
+
+# 1. 告诉 matplotlib 你的字体文件在哪里
+font_path = '/root/autodl-tmp/MyRepository/MCM-LDM/paper_figures/simhei.ttf'  
+fm.fontManager.addfont(font_path)
+prop = fm.FontProperties(fname=font_path)
+
+# 2. 全局设置 matplotlib 使用这个中文字体
+plt.rcParams['font.sans-serif'] = prop.get_name() 
+# 3. 解决坐标轴负号 '-' 显示为方块的问题
+plt.rcParams['axes.unicode_minus'] = False
 
 def plot_robustness_curve(angles, mses):
     """
@@ -25,26 +39,26 @@ def plot_robustness_curve(angles, mses):
     plt.figure(figsize=(10, 6), dpi=150)
     
     # 绘制主曲线
-    plt.plot(angles, mses, color='#1f77b4', linewidth=2.5, marker='o', markersize=4, label='VAE Recon Error (Avg)')
+    plt.plot(angles, mses, color='#1f77b4', linewidth=2.5, marker='o', markersize=4, label='VAE 重建损失 (Avg)')
     
     # 设定区域
     # 0-30: Safe (Green)
     # 30-60: Trade-off (Orange) - 45度在这里
     # >60: Collapse (Red)
-    plt.axvspan(0, 30, color='green', alpha=0.1, label='Safe Zone')
-    plt.axvspan(30, 60, color='orange', alpha=0.1, label='Trade-off Zone')
-    plt.axvspan(60, 180, color='red', alpha=0.1, label='Collapse Zone')
+    plt.axvspan(0, 30, color='green', alpha=0.1, label='安全区域')
+    plt.axvspan(30, 60, color='orange', alpha=0.1, label='权衡区域')
+    plt.axvspan(60, 180, color='red', alpha=0.1, label='模式坍缩区域')
     
     # 标记 45度
     if 45 in angles:
         idx = angles.index(45)
         val = mses[idx]
-        plt.axvline(x=45, color='red', linestyle='--', linewidth=2, label='Selected (45°)')
+        plt.axvline(x=45, color='red', linestyle='--', linewidth=2, label='最终选择 (45°)')
         plt.scatter([45], [val], color='red', s=100, zorder=5)
     
-    plt.title('Impact of Rotation Augmentation on VAE Reconstruction', fontsize=14)
-    plt.xlabel('Rotation Angle (degrees)', fontsize=12)
-    plt.ylabel('Average MSE', fontsize=12)
+    plt.title('旋转增强对VAE重建损失的影响趋势', fontsize=14)
+    plt.xlabel('旋转角度', fontsize=12)
+    plt.ylabel('平均MSE损失', fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend(loc='upper left')
     
@@ -100,7 +114,7 @@ def apply_rotation(features_phys, angle_deg, device):
     
     return feats
 
-def test_angle(model, dataset, motion_raw, length, angle, output_dir, mean, std, render=False):
+def test_angle(model, dataset, motion_raw, length, angle, output_dir, mean, std, render=False, index=0):
     """
     测试单个角度的重建效果
     """
@@ -135,16 +149,18 @@ def test_angle(model, dataset, motion_raw, length, angle, output_dir, mean, std,
     # GT (旋转后的输入)
     joints_gt = dataset.feats2joints(motion_input.cpu())
     gt_name = f"rot_{angle}_gt"
-    np.save(os.path.join(output_dir, f"{gt_name}.npy"), joints_gt[0].cpu().numpy())
+    if index == 10 and angle in [0, 30, 45, 90]:
+        np.save(os.path.join(output_dir, f"{gt_name}.npy"), joints_gt[0].cpu().numpy())
     
     # Recon (VAE 的输出，需反归一化)
     # recon_phys = recon_output * std + mean
     recon_phys = recon_output
     joints_recon = dataset.feats2joints(recon_phys.cpu())
     recon_name = f"rot_{angle}_recon"
-    np.save(os.path.join(output_dir, f"{recon_name}.npy"), joints_recon[0].cpu().numpy())
+    if index == 10 and angle in [0, 30, 45, 90]:
+        np.save(os.path.join(output_dir, f"{recon_name}.npy"), joints_recon[0].cpu().numpy())
     
-    if render:
+    if render and index == 10:  # 只渲染index=10的那个样本
         # 7. 渲染视频
         print(f"    Rendering videos...")
         try:
@@ -239,7 +255,7 @@ def main():
             
             # 调用你的 test_angle (render=False 加快速度)
             # 注意：这会反复覆盖 npy 文件，这是正常的，我们只需要最后的 MSE
-            mse = test_angle(model, feat_converter, motion_raw, l, angle, output_dir, mean, std, render=False)
+            mse = test_angle(model, feat_converter, motion_raw, l, angle, output_dir, mean, std, render=True, index=i)
             total_mse += mse
             
         # 计算该角度的平均 MSE

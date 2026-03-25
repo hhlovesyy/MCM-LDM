@@ -461,6 +461,9 @@ def main():
                 visual_pos(npypath, mp4path)
             traj_npypath = str(output_dir / f"{save_name}_givenTraj.npy")
             np.save(traj_npypath, hint_trajectory)
+            # debug一下保存的路径
+            print("save path is: ", traj_npypath)
+
 
     print("✅ All Done!")
     # 记录结束时间

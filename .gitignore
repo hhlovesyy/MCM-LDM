@@ -63,3 +63,4 @@ evaluation*.txt
 /human_body_prior
 /tests
 /logs
+/test_vae_results

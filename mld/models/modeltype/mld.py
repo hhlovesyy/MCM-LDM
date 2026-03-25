@@ -970,6 +970,7 @@ class MLD(BaseModel):
         # 1. 如果没有 Scene Data 或不启用轨迹，直接回退到 Content 自身的轨迹
         if scene_data is None or not self.cfg.TRAJECTORY.ENABLED:
             trans_motion = batch['content_motion'].clone() # torch.Size([6, 179, 263])
+            trans_motion = (trans_motion - self.mean.to(device)) / self.std.to(device)
             if self.cfg.TRAJECTORY.ROOT_MASKING_DIM4:
                 trans_cond_input = trans_motion[..., :4]
             else:
@@ -1114,12 +1115,15 @@ class MLD(BaseModel):
         
         scene_cfg_scale = self.cfg.DEMO.film_scalar
 
-        if self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "film":
-            adapted_style = self._apply_film_fusion(motion_emb_cond, scene_feat, dummy_mask, scene_scale_factor=scene_cfg_scale)
-        else:
-            adapted_style = self._apply_mlp_fusion(motion_emb_cond, scene_feat)
+        if use_scene:
+            if self.cfg.SCENE_MODIFF_ABLATION.FUSION_MODE == "film":
+                adapted_style = self._apply_film_fusion(motion_emb_cond, scene_feat, dummy_mask, scene_scale_factor=scene_cfg_scale)
+            else:
+                adapted_style = self._apply_mlp_fusion(motion_emb_cond, scene_feat)
             
-        adapted_style = self.style_norm(adapted_style)
+            adapted_style = self.style_norm(adapted_style)
+        else:
+            adapted_style = motion_emb_cond
 
         uncond_style = torch.zeros_like(adapted_style)
         motion_emb_cfg = torch.cat([uncond_style, adapted_style], dim=0)
@@ -1342,6 +1346,9 @@ class MLD(BaseModel):
             lengths=lengths_input,
         )[0] # torch.Size([12, 7, 256])
 
+        # print("cfg_factor: ", cfg_factor)
+        # print("scale_style: ", scale_style)
+        # print("scale_scene: ", scale_scene)
         # 3. 应用 CFG 公式
         if cfg_factor == 1:
             return noise_pred
