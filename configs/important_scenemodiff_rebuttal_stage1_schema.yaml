@@ -42,7 +42,7 @@ TRAIN:
 #####################################
 TEST:
   # CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
-  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_0222_Stage1/checkpoints/epoch=299.ckpt'
+  CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_0222_Stage1/checkpoints/epoch=349.ckpt'
   # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=449.ckpt'
   MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
   MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
