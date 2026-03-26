@@ -1,0 +1,34 @@
+# motion_pipeline.yaml
+baselines:
+  MCM-LDM:
+    adapter_class: "MCMAdapter"
+    features:
+      output_format: ".npy"
+      has_trajectory_hint: false  # 基础的 MCM-LDM 没有强轨迹引导
+      
+  OmniControl:
+    adapter_class: "OmniControlAdapter"
+    features:
+      output_format: ".npy"
+      has_trajectory_hint: true
+
+  GMD:
+    adapter_class: "GMDAdapter"
+    features:
+      output_format: ".npz"
+      has_trajectory_hint: true
+
+scenes:
+  Default:
+    decorator_class: "NullSceneDecorator" # 空装饰器，原样输出
+    config_file: null
+    render_flags:
+      show_trajectory: false
+      show_obstacles: false
+
+  Dumuqiao:
+    decorator_class: "StandardSceneDecorator"
+    config_file: "configs/dumuqiao.json"
+    render_flags:
+      show_trajectory: true
+      show_obstacles: true

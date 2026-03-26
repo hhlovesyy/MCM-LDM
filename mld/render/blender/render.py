@@ -13,6 +13,7 @@ from mld.render.video import Video
 import numpy as np
 import bmesh
 import math
+import mathutils
 
 # --- 抽象基类: 策略模式+注册表 ---
 class BaseSceneStrategy:
@@ -827,6 +828,9 @@ class SceneDecorator:
 
 
     def create_guidance_ribbon(self, points):
+        # TODO: 暂时改成绘制箭头，有需要的话再改回去
+        self.draw_guidance_path_with_arrow(points)
+        return
         """
         【优化需求1】把指引轨迹画成半透明的带子/箭头，而不是 Zigzag 的线条
         """
@@ -848,6 +852,74 @@ class SceneDecorator:
         # 材质：发光、半透明青色
         mat = self.get_material("GuideMat", (1.0, 0.5, 0.0), alpha=0.2, emission=0.6)
         obj.data.materials.append(mat)
+    
+    def draw_guidance_path_with_arrow(self, coords, color=(1.0, 0.1, 0.1, 1.0)):
+        """
+        绘制游戏UI级别的指引轨迹：密集的发光点阵 + 终点方向箭头
+        
+        :param coords: shape (N, 3) 的轨迹点数组
+        :param color: RGBA 颜色，默认亮红色，形成高对比度
+        """
+        if len(coords) < 2:
+            return
+
+        # 1. 创建全局发光材质
+        mat_name = "GuidancePathMat"
+        mat = bpy.data.materials.get(mat_name)
+        if not mat:
+            mat = bpy.data.materials.new(name=mat_name)
+            mat.use_nodes = True
+            bsdf = mat.node_tree.nodes["Principled BSDF"]
+            bsdf.inputs['Base Color'].default_value = color
+            
+            if 'Emission' in bsdf.inputs:
+                bsdf.inputs['Emission'].default_value = color
+                bsdf.inputs['Emission Strength'].default_value = 3.0 # 提高发光强度，使其像霓虹灯
+
+        # 2. 绘制密集的路径点阵 (小一点，贴地)
+        # 这里 step 设为 2 或 3，保证密集度，又能稍微节省一点渲染资源
+        for i in range(0, len(coords) - 1, 2):
+            pt = coords[i]
+            # 画极小的扁平球体作为路径点，Z轴贴地 (0.02)
+            bpy.ops.mesh.primitive_uv_sphere_add(
+                radius=0.03, 
+                location=(pt[0], pt[1], 0.02)
+            )
+            dot_obj = bpy.context.active_object
+            dot_obj.name = f"GuideDot_{i}"
+            
+            if dot_obj.data.materials:
+                dot_obj.data.materials[0] = mat
+            else:
+                dot_obj.data.materials.append(mat)
+
+        # 3. 在轨迹的最末端，计算方向并画一个醒目的终点箭头
+        last_pt = mathutils.Vector((coords[-1][0], coords[-1][1], 0.05))
+        prev_pt = mathutils.Vector((coords[-5][0], coords[-5][1], 0.05)) # 取倒数第5个点算切线更稳定
+        
+        direction = last_pt - prev_pt
+        if direction.length > 0.001:
+            rot_quat = direction.to_track_quat('Z', 'Y')
+            
+            # 画一个比路径点大得多的箭头
+            bpy.ops.mesh.primitive_cone_add(
+                vertices=32,
+                radius1=0.08,   # 箭头够宽
+                depth=0.4,      # 箭头够长
+                location=last_pt
+            )
+            
+            arrow_obj = bpy.context.active_object
+            arrow_obj.name = "GuideTerminalArrow"
+            arrow_obj.rotation_mode = 'QUATERNION'
+            arrow_obj.rotation_quaternion = rot_quat
+            
+            if arrow_obj.data.materials:
+                arrow_obj.data.materials[0] = mat
+            else:
+                arrow_obj.data.materials.append(mat)
+                
+        bpy.ops.object.mode_set(mode='OBJECT')
 
     def create_fractal_tree(self, location=(0,0,0), scale=1.0):
         """

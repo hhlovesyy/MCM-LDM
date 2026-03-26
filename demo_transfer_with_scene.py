@@ -239,7 +239,7 @@ def main():
                         'style_transfer' + cfg.DEMO.TIME))
         output_dir.mkdir(parents=True, exist_ok=True)
     else:
-        output_dir = Path(os.path.join(demo_out_dir, demo_exp_name))
+        output_dir = Path(os.path.join(demo_out_dir, demo_exp_name, 'style_transfer' + cfg.DEMO.TIME))
         print(f"checkout output_dir: {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -271,7 +271,10 @@ def main():
     with open(json_path, 'r', encoding='utf-8') as f:
         scene_data = json.load(f)
 
-    
+    # 保存一份到生成的文件夹当中
+    json_dst_path = str(output_dir / "path_and_obstable.json")
+    shutil.copy2(json_path, json_dst_path)
+
 
     scale = cfg.DEMO.scale
     target_scene_label = "BaoFengYu" #  应该是用不上了，但为了保留字段
@@ -451,6 +454,7 @@ def main():
             # 保存 NPY
             npypath = str(output_dir / f"{save_name}.npy")
             np.save(npypath, motion_res)
+            print("motion_res.shape", np.shape(motion_res))
             
             # # 保存 Scene JSON
             # scene_info_path = npypath.replace('.npy', '_scene.json')
@@ -461,6 +465,7 @@ def main():
                 visual_pos(npypath, mp4path)
             traj_npypath = str(output_dir / f"{save_name}_givenTraj.npy")
             np.save(traj_npypath, hint_trajectory)
+            print("hint_trajectory.shape", np.shape(hint_trajectory))
             # debug一下保存的路径
             print("save path is: ", traj_npypath)
 

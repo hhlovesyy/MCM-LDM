@@ -112,7 +112,7 @@ def convert_npy_to_pkl(npy_file_path, pkl_output_path, title="SceneMoDiff result
         joints_data, hint = load_motion_compat(npy_file_path)
         hint = None
         if os.path.exists(npy_trajectory_file_path) and hint is None:
-            npy_trajectory_data = np.load(npy_trajectory_file_path)
+            npy_trajectory_data = np.load(npy_trajectory_file_path, allow_pickle=True)
         else:
             npy_trajectory_data = hint
         

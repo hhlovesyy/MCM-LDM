@@ -147,6 +147,10 @@ while [[ $# -gt 0 ]]; do
       USE_HINT="True"
       shift # boolean flag, no value needed usually, but logic depends on python arg parser
       ;;
+    --model_type)
+      MODEL_TYPE="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1"
       shift
@@ -174,8 +178,8 @@ echo "Mode: $RENDER_MODE"
 # --- 4. 执行流程 ---
 
 # [步骤 1] NPY -> PKL
-echo -e "\n${YELLOW}[1/3] NPY -> PKL...${NC}"
-python npy2pkl.py --input_folder="$INPUT_NPY_FOLDER"
+echo -e "\n[1/3] Motion Compiling (Adapter: $MODEL_TYPE)..."
+python motion_compiler.py --input_folder="$INPUT_NPY_FOLDER" --model_type="$MODEL_TYPE" --scene_name="$SCENE_NAME"
 if [ $? -ne 0 ]; then echo -e "${RED}Failed at Step 1${NC}"; exit 1; fi
 
 # [步骤 2] SMPL Fitting

@@ -1,0 +1,191 @@
+NAME: BigMotion0325
+DEBUG: False
+ACCELERATOR: 'gpu'
+DEVICE: [0]
+
+SCENE_MODIFF_ABLATION: # 必要字段，训练或者推理的时候使用的与场景相关的逻辑
+  FUSION_MODE: "film"  # 消融的话是“mlp”
+  USE_SCENE_CLS: True      # 是否使用场景分类 Loss，消融掉的话是False
+  LAMBDA_SCENE: 0.2       # 场景分类 Loss 的权重，如果测试消融FiLM的话，这个值不要改；如果要尝试炼丹，估计先试试改这个值
+  UPDATE_BASELINE: True  # 保持这个就挺好，这个是论文里面写的那个涨点模块，没崩了就一直开着吧
+
+  JUST_FINETUNE_BASELINE: True # 只微调 baseline 部分，没有新增模块，注意只有FintuneBaseline那个yaml里面是True，其他的都应该是False
+
+TRAIN:
+  STAGE: diffusion
+  # DATASETS: ['stylescenedataset']
+  DATASETS: ['humanml3d']  # 如果是第一阶段轨迹解耦，是humanml3d数据集，但是应该没法再train了，第二阶段都是stylescenedataset
+  # Number of dataloader workers
+  NUM_WORKERS: 16
+  # Size of batches
+  BATCH_SIZE: 32  # 小样本数据集，采用小的batch_size应该比较合适
+  # Total epochs for training
+  END_EPOCH: 400
+
+  RESUME: '' # Resume training from this path，如果是同一个训练任务恢复权重用这个，否则用PRETRAINED这个权重
+  PRETRAINED_VAE: 'checkpoints/vae_checkpoint/vae7.ckpt' # vae model path
+  PRETRAINED: ''
+
+  OPTIM:
+    TYPE: AdamW # Optimizer type
+    LR: 2.0e-5 # Learning rate # 微调用这个学习率应该可以
+
+  # Ablation study configurations.
+  ABLATION:
+    SKIP_CONNECT: True
+    PE_TYPE: mld
+    DIFF_PE_TYPE: mld
+    FUSION_MODE: "film"
+
+#####################################
+# The following are testing settings
+#####################################
+TEST:
+  CHECKPOINTS: 'checkpoints/denoiser_checkpoint/denoiser.ckpt' # our model path
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_0222_Stage1/checkpoints/epoch=299.ckpt'
+  # CHECKPOINTS: '/root/autodl-tmp/MyRepository/MCM-LDM/experiments/mld/scenemoDiff_1229_Baseline_no_scene/checkpoints/epoch=449.ckpt'
+  MULTI_MODAL_TYPE: 'text'  # 'text' or 'image'
+  MULTI_MODAL_TEXT_PROMPT: 'Walking in strong wind.'
+
+  DATASETS: ['humanml3d'] # training datasets
+  SPLIT: test
+  BATCH_SIZE: 128 # training Batch size
+  MEAN: False
+  NUM_SAMPLES: 1
+  FACT: 1
+ 
+  MULTI_MODAL_IMAGE_PATH: '/root/autodl-tmp/MyRepository/MCM-LDM/datasets/humanml3d_scene/scene_images/Dumuqiao/01.jpg'
+
+#####################################
+# The following are loggers settings
+#####################################
+LOGGER:
+  SACE_CHECKPOINT_EPOCH: 25
+  LOG_EVERY_STEPS: 1
+  VAL_EVERY_STEPS: 100
+  TENSORBOARD: True
+  WANDB:
+    PROJECT: null
+    OFFLINE: False
+    RESUME_ID: null
+  
+# [NOTE:推理！！！请跟训练的保持一致] 这里都是推理的，跟训练不在一个地方填写，务必注意！！！！！！！！！！！！！！！！
+TRAJECTORY: 
+  ENABLED: True  # 是False的话会用content的轨迹,baseline的推理需要把这个改成False
+  # ================= 架构相关 =================
+  # 是否启用强力注入 (Concat 方式)
+  # 如果 False，则回退到原始的 AdaLN 弱注入
+  INJECTION_MODE: 'adaln'  # options: 'concat', 'adaln'
+  
+  # 轨迹编码器类型
+  # 'seq': 输出序列 (我们改的那版)
+  # 'pool': 输出单个 Token (MCM-LDM 原版)
+  # 'dynamic_query': 更新的版本，那个固定k个token作为query的那个
+  ENCODER_TYPE: 'pool'
+  
+  # 根节点屏蔽 (双重保险,屏蔽263维特征向量的前4维)
+  ROOT_MASKING_DIM4: False
+  
+  # ================= 推理引导 (默认值) =================
+  # 这些可以在推理脚本中覆盖，但这里设个默认值
+  GUIDANCE:
+    ENABLED: False
+    STRENGTH: 2.0
+    GUIDANCE_START : 1000  # 去噪开启引导的开始step和结束step
+    GUIDACE_END: 0
+
+    WAYPOINTS_MODE: True # 是否启用关键路点追踪功能
+    WAYPOINTS_GUIDE_STRENGTH: 400.0  # 200
+    WAYPOINTS_INTERVAL: 8 # 8
+
+    OBSTACLE_MODE: False  # 是否启用避障功能
+    OBSTACLE_GUIDE_STRENGTH: 2.0
+
+    STRICT_TRACK_MODE: False  # 是否要严格按照轨迹来走（效果比较差，不建议启用）
+    STRICT_TRACK_STRENGTH: 2.0
+
+# 应该是训练的时候会使用，推理用不到
+SCENEMODIFF_GLOBAL_CONFIG: 
+  JUST_FINETUNE_BASELINE: True # [REBUTTAL]是否仅仅是继续Finetune MCM-LDM（注意，没有任何新东西，只是全量Finetune MCM-LDM的全部代码）
+  ROOT_MASKING_DIM4: False  # [REBUTTAL] 是否屏蔽掉根节点的前四维
+  STEP1_DROP_STYLE_PROB: 0.1  # 在解耦轨迹的第一阶段，style随机dropout的概率是多少
+
+SCENEMODIFF_DENOISER_GLOBAL_CONFIG:
+  INJECTION_MODE: 'adaln'  # options: 'concat', 'adaln'
+  ENCODER_TYPE: 'adaln'  # 'seq'
+
+SCENEMODIFF_GLOBAL_CONFIG_TRAIN:
+  MULTI_MODAL_FUSION: 'text' # 训练的时候如何融合场景多模态？text：只有文本；image：只有图像； mixed：两者混合训练
+  USE_SCENE_CLS: False
+
+# todo：现在的yaml文件太乱了，后面回来记得优化一下，暂时是没有时间了
+
+CURRICULUM:
+  ENABLED: True
+  DEFAULT_STAGE: "stage_1_Geometry_Scene"
+  STAGES:
+    - NAME: "stage_1_Geometry_Scene"
+      EPOCH_START: 0
+      EPOCH_END: 400
+      TRAJECTORY:
+        ROTATION_AUG: True
+        ROTATION_RANGE: 45.0
+        CONTENT_DROPOUT_PROB: 0.1
+        CONTENT_SPARSITY:
+          ENABLED: False # 不稀疏，全给
+          MODE: "first_frame" 
+          NUM_KEY_FRAMES: 5 
+      MASKING:
+        STRATEGY: "keep_style_only"  # 没有场景
+      LOSS:
+        LAMBDA_SCENE: 0.0
+
+#####################################
+# The following are validation settings
+#####################################
+EVAL:
+  DATASETS: ['humanml3d'] # Evaluating datasets
+  BATCH_SIZE: 32 # Evaluating Batch size
+  SPLIT: test
+
+#####################################
+# The following are basic datasets settings
+#####################################
+DATASET:
+  JOINT_TYPE: 'humanml3d' # join type
+
+#####################################
+# The following are metric settings
+#####################################
+METRIC:
+  TYPE: ['TemosMetric', 'TM2TMetrics']
+
+#####################################
+# The following are training losses settings
+#####################################
+LOSS:
+  TYPE: mld # Losses type
+  LAMBDA_LATENT: 1.0e-5 # Lambda for latent Losses
+  LAMBDA_KL: 1.0e-4 # Lambda for kl Losses
+  LAMBDA_REC: 1.0 # Lambda for reconstruction Losses
+  LAMBDA_GEN: 1.0 # Lambda for text-motion generation losses
+  LAMBDA_CROSS: 1.0 # Lambda for reconstruction Losses
+  LAMBDA_CYCLE: 0.0 # Lambda for cycle Losses
+  LAMBDA_PRIOR: 0.0
+  DIST_SYNC_ON_STEP: False # Sync Losses on step when distributed trained
+
+#####################################`
+# The following are basic model settings
+#####################################
+model:
+  vae: true # whether vae model
+  model_type: mld # model type
+  condition: 'text'
+  latent_dim: [7, 256] # latent dimension
+  ff_size: 1024 #
+  num_layers: 9 # number of layers
+  num_head: 4 # number of head layers
+  droupout: 0.1 # dropout rate
+  activation: gelu # activation type
+  guidance_scale: 5 #7.5 5
+  guidance_uncondp: 0.25 # 0.1 0.25

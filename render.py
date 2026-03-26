@@ -4,6 +4,7 @@ import sys
 import math
 import json
 from argparse import ArgumentParser
+from pathlib import Path
 
 try:
     import bpy
@@ -27,7 +28,7 @@ def create_material(name, color_rgba):
         mat.diffuse_color = color_rgba # RGBA
     return mat
 
-def load_and_draw_scene(pkl_path, trajectory):
+def load_and_draw_scene(pkl_path, trajectory, path_and_obstacle_filepathstr=None):
     """
     尝试寻找同名的 _scene.json 并画出障碍物
     """
@@ -35,7 +36,7 @@ def load_and_draw_scene(pkl_path, trajectory):
     # 1. 推断 JSON 路径
     # 假设 pkl 是 ".../name_mesh.pkl"，我们要找 ".../name_scene.json"
     # 或者 ".../name.pkl" -> ".../name_scene.json"
-    json_path = "/root/autodl-tmp/MyRepository/MCM-LDM/task_config.json"
+    json_path = path_and_obstacle_filepathstr
     if not os.path.exists(json_path):
         print(f"[Blender] No scene json found at {json_path}")
         return
@@ -97,22 +98,23 @@ def load_and_draw_scene(pkl_path, trajectory):
     traj = scene_data.get('trajectory', {})
     waypoints = traj.get('points', [])
     
-    # for i, pt in enumerate(waypoints):
-    #     wx, wz = pt
-    #     # 【修正3】坐标映射
-    #     # 原来是 (wx, 0.1, wz) -> 导致 wz 被当成了高度，所以飞出去了
-    #     # 现在改成 (wx, -wz, 0.1) -> 高度固定为 0.1
-    #     bpy.ops.mesh.primitive_uv_sphere_add(
-    #         radius=0.1,
-    #         location=(wz, wx, 0.1)  # 
-    #     )
-    #     sphere = bpy.context.object
-    #     sphere.name = f"Waypoint_{i}"
+    # TODO: 以下是绘制指引点的函数，如果不需要的话记得去掉，有时间后面再改成配置项吧
+    for i, pt in enumerate(waypoints):
+        wx, wz = pt
+        # 【修正3】坐标映射
+        # 原来是 (wx, 0.1, wz) -> 导致 wz 被当成了高度，所以飞出去了
+        # 现在改成 (wx, -wz, 0.1) -> 高度固定为 0.1
+        bpy.ops.mesh.primitive_uv_sphere_add(
+            radius=0.1,
+            location=(wz, wx, 0.1)  # 
+        )
+        sphere = bpy.context.object
+        sphere.name = f"Waypoint_{i}"
         
-    #     if sphere.data.materials:
-    #         sphere.data.materials[0] = mat_way
-    #     else:
-    #         sphere.data.materials.append(mat_way)
+        if sphere.data.materials:
+            sphere.data.materials[0] = mat_way
+        else:
+            sphere.data.materials.append(mat_way)
             
     print("[Blender] Scene objects added (Z-up corrected).")
 
@@ -205,8 +207,11 @@ def render_cli() -> None:
         except FileNotFoundError:
             print(f"{path} not found")
             continue
-
-        load_and_draw_scene(path, trajectory)
+        
+        current_file_path = Path(path)
+        path_and_obstacle_filepath = current_file_path.parent / "path_and_obstable.json"
+        path_and_obstacle_filepathstr = str(path_and_obstacle_filepath)
+        load_and_draw_scene(path, trajectory, path_and_obstacle_filepathstr)
         render(
             data,
             trajectory,
