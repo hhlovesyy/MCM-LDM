@@ -26,6 +26,41 @@ class SubmitRequest(BaseModel):
     exp_name: str
     motion_index: int = 0
 
+def init_job(job_id: str, exp_name: str, motion_index: int):
+    JOBS[job_id] = {
+        "status": "queued",
+        "stage": "accepted",
+        "message": "job accepted",
+        "exp_name": exp_name,
+        "motion_index": motion_index,
+        "fbx_path": None,
+        "file_name": None,
+        "created_at": time.time(),
+        "elapsed_seconds": 0.0,
+        "error_message": "",
+        "error_detail": ""
+    }
+
+def update_job(job_id: str, *, status=None, stage=None, message=None, file_name=None, fbx_path=None, error_message=None, error_detail=None):
+    job = JOBS[job_id]
+
+    if status is not None:
+        job["status"] = status
+    if stage is not None:
+        job["stage"] = stage
+    if message is not None:
+        job["message"] = message
+    if file_name is not None:
+        job["file_name"] = file_name
+    if fbx_path is not None:
+        job["fbx_path"] = fbx_path
+    if error_message is not None:
+        job["error_message"] = error_message
+    if error_detail is not None:
+        job["error_detail"] = error_detail
+
+    job["elapsed_seconds"] = time.time() - job["created_at"]
+
 def find_latest_style_transfer_dir(exp_name: str) -> Path:
     exp_root = RESULTS_ROOT / exp_name
     if not exp_root.exists():
@@ -57,8 +92,7 @@ def run_pipeline(job_id: str, exp_name: str, motion_index: int):
     job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        JOBS[job_id]["status"] = "running"
-        JOBS[job_id]["message"] = "running model"
+        update_job(job_id, status="running", stage="model_run", message="running model")
 
         # 1) 跑你的模型命令
         cmd = f"""
@@ -75,7 +109,7 @@ python demo_transfer_with_scene.py \
 """
         subprocess.run(["bash", "-lc", cmd], check=True)
 
-        JOBS[job_id]["message"] = "finding latest result dir"
+        update_job(job_id, stage="find_result", message="finding latest result dir")
 
         # 2) 找最新 style_transfer 目录
         latest_result_dir = find_latest_style_transfer_dir(exp_name)
@@ -84,7 +118,7 @@ python demo_transfer_with_scene.py \
         input_npy = find_valid_npy_by_index(latest_result_dir, motion_index)
         print(f"[{job_id}] selected npy = {input_npy.name}")
 
-        JOBS[job_id]["message"] = f"converting {input_npy.name} to fbx"
+        update_job(job_id, stage="blender_convert", message=f"converting {input_npy.name} to fbx")
 
         # 4) 调 Blender 无头转 FBX
         out_fbx = job_dir / f"{input_npy.stem}.fbx"
@@ -103,35 +137,40 @@ python demo_transfer_with_scene.py \
         if not out_fbx.exists():
             raise FileNotFoundError(f"fbx not created: {out_fbx}")
 
-        JOBS[job_id]["status"] = "done"
-        JOBS[job_id]["message"] = "finished"
-        JOBS[job_id]["fbx_path"] = str(out_fbx)
-        JOBS[job_id]["file_name"] = out_fbx.name
+        update_job(
+            job_id,
+            status="done",
+            stage="finished",
+            message="finished",
+            fbx_path=str(out_fbx),
+            file_name=out_fbx.name
+        )
 
     except Exception as e:
-        JOBS[job_id]["status"] = "failed"
-        JOBS[job_id]["message"] = str(e)
+        import traceback
+
+        update_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="pipeline failed",
+            error_message=str(e),
+            error_detail=traceback.format_exc()
+        )
 
 @app.post("/submit")
 def submit_job(req: SubmitRequest, background_tasks: BackgroundTasks):
     job_id = f"job_{uuid.uuid4().hex[:8]}"
 
-    JOBS[job_id] = {
-        "status": "queued",
-        "message": "accepted",
-        "exp_name": req.exp_name,
-        "motion_index": req.motion_index,
-        "fbx_path": None,
-        "file_name": None,
-        "created_at": time.time(),
-    }
+    init_job(job_id, req.exp_name, req.motion_index)
 
-    # 先返回，再后台跑
     background_tasks.add_task(run_pipeline, job_id, req.exp_name, req.motion_index)
 
     return {
+        "ok": True,
         "job_id": job_id,
         "status": "queued",
+        "stage": "accepted",
         "message": "job accepted",
         "exp_name": req.exp_name,
         "motion_index": req.motion_index
@@ -143,11 +182,18 @@ def get_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
 
+    job["elapsed_seconds"] = time.time() - job["created_at"]
+
     return {
+        "ok": job["status"] != "failed",
         "job_id": job_id,
         "status": job["status"],
+        "stage": job["stage"],
         "message": job["message"],
-        "file_name": job["file_name"]
+        "elapsed_seconds": job["elapsed_seconds"],
+        "file_name": job["file_name"],
+        "error_message": job["error_message"],
+        "error_detail": job["error_detail"]
     }
 
 @app.get("/download/{job_id}")
